@@ -121,13 +121,33 @@ class ESIClient:
             raise last_exc
         raise ESIError(0, path, f"gave up after {self.max_retries} attempts: {last_exc}")
 
+    @staticmethod
+    def _body(resp: httpx.Response | None) -> Any:
+        """Parse a JSON body, or return None when there is not one.
+
+        A response under 400 does not guarantee something to parse. ESI
+        answers /contracts/public/items/{id} and /contracts/public/bids/{id}
+        with 204 No Content and the description "Contract expired or recently
+        accepted by player" -- which is a normal outcome, not an error: the
+        contract pricing path lists a region's public contracts and then
+        fetches each candidate's items one at a time, so a contract can expire
+        or be bought in the gap between the two calls. Calling .json() on that
+        empty body raised JSONDecodeError from inside the worker thread and
+        failed the whole sync over one contract that someone else happened to
+        buy, naming neither the contract nor the endpoint in the traceback.
+
+        The content check is there as well as the status check because an
+        empty body is an empty body however it is labelled.
+        """
+        if resp is None or resp.status_code == 204 or not resp.content:
+            return None
+        return resp.json()
+
     def get(self, path: str, **kw) -> Any:
-        resp = self.request("GET", path, **kw)
-        return None if resp is None else resp.json()
+        return self._body(self.request("GET", path, **kw))
 
     def post(self, path: str, json_body: Any, **kw) -> Any:
-        resp = self.request("POST", path, json_body=json_body, **kw)
-        return None if resp is None else resp.json()
+        return self._body(self.request("POST", path, json_body=json_body, **kw))
 
     def paginated(self, path: str, **kw) -> Iterator[list]:
         """Yields each page of an X-Pages endpoint."""
@@ -136,14 +156,18 @@ class ESIClient:
         resp = self.request("GET", path, params=params, **kw)
         if resp is None:
             return
-        yield resp.json()
+        first = self._body(resp)
+        if first is None:
+            return
+        yield first
         pages = int(resp.headers.get("x-pages", 1))
         for page in range(2, pages + 1):
             params["page"] = page
             r = self.request("GET", path, params=params, **kw)
-            if r is None:
+            body = self._body(r)
+            if body is None:
                 return
-            yield r.json()
+            yield body
 
     def all_pages(self, path: str, **kw) -> list:
         out: list = []
