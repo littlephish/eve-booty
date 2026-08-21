@@ -8,7 +8,7 @@ dialog tells you when they are missing).
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QThreadPool, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -30,6 +30,7 @@ from .. import db
 from ..config import SCOPES, Settings
 from ..esi import TokenCache
 from ..esi.auth import delete_refresh_token, load_refresh_token, using_fallback_store
+from .tasks import TaskManager
 from .workers import LoginJob, SyncJob
 
 COL_NAME, COL_CORP, COL_ENABLED, COL_CORP_DATA, COL_TOKEN, COL_SCOPES, COL_LAST, COL_NOTE = range(8)
@@ -42,13 +43,24 @@ HEADERS = [
 class CharactersDialog(QDialog):
     changed = Signal()
 
-    def __init__(self, settings: Settings, tokens: TokenCache, parent: QWidget | None = None):
+    def __init__(
+        self,
+        settings: Settings,
+        tokens: TokenCache,
+        tasks: TaskManager,
+        parent: QWidget | None = None,
+    ):
         super().__init__(parent)
         self.settings = settings
         self.tokens = tokens
         self.conn = db.init()
-        self.pool = QThreadPool.globalInstance()
-        self._inflight: set = set()  # see MainWindow._run() -- same lifetime trap
+        # Shared with the main window rather than a pool of its own: this
+        # dialog is not modal any more, so its work and the window's work are
+        # the same queue, shown in the same status bar, deduplicated against
+        # each other. Two registries would happily sync one character twice.
+        self.tasks = tasks
+        self.tasks.changed.connect(self._render_tasks)
+        self._pending_remove: list[int] = []
 
         self.setWindowTitle("Characters")
         self.resize(1000, 460)
@@ -200,43 +212,65 @@ class CharactersDialog(QDialog):
                 f"{self.settings.redirect_uri} is registered as a callback URL.",
             )
             return
-        self._busy(True, "Opening EVE SSO in your browser…")
         job = LoginJob(self.settings, self.tokens, SCOPES)
-        self._inflight.add(job)  # must outlive this call -- see MainWindow._run()
-        job.signals.progress.connect(lambda m, p: self._busy(True, m, p))
-        job.signals.failed.connect(lambda m, j=job: self._on_failed(m, j))
-        job.signals.finished.connect(lambda r, j=job: self._on_login_done(r, j))
-        self.pool.start(job)
+        task = self.tasks.submit("login", "Link character", job, done=self._after_login)
+        if task is None:
+            self.status.setText("Already waiting on EVE SSO in your browser.")
+            return
+        self.status.setText("Opening EVE SSO in your browser…")
 
-    def _on_login_done(self, result: dict, job=None) -> None:
-        self._inflight.discard(job)
-        self._busy(False)
+    def _after_login(self, result: dict) -> None:
+        """A freshly linked character has a token and no data. Pull it now
+        rather than leaving the user to notice the empty rows and work out
+        that they were supposed to press something."""
+        cid = result["character_id"]
+        name = result["name"]
         self.reload()
         self.changed.emit()
-        self.status.setText(f"Linked {result['name']}. Run a sync to pull their data.")
+        started = self.tasks.submit(
+            f"sync:{cid}", f"Update {name}",
+            SyncJob(
+                self.settings, self.tokens,
+                character_ids=[cid], reprice=False, snapshot=False,
+            ),
+            done=self._after_sync,
+        )
+        self.status.setText(
+            f"Linked {name}. Pulling their data now."
+            if started else
+            f"Linked {name}. An update is already running for them."
+        )
+
+    def _after_sync(self, result: dict) -> None:
+        self.reload()
+        self.changed.emit()
 
     def sync_selected(self) -> None:
         ids = self.selected_ids()
         if not ids:
             QMessageBox.information(self, "Nothing selected", "Select one or more characters.")
             return
-        self._busy(True, "Syncing…")
-        job = SyncJob(self.settings, self.tokens, character_ids=ids)
-        self._inflight.add(job)  # must outlive this call -- see MainWindow._run()
-        job.signals.progress.connect(lambda m, p: self._busy(True, m, p))
-        job.signals.failed.connect(lambda m, j=job: self._on_failed(m, j))
-        job.signals.finished.connect(lambda r, j=job: self._on_sync_done(r, j))
-        self.pool.start(job)
-
-    def _on_sync_done(self, result: dict, job=None) -> None:
-        self._inflight.discard(job)
-        self._busy(False)
-        self.reload()
-        self.changed.emit()
-        warns = result.get("warnings") or []
+        # One task per character rather than one covering all of them, so each
+        # can be cancelled, retried or removed independently.
+        started = 0
+        for cid in ids:
+            row = self.conn.execute(
+                "SELECT name FROM characters WHERE character_id=?", (cid,)
+            ).fetchone()
+            name = (row["name"] if row else None) or str(cid)
+            if self.tasks.submit(
+                f"sync:{cid}", f"Update {name}",
+                SyncJob(
+                    self.settings, self.tokens,
+                    character_ids=[cid], reprice=False, snapshot=False,
+                ),
+                done=self._after_sync,
+            ):
+                started += 1
+        skipped = len(ids) - started
         self.status.setText(
-            f"Synced {result.get('characters', 0)} character(s)"
-            + (f", {len(warns)} warning(s)" if warns else "")
+            f"Updating {started} character(s)."
+            + (f" {skipped} already running." if skipped else "")
         )
 
     def remove_selected(self) -> None:
@@ -257,6 +291,22 @@ class CharactersDialog(QDialog):
         )
         if confirm != QMessageBox.Yes:
             return
+
+        # An update still running for one of these would write its rows back
+        # after the delete, leaving assets owned by a character that no longer
+        # exists and an UPDATE against a row that is gone. Stop it first. A
+        # whole-estate sync counts too -- it covers these characters as well.
+        kinds = tuple(f"sync:{cid}" for cid in ids) + ("sync:all", "sync:characters")
+        if self.tasks.cancel_kinds(kinds):
+            # Cancellation is cooperative, so the job stops at its next
+            # checkpoint rather than now. Hold the delete until it has.
+            self._pending_remove = ids
+            self.status.setText("Stopping updates before removing…")
+            self._render_tasks()
+            return
+        self._remove_now(ids)
+
+    def _remove_now(self, ids: list[int]) -> None:
         for cid in ids:
             for table in (
                 "assets", "wallets", "market_orders", "contracts", "industry_jobs", "blueprints"
@@ -267,24 +317,26 @@ class CharactersDialog(QDialog):
             self.conn.execute("DELETE FROM characters WHERE character_id=?", (cid,))
             delete_refresh_token(cid)
             self.tokens.forget(cid)
+        self.status.setText(f"Removed {len(ids)} character(s).")
         self.reload()
         self.changed.emit()
 
     # ------------------------------------------------------------------- misc
-    def _busy(self, busy: bool, message: str = "", pct: int | None = None) -> None:
-        self.progress.setVisible(busy)
-        if pct is not None:
-            self.progress.setRange(0, 100)
-            self.progress.setValue(pct)
-        elif busy:
-            self.progress.setRange(0, 0)
-        if message:
-            self.status.setText(message)
-        for b in (self.btn_add, self.btn_reauth, self.btn_sync, self.btn_remove):
-            b.setEnabled(not busy)
+    def _render_tasks(self) -> None:
+        """The dialog no longer owns any progress of its own -- the status bar
+        does. All that is left here is the SSO round trip, which is worth
+        calling out because it is waiting on a browser window rather than on
+        us, and the deferred removal."""
+        login_running = self.tasks.is_active("login")
+        self.progress.setVisible(login_running)
+        if login_running:
+            self.progress.setRange(0, 0)     # waiting on a human, not on bytes
+        self.btn_add.setEnabled(not login_running)
+        self.btn_reauth.setEnabled(not login_running)
 
-    def _on_failed(self, message: str, job=None) -> None:
-        self._inflight.discard(job)
-        self._busy(False)
-        self.status.setText(message)
-        QMessageBox.critical(self, "Failed", message)
+        if self._pending_remove:
+            kinds = tuple(f"sync:{cid}" for cid in self._pending_remove)
+            still_going = self.tasks.any_active(kinds + ("sync:all", "sync:characters"))
+            if not still_going:
+                ids, self._pending_remove = self._pending_remove, []
+                self._remove_now(ids)

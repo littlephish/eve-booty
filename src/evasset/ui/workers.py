@@ -26,7 +26,21 @@ class Job(QRunnable):
     def __init__(self):
         super().__init__()
         self.signals = WorkerSignals()
-        self.setAutoDelete(True)
+        # TaskManager owns the Python-side lifetime of every job and may still
+        # want to call cancel() on one that has just finished. Letting Qt
+        # delete the C++ half out from under that wrapper is how you turn a
+        # tidy little race into an access violation, so ownership stays in one
+        # place: Python's, until the registry lets go.
+        self.setAutoDelete(False)
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """Ask the job to stop. Cooperative -- run_job has to check."""
+        self._cancelled = True
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled
 
     def _progress(self, msg: str, pct: int) -> None:
         self.signals.progress.emit(msg, pct)
@@ -138,14 +152,26 @@ class SyncJob(Job):
             if not chars:
                 return {"characters": 0, "warnings": ["No enabled characters to sync."]}
 
+            done_count = 0
             for i, row in enumerate(chars):
+                if self.cancelled:
+                    break
                 base = int(i * 70 / len(chars))
                 span = int(70 / len(chars))
 
                 def relay(msg, pct, _b=base, _s=span):
                     self._progress(msg, _b + int(pct * _s / 100))
 
-                warnings += syncer.sync_character(row, relay)
+                warnings += syncer.sync_character(
+                    row, relay, should_stop=lambda: self.cancelled
+                )
+                done_count += 1
+
+            if self.cancelled:
+                self._progress("Cancelled", 100)
+                for w in warnings:
+                    self.signals.warning.emit(w)
+                return {"cancelled": True, "characters": done_count, "warnings": warnings}
 
             if self.reprice:
                 def price_relay(msg, pct):

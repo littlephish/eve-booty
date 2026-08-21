@@ -70,8 +70,17 @@ class Syncer:
         return list(self.conn.execute("SELECT * FROM characters WHERE enabled=1 ORDER BY name"))
 
     # ------------------------------------------------------------------ main
-    def sync_character(self, row: sqlite3.Row, progress: Progress | None = None) -> list[str]:
-        """Pull everything we have scopes for. Returns a list of soft warnings."""
+    def sync_character(
+        self,
+        row: sqlite3.Row,
+        progress: Progress | None = None,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> list[str]:
+        """Pull everything we have scopes for. Returns a list of soft warnings.
+
+        should_stop is polled between steps: a character with a lot of
+        contracts can take minutes, and a cancel that only lands between
+        characters is not much of a cancel."""
         cid = row["character_id"]
         scopes = (row["scopes"] or "").split()
         warnings: list[str] = []
@@ -86,6 +95,8 @@ class Syncer:
             ("blueprints", "esi-characters.read_blueprints.v1", self._char_blueprints),
         ]
         for i, (label, scope, fn) in enumerate(steps):
+            if should_stop is not None and should_stop():
+                return warnings
             if progress:
                 progress(f"{row['name']}: {label}", int(i * 100 / len(steps)))
             if not _has(scopes, scope):

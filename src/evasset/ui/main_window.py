@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QThreadPool, QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
-    QLabel,
     QMainWindow,
     QMessageBox,
-    QProgressBar,
     QTabWidget,
     QTextEdit,
     QVBoxLayout,
@@ -23,6 +21,8 @@ from .async_query import AsyncQuery
 from .characters_dialog import CharactersDialog
 from .networth_view import NetWorthView
 from .settings_dialog import SettingsDialog
+from .task_bar import TaskBar
+from .tasks import TaskManager
 from .wallet_view import WalletView
 from .workers import RepriceJob, SdeUpdateJob, SnapshotJob, SyncJob
 
@@ -33,9 +33,8 @@ class MainWindow(QMainWindow):
         self.settings = settings
         self.tokens = TokenCache(settings)
         self.conn = db.init()
-        self.pool = QThreadPool.globalInstance()
         self._warnings: list[str] = []
-        self._inflight: set = set()  # jobs still running -- see _run()
+        self.tasks = TaskManager(self)
 
         self.setWindowTitle("EVE Assets")
         self.resize(1440, 880)
@@ -81,6 +80,12 @@ class MainWindow(QMainWindow):
         self.overview.filter_assets_requested.connect(self._filter_assets_from_overview)
         self._status_query = AsyncQuery(self)
 
+        # Connected here rather than next to the TaskManager itself: warned
+        # lands in the log pane, which does not exist until the tabs are up.
+        self.tasks.warned.connect(self.log.add)
+        self.tasks.failed.connect(self._on_task_failed)
+        self.tasks.finished.connect(self._on_task_finished)
+
         self._build_actions()
         self._build_statusbar()
         self._refresh_status()
@@ -94,34 +99,50 @@ class MainWindow(QMainWindow):
         bar = self.addToolBar("Main")
         bar.setMovable(False)
 
-        self.act_sync = QAction("Sync all", self)
+        self.act_sync = QAction("All", self)
         self.act_sync.setShortcut(QKeySequence("F5"))
         self.act_sync.triggered.connect(self.sync_all)
+
+        self.act_chars_all = QAction("All characters", self)
+        self.act_chars_all.setToolTip("Pull every character's data, without repricing")
+        self.act_chars_all.triggered.connect(self.sync_characters)
 
         self.act_chars = QAction("Characters…", self)
         self.act_chars.triggered.connect(self.open_characters)
 
-        self.act_prices = QAction("Update prices", self)
+        self.act_prices = QAction("Prices", self)
         self.act_prices.triggered.connect(self.reprice)
 
-        self.act_snapshot = QAction("Snapshot now", self)
+        self.act_snapshot = QAction("Net worth snapshot", self)
         self.act_snapshot.triggered.connect(self.snapshot)
 
-        self.act_sde = QAction("Update game data", self)
+        self.act_sde = QAction("Game data", self)
         self.act_sde.triggered.connect(self.update_sde)
 
         self.act_settings = QAction("Settings…", self)
         self.act_settings.triggered.connect(self.open_settings)
 
-        for act in (
-            self.act_sync, self.act_chars, self.act_prices,
-            self.act_snapshot, self.act_sde, self.act_settings,
+        # Separate actions from the menu ones on purpose. "All" and "Prices"
+        # read correctly under a menu titled Update; on a bare toolbar they
+        # have nothing to qualify them. A QAction carries a single text, so
+        # the same object cannot be worded both ways -- it has to be two.
+        self._toolbar_actions = []
+        for label, slot, tip in (
+            ("Update all", self.sync_all, "Sync every character, then reprice and snapshot"),
+            ("Characters…", self.open_characters, "Add, remove and authorise characters"),
+            ("Update prices", self.reprice, "Refresh market prices only"),
+            ("Snapshot", self.snapshot, "Record net worth now"),
+            ("Update game data", self.update_sde, "Check for a newer Static Data Export"),
+            ("Settings…", self.open_settings, "Application settings"),
         ):
+            act = QAction(label, self)
+            act.setToolTip(tip)
+            act.triggered.connect(slot)
             bar.addAction(act)
+            self._toolbar_actions.append(act)
 
         menu = self.menuBar()
-        file_menu = menu.addMenu("&File")
-        file_menu.addAction(self.act_sync)
+        self.file_menu = file_menu = menu.addMenu("&File")
         file_menu.addAction(self.act_chars)
         file_menu.addAction(self.act_settings)
         file_menu.addSeparator()
@@ -130,28 +151,33 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
-        data_menu = menu.addMenu("&Data")
-        data_menu.addAction(self.act_prices)
-        data_menu.addAction(self.act_snapshot)
-        data_menu.addAction(self.act_sde)
+        # Everything that refreshes data lives here, widest scope first, so
+        # the common case is the first thing you land on and the specific
+        # pulls are below it rather than scattered across File and Data.
+        self.update_menu = update_menu = menu.addMenu("&Update")
+        update_menu.addAction(self.act_sync)
+        update_menu.addAction(self.act_chars_all)
+        self.char_menu = update_menu.addMenu("Character")
+        self.char_menu.aboutToShow.connect(self._populate_character_menu)
+        update_menu.addSeparator()
+        update_menu.addAction(self.act_prices)
+        update_menu.addAction(self.act_sde)
+        update_menu.addAction(self.act_snapshot)
 
         self.act_reset_sort = QAction("Reset sort", self)
         self.act_reset_sort.triggered.connect(self._reset_sort)
-        view_menu = menu.addMenu("&View")
+        self.view_menu = view_menu = menu.addMenu("&View")
         view_menu.addAction(self.act_reset_sort)
 
-        help_menu = menu.addMenu("&Help")
+        self.help_menu = help_menu = menu.addMenu("&Help")
         about = QAction("About", self)
         about.triggered.connect(self.about)
         help_menu.addAction(about)
 
     def _build_statusbar(self) -> None:
-        self.progress = QProgressBar()
-        self.progress.setMaximumWidth(220)
-        self.progress.setVisible(False)
-        self.status_label = QLabel("")
-        self.statusBar().addWidget(self.status_label, 1)
-        self.statusBar().addPermanentWidget(self.progress)
+        self.task_bar = TaskBar(self.tasks, self)
+        self.task_bar.cancel_requested.connect(self.tasks.cancel)
+        self.statusBar().addWidget(self.task_bar, 1)
 
     def _refresh_status(self) -> None:
         # A bare COUNT(*) with no WHERE still has to walk the whole assets
@@ -169,49 +195,95 @@ class MainWindow(QMainWindow):
 
     def _on_status(self, payload) -> None:
         chars, assets, build = payload
-        self.status_label.setText(
+        self.task_bar.set_idle_text(
             f"{chars} character(s) · {assets:,} asset stacks · SDE build {build}"
         )
 
     # --------------------------------------------------------------- actions
-    def _run(self, job, done=None) -> None:
-        self._set_busy(True)
-        # The job must outlive this call. QRunnable is not a QObject, so once
-        # the local goes out of scope -- immediately, since _run returns as
-        # soon as the pool has the job -- nothing keeps the job or the
-        # WorkerSignals QObject hanging off it alive. Collect that object
-        # while the worker thread is still running and the queued finished /
-        # failed emitted at the end of the job is discarded before it ever
-        # reaches the GUI thread, so _set_busy(False) never runs and the
-        # window stays busy forever with no error to show for it -- the sync
-        # itself having completed normally. Same reason, same fix, as
-        # AsyncQuery._inflight; see that module's docstring.
-        self._inflight.add(job)
-        job.signals.progress.connect(self._on_progress)
-        job.signals.warning.connect(self.log.add)
-        job.signals.failed.connect(lambda m, j=job: self._on_failed(m, j))
-        job.signals.finished.connect(lambda r, j=job: self._on_finished(r, done, j))
-        self.pool.start(job)
+    def _submit(self, kind, label, job, done=None, after=()):
+        """Hand a job to the registry. Returns None if that kind is already
+        in flight -- clicking Prices twice should not reprice twice."""
+        task = self.tasks.submit(kind, label, job, done, after)
+        if task is None:
+            self.log.add(f"{label} is already running.")
+            return None
+        self.log.add(f"{label} started.")
+        return task
 
     def sync_all(self) -> None:
         if not self._have_characters():
             return
-        self.log.add("Sync started.")
-        self._run(
+        self._submit(
+            "sync:all", "Update all",
             SyncJob(self.settings, self.tokens, snapshot=self.settings.snapshot_on_sync),
             self._after_data_change,
         )
 
+    def sync_characters(self) -> None:
+        """Every character, but no repricing and no snapshot -- the ESI pull
+        on its own, for when you just want fresh assets."""
+        if not self._have_characters():
+            return
+        self._submit(
+            "sync:characters", "Update all characters",
+            SyncJob(self.settings, self.tokens, reprice=False, snapshot=False),
+            self._after_data_change,
+        )
+
+    def sync_character(self, character_id: int, name: str) -> None:
+        self._submit(
+            f"sync:{character_id}", f"Update {name}",
+            SyncJob(
+                self.settings, self.tokens,
+                character_ids=[character_id], reprice=False, snapshot=False,
+            ),
+            self._after_data_change,
+        )
+
     def reprice(self) -> None:
-        self.log.add("Repricing.")
-        self._run(RepriceJob(self.settings, self.tokens), self._after_data_change)
+        self._submit(
+            "prices", "Update prices",
+            RepriceJob(self.settings, self.tokens), self._after_data_change,
+        )
 
     def snapshot(self) -> None:
-        self._run(SnapshotJob(), self._after_data_change)
+        # Follows any sync. A snapshot taken over half-synced assets records a
+        # wrong total into history, and history is the one table we never
+        # rewrite, so a bad point is permanent.
+        self._submit(
+            "snapshot", "Net worth snapshot",
+            SnapshotJob(), self._after_data_change, after=("sync",),
+        )
 
     def update_sde(self) -> None:
-        self.log.add("Checking for a newer Static Data Export.")
-        self._run(SdeUpdateJob(self.settings), self._after_data_change)
+        self._submit(
+            "sde", "Update game data",
+            SdeUpdateJob(self.settings), self._after_data_change,
+        )
+
+    def _populate_character_menu(self) -> None:
+        """Rebuilt every time the submenu opens: characters get added and
+        removed while the window is up, and a stale list here would offer to
+        sync someone who is gone."""
+        self.char_menu.clear()
+        rows = list(self.conn.execute(
+            "SELECT character_id, name FROM characters WHERE enabled=1 "
+            "ORDER BY name COLLATE NOCASE"
+        ))
+        if not rows:
+            empty = self.char_menu.addAction("No characters linked")
+            empty.setEnabled(False)
+            return
+        for row in rows:
+            cid = row["character_id"]
+            name = row["name"] or str(cid)
+            act = self.char_menu.addAction(name)
+            if self.tasks.is_active(f"sync:{cid}"):
+                act.setEnabled(False)
+                act.setText(f"{name}  (updating…)")
+            act.triggered.connect(
+                lambda _checked=False, c=cid, n=name: self.sync_character(c, n)
+            )
 
     def _filter_assets_from_overview(self, level: str, value: str) -> None:
         """Right-click "Filter Assets to ..." in Overview -- switch to the
@@ -231,10 +303,20 @@ class MainWindow(QMainWindow):
             reset()
 
     def open_characters(self) -> None:
-        dialog = CharactersDialog(self.settings, self.tokens, self)
+        """Non-modal on purpose. Adding a character now kicks off an update
+        for them straight away, and a modal dialog would sit on top of the
+        status bar that reports it -- hiding the progress it just caused, and
+        stopping you queueing up the next character while the first one runs."""
+        existing = getattr(self, "_characters_dialog", None)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+        dialog = CharactersDialog(self.settings, self.tokens, self.tasks, self)
         dialog.changed.connect(self._after_data_change)
-        dialog.exec()
-        self._after_data_change(None)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+        self._characters_dialog = dialog   # outlives this call; it is modeless
+        dialog.show()
 
     def open_settings(self) -> None:
         dialog = SettingsDialog(self.settings, self)
@@ -254,21 +336,17 @@ class MainWindow(QMainWindow):
         )
 
     # ------------------------------------------------------------- callbacks
-    def _on_progress(self, message: str, pct: int) -> None:
-        self.status_label.setText(message)
-        self.progress.setValue(max(0, min(100, pct)))
-
-    def _on_failed(self, message: str, job=None) -> None:
-        self._inflight.discard(job)
-        self._set_busy(False)
-        self.log.add(f"FAILED: {message}")
+    def _on_task_failed(self, label: str, message: str) -> None:
+        self.log.add(f"FAILED: {label} — {message}")
         self._refresh_status()
-        QMessageBox.critical(self, "Something went wrong", message)
+        QMessageBox.critical(self, "Something went wrong", f"{label}\n\n{message}")
 
-    def _on_finished(self, result, done, job=None) -> None:
-        self._inflight.discard(job)
-        self._set_busy(False)
+    def _on_task_finished(self, kind: str, result) -> None:
         if isinstance(result, dict):
+            if result.get("cancelled"):
+                self.log.add("Cancelled.")
+                self._refresh_status()
+                return
             if "message" in result:
                 self.log.add(result["message"])
             if "prices" in result and result["prices"]:
@@ -281,8 +359,6 @@ class MainWindow(QMainWindow):
                 )
             if result.get("characters"):
                 self.log.add(f"Synced {result['characters']} character(s).")
-        if done:
-            done(result)
         self._refresh_status()
 
     def _ensure_tab_loaded(self, index: int) -> None:
@@ -310,14 +386,6 @@ class MainWindow(QMainWindow):
         self._dirty |= self._loaded
         self._ensure_tab_loaded(self.tabs.currentIndex())
         self._refresh_status()
-
-    def _set_busy(self, busy: bool) -> None:
-        self.progress.setVisible(busy)
-        for act in (
-            self.act_sync, self.act_prices, self.act_snapshot,
-            self.act_sde, self.act_chars,
-        ):
-            act.setEnabled(not busy)
 
     # ------------------------------------------------------------------ misc
     def _have_characters(self) -> bool:
