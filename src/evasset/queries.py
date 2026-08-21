@@ -391,3 +391,60 @@ def trade_summary(conn: sqlite3.Connection, where: str = "", params: tuple = ())
 def sde_build(conn: sqlite3.Connection) -> str:
     row = conn.execute("SELECT value FROM meta WHERE key='sde_build'").fetchone()
     return row["value"] if row else "not imported"
+
+
+# ---------------------------------------------------------------- structures
+STRUCTURES_SQL = """
+SELECT    s.structure_id,
+          COALESCE(s.name, 'Structure ' || s.structure_id) AS name,
+          ty.name        AS type_name,
+          sys.name       AS system_name,
+          reg.name       AS region_name,
+          sys.security   AS security,
+          c.name         AS owner_name,
+          s.state,
+          s.state_timer_start,
+          s.state_timer_end,
+          s.fuel_expires,
+          s.reinforce_hour,
+          s.next_reinforce_hour,
+          s.next_reinforce_apply,
+          s.unanchors_at,
+          s.services,
+          s.updated_at,
+          x.moon_id,
+          x.chunk_arrival_time,
+          x.natural_decay_time,
+          x.extraction_start_time
+FROM      structures s
+LEFT JOIN sde_types        ty  ON ty.type_id    = s.type_id
+LEFT JOIN sde_systems      sys ON sys.system_id = s.system_id
+LEFT JOIN sde_regions      reg ON reg.region_id = s.region_id
+LEFT JOIN corporations     co  ON co.corporation_id = s.owner_id
+LEFT JOIN characters       c   ON c.corporation_id  = s.owner_id
+LEFT JOIN moon_extractions x   ON x.structure_id    = s.structure_id
+WHERE     s.owned = 1
+GROUP BY  s.structure_id
+"""
+
+
+def fetch_structures(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Structures our own corporations own, with any moon drill cycle attached.
+
+    Deliberately restricted to owned=1. The same table also holds structures
+    seen only as a location -- somebody else's Astrahus that one of our ships
+    is sitting in -- and those have no fuel clock, no state and no timer, so
+    listing them would be pages of blank rows.
+    """
+    return list(conn.execute(STRUCTURES_SQL))
+
+
+def structure_owners(conn: sqlite3.Connection) -> list[str]:
+    rows = conn.execute(
+        """SELECT DISTINCT c.name AS name
+           FROM structures s
+           JOIN characters c ON c.corporation_id = s.owner_id
+           WHERE s.owned = 1 AND c.name IS NOT NULL
+           ORDER BY c.name COLLATE NOCASE"""
+    )
+    return [r["name"] for r in rows]

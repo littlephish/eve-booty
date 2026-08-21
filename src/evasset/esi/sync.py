@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -138,6 +139,11 @@ class Syncer:
             ("corp jobs", "esi-industry.read_corporation_jobs.v1", self._corp_jobs),
             ("corp blueprints", "esi-corporations.read_blueprints.v1", self._corp_blueprints),
             ("corp structures", "esi-corporations.read_structures.v1", self._corp_structures),
+            # Needs esi-industry.read_corporation_mining.v1, which is not in
+            # SCOPES yet -- see the note there about corp scopes and SSO. Until
+            # it is added this skips with "scope not granted", which is the
+            # same thing that happens for a character without the role.
+            ("corp moon extractions", "esi-industry.read_corporation_mining.v1", self._corp_extractions),
         ]
         for label, scope, fn in steps:
             if progress:
@@ -589,8 +595,26 @@ class Syncer:
         )
 
     # ------------------------------------------------------------- structures
+    STRUCTURE_COLS = [
+        "structure_id", "name", "system_id", "region_id", "type_id", "owner_id",
+        "resolved_at", "accessible", "owned", "state", "state_timer_start",
+        "state_timer_end", "fuel_expires", "reinforce_hour", "next_reinforce_hour",
+        "next_reinforce_apply", "unanchors_at", "services", "updated_at",
+    ]
+
     def _corp_structures(self, corp_id: int, via: int) -> None:
+        """Everything ESI reports about our own structures.
+
+        This used to keep the name and the location and drop the rest on the
+        floor, because all anything wanted was somewhere to look up "what is
+        structure 1035466617946". The fuel clock, the reinforcement state and
+        its timer were all in the same response the whole time.
+
+        Timestamps go in exactly as sent -- ISO 8601, UTC, unparsed. EVE quotes
+        every timer in UTC, so this is the format people actually read.
+        """
         got = self.client.all_pages(f"/corporations/{corp_id}/structures", character_id=via)
+        now = _now()
         rows = []
         for s in got:
             sys_id = s.get("system_id")
@@ -599,12 +623,37 @@ class Syncer:
             ).fetchone()
             rows.append((
                 s["structure_id"], s.get("name"), sys_id,
-                region["region_id"] if region else None, s.get("type_id"), corp_id, _now(), 1,
+                region["region_id"] if region else None, s.get("type_id"), corp_id,
+                now, 1, 1,
+                s.get("state"), s.get("state_timer_start"), s.get("state_timer_end"),
+                s.get("fuel_expires"), s.get("reinforce_hour"), s.get("next_reinforce_hour"),
+                s.get("next_reinforce_apply"), s.get("unanchors_at"),
+                json.dumps(s.get("services") or []), now,
             ))
+        db.upsert_many(self.conn, "structures", self.STRUCTURE_COLS, rows)
+
+    def _corp_extractions(self, corp_id: int, via: int) -> None:
+        """Moon drill cycles. ESI reports only the current cycle per drill, so
+        rows for drills that have since stopped are cleared rather than left
+        to go stale -- a chunk_arrival_time from three cycles ago reads as an
+        imminent timer, which is exactly the mistake worth not making."""
+        got = self.client.all_pages(
+            f"/corporation/{corp_id}/mining/extractions", character_id=via
+        )
+        now = _now()
+        rows = [
+            (
+                e["structure_id"], e.get("moon_id"), corp_id,
+                e.get("extraction_start_time"), e.get("chunk_arrival_time"),
+                e.get("natural_decay_time"), now,
+            )
+            for e in got
+        ]
+        self.conn.execute("DELETE FROM moon_extractions WHERE owner_id=?", (corp_id,))
         db.upsert_many(
-            self.conn, "structures",
-            ["structure_id", "name", "system_id", "region_id", "type_id", "owner_id",
-             "resolved_at", "accessible"],
+            self.conn, "moon_extractions",
+            ["structure_id", "moon_id", "owner_id", "extraction_start_time",
+             "chunk_arrival_time", "natural_decay_time", "updated_at"],
             rows,
         )
 

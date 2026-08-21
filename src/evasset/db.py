@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .config import DB_PATH
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -80,15 +80,49 @@ CREATE TABLE IF NOT EXISTS sde_stations (
 );
 
 -- Player-owned structures; names come from ESI and need docking access.
+--
+-- Two kinds of row live here. Anything seen through /universe/structures --
+-- somebody else's Astrahus your ship is parked in -- fills in the name and
+-- location and nothing else. Structures your own corporation owns come from
+-- /corporations/{id}/structures and carry the operational columns below,
+-- which is everything the Structures tab is about. owned tells them apart.
+--
+-- Timestamps are stored exactly as ESI sends them: ISO 8601, UTC. EVE runs
+-- on UTC and every timer in the game is quoted in it, so converting to local
+-- time on the way in would mean converting back before showing anyone a
+-- number they are expected to form up on.
 CREATE TABLE IF NOT EXISTS structures (
-    structure_id INTEGER PRIMARY KEY,
-    name         TEXT,
-    system_id    INTEGER,
-    region_id    INTEGER,
-    type_id      INTEGER,
-    owner_id     INTEGER,
-    resolved_at  TEXT,
-    accessible   INTEGER NOT NULL DEFAULT 1
+    structure_id         INTEGER PRIMARY KEY,
+    name                 TEXT,
+    system_id            INTEGER,
+    region_id            INTEGER,
+    type_id              INTEGER,
+    owner_id             INTEGER,
+    resolved_at          TEXT,
+    accessible           INTEGER NOT NULL DEFAULT 1,
+    owned                INTEGER NOT NULL DEFAULT 0,
+    state                TEXT,
+    state_timer_start    TEXT,
+    state_timer_end      TEXT,
+    fuel_expires         TEXT,
+    reinforce_hour       INTEGER,
+    next_reinforce_hour  INTEGER,
+    next_reinforce_apply TEXT,
+    unanchors_at         TEXT,
+    services             TEXT,
+    updated_at           TEXT
+);
+
+-- Moon drill extractions, one row per drill. ESI only ever reports the
+-- current cycle, so this is a snapshot rather than history.
+CREATE TABLE IF NOT EXISTS moon_extractions (
+    structure_id          INTEGER PRIMARY KEY,
+    moon_id               INTEGER,
+    owner_id              INTEGER,
+    extraction_start_time TEXT,
+    chunk_arrival_time    TEXT,
+    natural_decay_time    TEXT,
+    updated_at            TEXT NOT NULL
 );
 
 -- ------------------------------------------------------------------ accounts
@@ -497,6 +531,50 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
                    FROM {old}""",
             )
             done.append("networth_snapshots: added buy/sell columns (table rebuilt)")
+
+    # v2 -> v3: structures went from a name lookup table to the backing store
+    # for the Structures tab.
+    #
+    # The rows already there are worth keeping -- they are what stops the app
+    # re-asking ESI for the name of every structure it has ever seen, including
+    # the ones it is not allowed to dock in -- so this rebuilds rather than
+    # starting fresh. Everything added is nullable: an existing row has no
+    # operational data and will not have any until the next corp sync, and
+    # owned defaults to 0 so a structure that was only ever a name lookup does
+    # not claim to be one of ours.
+    if _table_exists(conn, "structures") and "state" not in columns(conn, "structures"):
+        _rebuild_table(
+            conn,
+            "structures",
+            """CREATE TABLE structures (
+                   structure_id         INTEGER PRIMARY KEY,
+                   name                 TEXT,
+                   system_id            INTEGER,
+                   region_id            INTEGER,
+                   type_id              INTEGER,
+                   owner_id             INTEGER,
+                   resolved_at          TEXT,
+                   accessible           INTEGER NOT NULL DEFAULT 1,
+                   owned                INTEGER NOT NULL DEFAULT 0,
+                   state                TEXT,
+                   state_timer_start    TEXT,
+                   state_timer_end      TEXT,
+                   fuel_expires         TEXT,
+                   reinforce_hour       INTEGER,
+                   next_reinforce_hour  INTEGER,
+                   next_reinforce_apply TEXT,
+                   unanchors_at         TEXT,
+                   services             TEXT,
+                   updated_at           TEXT
+               )""",
+            """INSERT INTO structures
+                   (structure_id, name, system_id, region_id, type_id, owner_id,
+                    resolved_at, accessible)
+               SELECT structure_id, name, system_id, region_id, type_id, owner_id,
+                      resolved_at, accessible
+               FROM {old}""",
+        )
+        done.append("structures: added state, fuel and timer columns (table rebuilt)")
 
     if done:
         set_meta(conn, "migrated_at", str(SCHEMA_VERSION))
