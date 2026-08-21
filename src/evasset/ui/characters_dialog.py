@@ -48,6 +48,7 @@ class CharactersDialog(QDialog):
         self.tokens = tokens
         self.conn = db.init()
         self.pool = QThreadPool.globalInstance()
+        self._inflight: set = set()  # see MainWindow._run() -- same lifetime trap
 
         self.setWindowTitle("Characters")
         self.resize(1000, 460)
@@ -201,12 +202,14 @@ class CharactersDialog(QDialog):
             return
         self._busy(True, "Opening EVE SSO in your browser…")
         job = LoginJob(self.settings, self.tokens, SCOPES)
+        self._inflight.add(job)  # must outlive this call -- see MainWindow._run()
         job.signals.progress.connect(lambda m, p: self._busy(True, m, p))
-        job.signals.failed.connect(self._on_failed)
-        job.signals.finished.connect(self._on_login_done)
+        job.signals.failed.connect(lambda m, j=job: self._on_failed(m, j))
+        job.signals.finished.connect(lambda r, j=job: self._on_login_done(r, j))
         self.pool.start(job)
 
-    def _on_login_done(self, result: dict) -> None:
+    def _on_login_done(self, result: dict, job=None) -> None:
+        self._inflight.discard(job)
         self._busy(False)
         self.reload()
         self.changed.emit()
@@ -219,12 +222,14 @@ class CharactersDialog(QDialog):
             return
         self._busy(True, "Syncing…")
         job = SyncJob(self.settings, self.tokens, character_ids=ids)
+        self._inflight.add(job)  # must outlive this call -- see MainWindow._run()
         job.signals.progress.connect(lambda m, p: self._busy(True, m, p))
-        job.signals.failed.connect(self._on_failed)
-        job.signals.finished.connect(self._on_sync_done)
+        job.signals.failed.connect(lambda m, j=job: self._on_failed(m, j))
+        job.signals.finished.connect(lambda r, j=job: self._on_sync_done(r, j))
         self.pool.start(job)
 
-    def _on_sync_done(self, result: dict) -> None:
+    def _on_sync_done(self, result: dict, job=None) -> None:
+        self._inflight.discard(job)
         self._busy(False)
         self.reload()
         self.changed.emit()
@@ -278,7 +283,8 @@ class CharactersDialog(QDialog):
         for b in (self.btn_add, self.btn_reauth, self.btn_sync, self.btn_remove):
             b.setEnabled(not busy)
 
-    def _on_failed(self, message: str) -> None:
+    def _on_failed(self, message: str, job=None) -> None:
+        self._inflight.discard(job)
         self._busy(False)
         self.status.setText(message)
         QMessageBox.critical(self, "Failed", message)

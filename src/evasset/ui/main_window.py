@@ -35,6 +35,7 @@ class MainWindow(QMainWindow):
         self.conn = db.init()
         self.pool = QThreadPool.globalInstance()
         self._warnings: list[str] = []
+        self._inflight: set = set()  # jobs still running -- see _run()
 
         self.setWindowTitle("EVE Assets")
         self.resize(1440, 880)
@@ -175,10 +176,21 @@ class MainWindow(QMainWindow):
     # --------------------------------------------------------------- actions
     def _run(self, job, done=None) -> None:
         self._set_busy(True)
+        # The job must outlive this call. QRunnable is not a QObject, so once
+        # the local goes out of scope -- immediately, since _run returns as
+        # soon as the pool has the job -- nothing keeps the job or the
+        # WorkerSignals QObject hanging off it alive. Collect that object
+        # while the worker thread is still running and the queued finished /
+        # failed emitted at the end of the job is discarded before it ever
+        # reaches the GUI thread, so _set_busy(False) never runs and the
+        # window stays busy forever with no error to show for it -- the sync
+        # itself having completed normally. Same reason, same fix, as
+        # AsyncQuery._inflight; see that module's docstring.
+        self._inflight.add(job)
         job.signals.progress.connect(self._on_progress)
         job.signals.warning.connect(self.log.add)
-        job.signals.failed.connect(self._on_failed)
-        job.signals.finished.connect(lambda r: self._on_finished(r, done))
+        job.signals.failed.connect(lambda m, j=job: self._on_failed(m, j))
+        job.signals.finished.connect(lambda r, j=job: self._on_finished(r, done, j))
         self.pool.start(job)
 
     def sync_all(self) -> None:
@@ -246,13 +258,15 @@ class MainWindow(QMainWindow):
         self.status_label.setText(message)
         self.progress.setValue(max(0, min(100, pct)))
 
-    def _on_failed(self, message: str) -> None:
+    def _on_failed(self, message: str, job=None) -> None:
+        self._inflight.discard(job)
         self._set_busy(False)
         self.log.add(f"FAILED: {message}")
         self._refresh_status()
         QMessageBox.critical(self, "Something went wrong", message)
 
-    def _on_finished(self, result, done) -> None:
+    def _on_finished(self, result, done, job=None) -> None:
+        self._inflight.discard(job)
         self._set_busy(False)
         if isinstance(result, dict):
             if "message" in result:
