@@ -79,7 +79,7 @@ class CharactersDialog(QDialog):
             )
         blurb = QLabel(text)
         blurb.setWordWrap(True)
-        blurb.setStyleSheet("color: palette(mid);")
+        blurb.setStyleSheet("color: palette(shadow);")
         layout.addWidget(blurb)
 
         self.table = QTableWidget(0, len(HEADERS))
@@ -96,7 +96,7 @@ class CharactersDialog(QDialog):
         layout.addWidget(self.progress)
 
         self.status = QLabel("")
-        self.status.setStyleSheet("color: palette(mid);")
+        self.status.setStyleSheet("color: palette(shadow);")
         layout.addWidget(self.status)
 
         buttons = QHBoxLayout()

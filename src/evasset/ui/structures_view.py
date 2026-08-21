@@ -19,7 +19,6 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QTimer
-from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -39,14 +38,13 @@ from .. import db, queries
 from .assets_view import _SortProxy
 from .async_query import AsyncQuery
 from .models import fill_combo
+from .palette import CRITICAL, NORMAL, WARN, status_brush
 from .sort_controller import SortController
 
 # How close to empty before a fuel bay is worth shouting about. Three days is
 # roughly "you can still fix this at the weekend"; one day is "today".
 FUEL_WARN = timedelta(days=3)
 FUEL_CRITICAL = timedelta(days=1)
-
-NORMAL, WARN, CRITICAL = 0, 1, 2
 
 # Reinforcement states worth colouring. The rest of the enum is either normal
 # operation or a state nothing can be done about.
@@ -270,10 +268,7 @@ class _StructuresModel(QAbstractTableModel):
                 level = fuel_severity(row["fuel_expires"])
             elif key == "services":
                 level = services_severity(row["services"])
-            if level == CRITICAL:
-                return QBrush(QColor("#c0392b"))
-            if level == WARN:
-                return QBrush(QColor("#b9770e"))
+            return status_brush(level)
 
         if role == Qt.ToolTipRole:
             return self.tooltip(row, key)
@@ -359,12 +354,12 @@ class StructuresView(QWidget):
         )
         self.empty.setAlignment(Qt.AlignCenter)
         self.empty.setWordWrap(True)
-        self.empty.setStyleSheet("color: palette(mid);")
+        self.empty.setStyleSheet("color: palette(shadow);")
         self.empty.setVisible(False)   # until a query says the list is empty
         root.addWidget(self.empty)
 
         self.footer = QLabel("")
-        self.footer.setStyleSheet("color: palette(mid);")
+        self.footer.setStyleSheet("color: palette(shadow);")
         root.addWidget(self.footer)
 
         self.search.textChanged.connect(self.reload)

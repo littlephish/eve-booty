@@ -37,7 +37,7 @@ class FitDialog(QDialog):
 
         layout = QVBoxLayout(self)
         self.status = QLabel("Loading…")
-        self.status.setStyleSheet("color: palette(mid);")
+        self.status.setStyleSheet("color: palette(shadow);")
         layout.addWidget(self.status)
 
         scroll = QScrollArea()
@@ -77,7 +77,7 @@ class FitDialog(QDialog):
         groups = group_fit(rows)
         if not groups:
             empty = QLabel("Nothing fit, loaded or stowed on this ship.")
-            empty.setStyleSheet("color: palette(mid);")
+            empty.setStyleSheet("color: palette(shadow);")
             self._add_row(empty)
             return
         for label, lines in groups:

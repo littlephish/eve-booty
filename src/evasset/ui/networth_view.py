@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 from .. import db, networth
 from .async_query import AsyncQuery
 from .models import fmt_isk, fmt_short_isk
+from .palette import delta_hex
 
 RANGES = [
     ("Last 30 days", 30),
@@ -259,7 +260,7 @@ class NetWorthView(QWidget):
         )
         self.headline.setText(
             f"<b>{fmt_short_isk(last)} ISK</b> &nbsp; "
-            f"<span style='color:{'#3a9d23' if delta >= 0 else '#c0392b'}'>"
+            f"<span style='color:{delta_hex(delta >= 0)}'>"
             f"{sign}{fmt_short_isk(abs(delta))}{pct}</span>{aside}"
         )
         self._fill_table()

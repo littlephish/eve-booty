@@ -63,7 +63,7 @@ class _TaskRow(QWidget):
         outer.addWidget(self.bar)
 
         self.detail = QLabel("")
-        self.detail.setStyleSheet("color: palette(mid);")
+        self.detail.setStyleSheet("color: palette(shadow);")
         outer.addWidget(self.detail)
 
         self.update_from(task)
@@ -130,7 +130,14 @@ class TaskBar(QWidget):
         self.summary.setAutoRaise(True)
         self.summary.setToolButtonStyle(Qt.ToolButtonTextOnly)
         self.summary.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.summary.setStyleSheet("QToolButton { text-align: left; padding: 2px 4px; }")
+        # A stylesheet on a QToolButton takes over its painting, focus ring
+        # included, so the ring has to be put back explicitly or the control
+        # becomes invisible to keyboard users.
+        self.summary.setStyleSheet(
+            "QToolButton { text-align: left; padding: 2px 4px; border: 1px solid transparent; }"
+            "QToolButton:focus { border: 1px solid palette(highlight); }"
+        )
+        self.summary.setFocusPolicy(Qt.StrongFocus)
         self.summary.clicked.connect(self._toggle_popup)
         layout.addWidget(self.summary, 1)
 
@@ -158,6 +165,7 @@ class TaskBar(QWidget):
             self.summary.setText(self._idle_text)
             self.summary.setEnabled(False)
             self.summary.setToolTip("")
+            self.summary.setAccessibleName(self._idle_text)
             self.bar.setVisible(False)
             self.popup.hide()
             return
@@ -166,19 +174,26 @@ class TaskBar(QWidget):
         self.bar.setVisible(True)
         self.bar.setValue(self.tasks.overall_percent())
 
+        # No spinner glyph. U+27F3 and friends are not in every Windows UI
+        # font and fall back to a replacement box, and a symbol carrying the
+        # "something is happening" message on its own gives a screen reader
+        # nothing to read. The progress bar beside this says it visually; the
+        # accessible name says it in words.
         if len(active) == 1:
             task = active[0]
             detail = task.message or "Starting…"
-            self.summary.setText(f"⟳  {detail}")
+            self.summary.setText(detail)
             self.summary.setToolTip(f"{task.label} — click for detail")
+            self.summary.setAccessibleName(f"Running: {task.label}. {detail}")
         else:
             running = sum(1 for t in active if t.state == RUNNING)
             queued = len(active) - running
-            text = f"⟳  {running} task{'s' if running != 1 else ''} running"
+            text = f"{running} task{'s' if running != 1 else ''} running"
             if queued:
                 text += f", {queued} queued"
-            self.summary.setText(text + "  ▴")
+            self.summary.setText(text + "  (click for detail)")
             self.summary.setToolTip("Click to see each task")
+            self.summary.setAccessibleName(text)
 
         if self.popup.isVisible():
             self.popup.render(active)

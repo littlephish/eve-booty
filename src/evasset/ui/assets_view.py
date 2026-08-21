@@ -113,7 +113,7 @@ class AssetsView(QWidget):
         bar2.addStretch(1)
 
         self.chip_label = QLabel("")
-        self.chip_label.setStyleSheet("color: palette(mid);")
+        self.chip_label.setStyleSheet("color: palette(shadow);")
         self.chip_label.setVisible(False)
         bar2.addWidget(self.chip_label)
         self.chip_clear = QPushButton("Clear")
