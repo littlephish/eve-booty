@@ -30,14 +30,35 @@ def _titles(window):
     return [a.text().replace("&", "") for a in window.menuBar().actions()]
 
 
+def _labels(menu):
+    return [a.text().replace("&", "") for a in menu.actions() if not a.isSeparator()]
+
+
+def _every_menu_label(window):
+    """Every label reachable from the menu bar, submenus included."""
+    found = []
+
+    def walk(menu):
+        for act in menu.actions():
+            if act.isSeparator():
+                continue
+            found.append(act.text().replace("&", ""))
+            if act.menu() is not None:
+                walk(act.menu())
+
+    for top in (window.file_menu, window.update_menu, window.view_menu, window.help_menu):
+        walk(top)
+    return found
+
+
 def test_update_menu_lists_widest_scope_first(window):
-    items = [a.text() for a in window.update_menu.actions() if not a.isSeparator()]
+    items = _labels(window.update_menu)
     assert items[:3] == ["All", "All characters", "Character"]
     assert items[3:] == ["Prices", "Game data", "Net worth snapshot"]
 
 
 def test_refresh_actions_moved_off_file_and_data(window):
-    file_items = [a.text() for a in window.file_menu.actions()]
+    file_items = _labels(window.file_menu)
     assert "All" not in file_items and "Sync all" not in file_items
 
     titles = _titles(window)
@@ -52,13 +73,29 @@ def test_character_submenu_says_so_when_there_are_none(window):
     assert not window.char_menu.actions()[0].isEnabled()
 
 
-def test_toolbar_keeps_self_describing_labels(window):
-    """"All" reads fine under a menu titled Update and means nothing on a
-    bare toolbar."""
-    bar = window.findChild(QtWidgets.QToolBar, "")
-    labels = [a.text() for a in bar.actions()]
-    assert "Update all" in labels
-    assert "All" not in labels
+def test_there_is_no_toolbar(window):
+    """A row of buttons repeating the menu below it is the same command in
+    two places to keep in step. It already went wrong once: renaming an
+    action for the toolbar renamed it in the menu too."""
+    assert window.findChildren(QtWidgets.QToolBar) == []
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["All", "Characters…", "Prices", "Net worth snapshot", "Game data", "Settings…"],
+)
+def test_every_command_is_reachable_from_a_menu(window, label):
+    assert label in _every_menu_label(window)
+
+
+def test_menu_items_carry_mnemonics(window):
+    """Without a toolbar, the menus are the only route to these, so they need
+    to be drivable from the keyboard."""
+    for menu in (window.file_menu, window.update_menu):
+        for act in menu.actions():
+            if act.isSeparator():
+                continue
+            assert "&" in act.text(), f"{act.text()!r} has no mnemonic"
 
 
 def test_starting_the_same_kind_twice_only_runs_once(window, monkeypatch):

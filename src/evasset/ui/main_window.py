@@ -1,4 +1,4 @@
-"""Main window: toolbar, tabs, status bar."""
+"""Main window: menus, tabs, status bar."""
 
 from __future__ import annotations
 
@@ -96,57 +96,53 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- chrome
     def _build_actions(self) -> None:
-        bar = self.addToolBar("Main")
-        bar.setMovable(False)
-
-        self.act_sync = QAction("All", self)
-        self.act_sync.setShortcut(QKeySequence("F5"))
-        self.act_sync.triggered.connect(self.sync_all)
-
-        self.act_chars_all = QAction("All characters", self)
-        self.act_chars_all.setToolTip("Pull every character's data, without repricing")
-        self.act_chars_all.triggered.connect(self.sync_characters)
-
-        self.act_chars = QAction("Characters…", self)
-        self.act_chars.triggered.connect(self.open_characters)
-
-        self.act_prices = QAction("Prices", self)
-        self.act_prices.triggered.connect(self.reprice)
-
-        self.act_snapshot = QAction("Net worth snapshot", self)
-        self.act_snapshot.triggered.connect(self.snapshot)
-
-        self.act_sde = QAction("Game data", self)
-        self.act_sde.triggered.connect(self.update_sde)
-
-        self.act_settings = QAction("Settings…", self)
-        self.act_settings.triggered.connect(self.open_settings)
-
-        # Separate actions from the menu ones on purpose. "All" and "Prices"
-        # read correctly under a menu titled Update; on a bare toolbar they
-        # have nothing to qualify them. A QAction carries a single text, so
-        # the same object cannot be worded both ways -- it has to be two.
-        self._toolbar_actions = []
-        for label, slot, tip in (
-            ("Update all", self.sync_all, "Sync every character, then reprice and snapshot"),
-            ("Characters…", self.open_characters, "Add, remove and authorise characters"),
-            ("Update prices", self.reprice, "Refresh market prices only"),
-            ("Snapshot", self.snapshot, "Record net worth now"),
-            ("Update game data", self.update_sde, "Check for a newer Static Data Export"),
-            ("Settings…", self.open_settings, "Application settings"),
-        ):
-            act = QAction(label, self)
+        # No toolbar. Every one of these lives in a menu, and a row of buttons
+        # repeating the menu it sits under is the same command in two places
+        # to keep in step -- which already bit once, when renaming an action
+        # for the toolbar renamed it in the menu too. The tooltips the toolbar
+        # carried were worth keeping, so they moved onto the actions.
+        def action(text, slot, tip, shortcut=None):
+            act = QAction(text, self)
             act.setToolTip(tip)
+            act.setStatusTip(tip)
+            if shortcut is not None:
+                act.setShortcut(shortcut)
             act.triggered.connect(slot)
-            bar.addAction(act)
-            self._toolbar_actions.append(act)
+            return act
+
+        self.act_sync = action(
+            "&All", self.sync_all,
+            "Sync every character, then reprice and snapshot",
+            QKeySequence("F5"),
+        )
+        self.act_chars_all = action(
+            "All c&haracters", self.sync_characters,
+            "Pull every character's data, without repricing or snapshotting",
+        )
+        self.act_prices = action(
+            "&Prices", self.reprice, "Refresh market prices only",
+        )
+        self.act_snapshot = action(
+            "&Net worth snapshot", self.snapshot, "Record net worth now",
+        )
+        self.act_sde = action(
+            "&Game data", self.update_sde,
+            "Check for a newer Static Data Export",
+        )
+        self.act_chars = action(
+            "&Characters…", self.open_characters,
+            "Add, remove and authorise characters",
+        )
+        self.act_settings = action(
+            "&Settings…", self.open_settings, "Application settings",
+        )
 
         menu = self.menuBar()
         self.file_menu = file_menu = menu.addMenu("&File")
         file_menu.addAction(self.act_chars)
         file_menu.addAction(self.act_settings)
         file_menu.addSeparator()
-        quit_action = QAction("Quit", self)
+        quit_action = QAction("&Quit", self)
         quit_action.setShortcut(QKeySequence.Quit)
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
@@ -157,7 +153,7 @@ class MainWindow(QMainWindow):
         self.update_menu = update_menu = menu.addMenu("&Update")
         update_menu.addAction(self.act_sync)
         update_menu.addAction(self.act_chars_all)
-        self.char_menu = update_menu.addMenu("Character")
+        self.char_menu = update_menu.addMenu("&Character")
         self.char_menu.aboutToShow.connect(self._populate_character_menu)
         update_menu.addSeparator()
         update_menu.addAction(self.act_prices)
@@ -394,7 +390,7 @@ class MainWindow(QMainWindow):
             return True
         QMessageBox.information(
             self, "No characters",
-            "Add a character first — toolbar → Characters… → Add character.",
+            "Add a character first — File → Characters… → Add character.",
         )
         return False
 
