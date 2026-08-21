@@ -93,10 +93,17 @@ def test_secondary_text_points_at_a_role_that_passes():
 
 
 def test_no_view_still_uses_the_failing_role():
+    """Matches palette(mid) however it is spelled. The first version of this
+    test looked for "color: palette(mid)" with exactly that spacing and missed
+    two inline-HTML spans written "color:palette(mid)" -- so the sweep it was
+    guarding reported success while two call sites were still at 1.99:1."""
     import pathlib
+    import re
+
     offenders = [
         path.name
         for path in pathlib.Path("src/evasset/ui").glob("*.py")
-        if "color: palette(mid)" in path.read_text(encoding="utf-8")
+        if path.name != "palette.py"
+        and re.search(r"palette\(mid\)", path.read_text(encoding="utf-8"))
     ]
     assert not offenders, f"palette(mid) is 1.99:1 -- still used in {offenders}"

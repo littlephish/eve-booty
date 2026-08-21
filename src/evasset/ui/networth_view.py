@@ -40,6 +40,11 @@ BASES = [
 ]
 
 
+# Owner-combo sentinel. Not an (owner_type, owner_id) pair like the real
+# entries, so it cannot collide with one.
+COMPARE_OWNERS = ("__compare__", -1)
+
+
 def series_keys(basis: str) -> list[tuple[str, str]]:
     if basis == "both":
         return [
@@ -143,6 +148,7 @@ class NetWorthView(QWidget):
         # would mean firing one (e.g. the table refresh at the end of
         # redraw()) bumps the generation out from under whichever one is
         # still in flight, silently dropping its result before it renders.
+        self._compare = False
         self._owners_query = AsyncQuery(self)
         self._history_query = AsyncQuery(self)
         self._table_query = AsyncQuery(self)
@@ -165,6 +171,10 @@ class NetWorthView(QWidget):
         self.owner_box.blockSignals(True)
         self.owner_box.clear()
         self.owner_box.addItem("Everything", None)
+        if len(owners) > 1:
+            # Pointless with one owner -- it would draw the same line as
+            # "Everything" and call it by a different name.
+            self.owner_box.addItem("Compare owners", COMPARE_OWNERS)
         for owner_type, owner_id, name in owners:
             self.owner_box.addItem(name, (owner_type, owner_id))
         if current is not None:
@@ -178,9 +188,15 @@ class NetWorthView(QWidget):
     def redraw(self) -> None:
         owner = self.owner_box.currentData()
         days = RANGES[self.range_box.currentIndex()][1]
+        self._compare = owner == COMPARE_OWNERS
 
         def fetch(conn) -> list:
-            rows = networth.history(conn) if owner is None else networth.history(conn, owner[0], owner[1])
+            if owner == COMPARE_OWNERS:
+                rows = networth.history_per_owner(conn)
+            elif owner is None:
+                rows = networth.history(conn)
+            else:
+                rows = networth.history(conn, owner[0], owner[1])
             if days:
                 cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
                 rows = [r for r in rows if r["taken_at"] >= cutoff]
@@ -203,24 +219,20 @@ class NetWorthView(QWidget):
             return
 
         basis = BASES[self.basis_box.currentIndex()][1]
-        keys = series_keys(basis)
-        if basis == "both":
-            # The point of this mode is the gap between the two totals, so the
-            # breakdown checkbox does not apply.
-            keys = keys[:2] if not self.breakdown.isChecked() else keys
-        elif not self.breakdown.isChecked():
-            keys = keys[:1]
+        plots = self._build_series(rows, basis)
 
-        peak = max((abs(float(r[key] or 0)) for r in rows for key, _ in keys), default=0.0)
+        peak = max(
+            (abs(value) for _, points in plots for _, value in points), default=0.0
+        )
         scale, unit = _axis_scale(peak)
 
         y_min, y_max = 0.0, 0.0
-        for key, label in keys:
+        for label, points in plots:
             series = QLineSeries()
             series.setName(label)
-            for r in rows:
-                val = float(r[key] or 0) / scale
-                series.append(_to_msecs(r["taken_at"]), val)
+            for taken_at, raw in points:
+                val = raw / scale
+                series.append(_to_msecs(taken_at), val)
                 y_max = max(y_max, val)
                 y_min = min(y_min, val)
             self.chart.addSeries(series)
@@ -242,17 +254,28 @@ class NetWorthView(QWidget):
             series.attachAxis(axis_y)
 
         headline_key = "total_buy_isk" if basis == "buy" else "total_sell_isk"
-        first = float(rows[0][headline_key] or 0)
-        last = float(rows[-1][headline_key] or 0)
+        other_key = "total_sell_isk" if headline_key == "total_buy_isk" else "total_buy_isk"
+        if self._compare:
+            # rows here are one per owner per snapshot, so the first and last
+            # of the flat list are just whichever owner sorted first -- the
+            # ends have to be taken per owner and then added up.
+            first, last = self._compare_ends(rows, headline_key)
+            other = self._compare_ends(rows, other_key)[1]
+            self.chart.setTitle(
+                f"{len(plots)} owners — {len(rows)} snapshot(s)"
+            )
+        else:
+            first = float(rows[0][headline_key] or 0)
+            last = float(rows[-1][headline_key] or 0)
+            other = float(rows[-1][other_key] or 0)
+            self.chart.setTitle(
+                f"{self.owner_box.currentText()} — {len(rows)} snapshot(s)"
+            )
         delta = last - first
         sign = "+" if delta >= 0 else "−"
         pct = f" ({delta / first * 100:+.1f}%)" if first else ""
-        self.chart.setTitle(f"{self.owner_box.currentText()} — {len(rows)} snapshot(s)")
-
-        other_key = "total_sell_isk" if headline_key == "total_buy_isk" else "total_buy_isk"
-        other = float(rows[-1][other_key] or 0)
         aside = (
-            f" &nbsp;<span style='color:palette(mid)'>"
+            f" &nbsp;<span style='color:palette(shadow)'>"
             f"({'buy' if other_key.startswith('total_buy') else 'sell'} "
             f"{fmt_short_isk(other)})</span>"
             if other
@@ -264,6 +287,58 @@ class NetWorthView(QWidget):
             f"{sign}{fmt_short_isk(abs(delta))}{pct}</span>{aside}"
         )
         self._fill_table()
+
+    def _build_series(self, rows: list, basis: str) -> list[tuple[str, list]]:
+        """[(legend label, [(taken_at, isk), ...]), ...]
+
+        Two shapes of chart come out of the same snapshot table. Normally each
+        line is a component of one owner's worth -- assets, wallet, escrow.
+        In compare mode each line is an owner's total, which is the question
+        "who is actually carrying the account" and cannot be read off a chart
+        that has already summed them together.
+        """
+        if self._compare:
+            # One basis only. "Both totals" would double the number of lines,
+            # and the point of this mode is comparing owners, not bases.
+            column = f"total_{'sell' if basis == 'both' else basis}_isk"
+            by_owner: dict[str, list] = {}
+            for r in rows:
+                by_owner.setdefault(r["owner_name"], []).append(
+                    (r["taken_at"], float(r[column] or 0))
+                )
+            # Biggest first, so the legend order matches what the eye picks out
+            # of the chart and the largest holding is not buried at the bottom.
+            return sorted(
+                by_owner.items(), key=lambda kv: kv[1][-1][1], reverse=True
+            )
+
+        keys = series_keys(basis)
+        if basis == "both":
+            # The point of this mode is the gap between the two totals, so the
+            # breakdown checkbox does not apply.
+            keys = keys[:2] if not self.breakdown.isChecked() else keys
+        elif not self.breakdown.isChecked():
+            keys = keys[:1]
+        return [
+            (label, [(r["taken_at"], float(r[key] or 0)) for r in rows])
+            for key, label in keys
+        ]
+
+    @staticmethod
+    def _compare_ends(rows: list, key: str) -> tuple[float, float]:
+        """Earliest and latest value summed across owners.
+
+        Owners do not all start on the same day -- a character linked last
+        week has no snapshots from last month -- so this takes each owner's
+        own first and last and adds those, rather than picking a shared date
+        that some of them would be missing from.
+        """
+        by_owner: dict[str, list] = {}
+        for r in rows:
+            by_owner.setdefault(r["owner_name"], []).append(float(r[key] or 0))
+        first = sum(values[0] for values in by_owner.values())
+        last = sum(values[-1] for values in by_owner.values())
+        return first, last
 
     def _fill_table(self) -> None:
         """Latest snapshot per owner, so you can see who holds what."""

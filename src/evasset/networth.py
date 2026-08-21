@@ -240,6 +240,26 @@ def history(
     )
 
 
+def history_per_owner(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every snapshot, kept split by owner and labelled with their name.
+
+    history() either sums across owners or narrows to exactly one, which
+    answers "what is everything worth" and "what is this character worth" but
+    never "which of them is carrying the account". Same table, just not
+    collapsed on the way out.
+    """
+    return list(
+        conn.execute(
+            """SELECT s.*,
+                      COALESCE(c.name, co.name, s.owner_type||' '||s.owner_id) AS owner_name
+               FROM networth_snapshots s
+               LEFT JOIN characters   c  ON s.owner_type='character'   AND c.character_id=s.owner_id
+               LEFT JOIN corporations co ON s.owner_type='corporation' AND co.corporation_id=s.owner_id
+               ORDER BY owner_name COLLATE NOCASE, s.taken_at"""
+        )
+    )
+
+
 def owners_with_history(conn: sqlite3.Connection) -> list[tuple[str, int, str]]:
     rows = conn.execute(
         """SELECT DISTINCT s.owner_type, s.owner_id,

@@ -294,7 +294,7 @@ class TransactionTable(_HistoryTable):
             f"{totals['trades']:,} trades · bought {fmt_short_isk(totals['bought'])} · "
             f"sold {fmt_short_isk(totals['sold'])} · "
             f"net <b>{fmt_isk(totals['net'])} ISK</b> "
-            "<span style='color:palette(mid)'>(cash in minus cash out, not profit)</span>"
+            "<span style='color:palette(shadow)'>(cash in minus cash out, not profit)</span>"
         )
         if not self._sized_once:
             self.table.resizeColumnsToContents()  # once; see AssetsView for why
