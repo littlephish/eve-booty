@@ -125,6 +125,41 @@ CREATE TABLE IF NOT EXISTS moon_extractions (
     updated_at            TEXT NOT NULL
 );
 
+-- ----------------------------------------------------------------- stockpiles
+-- A stockpile is a list of things you want to keep on hand, plus a rule for
+-- what counts towards them. The rule is deliberately narrower than
+-- jEveAssets': owner and location, rather than an arbitrary filter tree.
+-- Those two answer "keep 20 Damage Controls in Jita on this character",
+-- which is what the feature is for.
+--
+-- Sources are opt-in per stockpile because what counts as "have" is a
+-- judgement, not a fact. Items listed on the market are still yours and are
+-- one click from being yours again; a job three days from delivery is not
+-- something you can undock with. Neither answer is right for everyone, so
+-- both are a checkbox with assets always counted.
+CREATE TABLE IF NOT EXISTS stockpiles (
+    stockpile_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    name              TEXT    NOT NULL,
+    owner_type        TEXT,             -- NULL: any owner counts
+    owner_id          INTEGER,
+    location_scope    TEXT    NOT NULL DEFAULT 'any',  -- any|region|system|station
+    location_id       INTEGER,
+    multiplier        REAL    NOT NULL DEFAULT 1,
+    include_orders    INTEGER NOT NULL DEFAULT 0,
+    include_jobs      INTEGER NOT NULL DEFAULT 0,
+    include_contracts INTEGER NOT NULL DEFAULT 0,
+    created_at        TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS stockpile_items (
+    stockpile_id INTEGER NOT NULL REFERENCES stockpiles(stockpile_id) ON DELETE CASCADE,
+    type_id      INTEGER NOT NULL,
+    target       REAL    NOT NULL DEFAULT 0,
+    PRIMARY KEY (stockpile_id, type_id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_stockpile_items_stockpile ON stockpile_items(stockpile_id);
+
 -- ------------------------------------------------------------------ accounts
 CREATE TABLE IF NOT EXISTS characters (
     character_id     INTEGER PRIMARY KEY,

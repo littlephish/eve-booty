@@ -21,6 +21,7 @@ from .async_query import AsyncQuery
 from .characters_dialog import CharactersDialog
 from .networth_view import NetWorthView
 from .settings_dialog import SettingsDialog
+from .stockpile_view import StockpileView
 from .structures_view import StructuresView
 from .task_bar import TaskBar
 from .tasks import TaskManager
@@ -55,6 +56,7 @@ class MainWindow(QMainWindow):
         self.networth = NetWorthView(self.conn, defer_load=True)
         self.wallet = WalletView(self.conn, defer_load=True)
         self.structures = StructuresView(self.conn, defer_load=True)
+        self.stockpile = StockpileView(self.conn, defer_load=True)
         self.log = _LogPane()
 
         self.tabs.addTab(self.assets, "Assets")
@@ -62,6 +64,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.wallet, "Wallet")
         self.tabs.addTab(self.networth, "Net worth")
         self.tabs.addTab(self.structures, "Structures")
+        self.tabs.addTab(self.stockpile, "Stockpile")
         self.tabs.addTab(self.log, "Log")
         self.setCentralWidget(self.tabs)
 
@@ -71,6 +74,7 @@ class MainWindow(QMainWindow):
             self.wallet: self.wallet.first_load,
             self.networth: self.networth.first_load,
             self.structures: self.structures.first_load,
+            self.stockpile: self.stockpile.first_load,
         }
         self._tab_reload = {
             self.assets: lambda: (self.assets.refresh_filters(), self.assets.reload()),
@@ -80,6 +84,7 @@ class MainWindow(QMainWindow):
             self.structures: lambda: (
                 self.structures.refresh_filters(), self.structures.reload()
             ),
+            self.stockpile: self.stockpile.refresh_filters,
         }
         self._loaded: set = set()
         self._dirty: set = set()
