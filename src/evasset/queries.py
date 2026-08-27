@@ -134,6 +134,7 @@ SELECT
     a.item_id,
     a.type_id,
     t.name       AS item,
+    t.meta_group_id,
     a.custom_name,
     a.quantity,
     a.location_flag,

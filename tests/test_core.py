@@ -296,7 +296,9 @@ def test_group_fit_pairs_a_loaded_charge_with_its_module(conn):
     )
     rows = queries.fetch_fit(conn, 2)
     groups = dict(fitting.group_fit(rows))
-    assert groups["High slots"] == ["125mm Gatling AutoCannon II  —  loaded: 50 x EMP S"]
+    assert [line.text for line in groups["High slots"]] == [
+        "125mm Gatling AutoCannon II  —  loaded: 50 x EMP S"
+    ]
 
 
 def test_group_fit_lists_distinct_slots_in_slot_order(conn):
@@ -316,7 +318,10 @@ def test_group_fit_lists_distinct_slots_in_slot_order(conn):
     )
     rows = queries.fetch_fit(conn, 2)
     groups = dict(fitting.group_fit(rows))
-    assert groups["High slots"] == ["125mm Gatling AutoCannon II", "Focused Beam Laser II"]
+    assert [line.text for line in groups["High slots"]] == [
+        "125mm Gatling AutoCannon II",
+        "Focused Beam Laser II",
+    ]
 
 
 def test_to_eft_matches_pyfas_own_format(conn):
@@ -381,7 +386,64 @@ def test_group_fit_falls_back_for_an_unmapped_flag(conn):
     )
     rows = queries.fetch_fit(conn, 2)
     groups = dict(fitting.group_fit(rows))
-    assert groups["Some New Hold Type"] == ["3 x Tritanium"]
+    assert [line.text for line in groups["Some New Hold Type"]] == ["3 x Tritanium"]
+
+
+def test_slot_line_carries_the_modules_ids_not_the_loaded_charges(conn):
+    """A slot line with a charge loaded is about the module -- its icon and
+    rarity tint must come from the module, so the module and charge here get
+    deliberately different meta groups to make the assertion mean something."""
+    conn.executescript(
+        """
+        INSERT INTO sde_categories VALUES (7,'Module',1),(8,'Charge',1);
+        INSERT INTO sde_groups VALUES (55,7,'Autocannon',1),(83,8,'Projectile Ammo',1);
+        INSERT INTO sde_types (type_id,name,group_id,portion_size,published) VALUES
+          (2873,'Domination 125mm Autocannon',55,1,1),
+          (206,'EMP S',83,1,1);
+        UPDATE sde_types SET meta_group_id = 4 WHERE type_id = 2873;  -- Faction module
+        UPDATE sde_types SET meta_group_id = 2 WHERE type_id = 206;   -- Tech II charge
+        INSERT INTO assets (owner_type,owner_id,item_id,type_id,quantity,location_id,
+                            location_flag,location_type,is_singleton) VALUES
+          ('character',100,70,2873,1,2,'HiSlot0','item',1),
+          ('character',100,71,206,50,2,'HiSlot0','item',0);
+        """
+    )
+    rows = queries.fetch_fit(conn, 2)
+    # fetch_fit itself has to expose meta_group_id, or group_fit has nothing to carry.
+    assert {r["type_id"]: r["meta_group_id"] for r in rows} == {2873: 4, 206: 2}
+    groups = dict(fitting.group_fit(rows))
+    (line,) = groups["High slots"]
+    assert line.type_id == 2873
+    assert line.meta_group_id == 4, "the tint must follow the module, never the charge"
+
+
+def test_hold_and_bay_lines_carry_no_ids(conn):
+    """Icons and rarity tints are scoped to the slot racks only; that decision
+    lives in the FitLine data, so hold/cargo/drone-bay lines must come out
+    with both ids unset rather than leaving it to the renderer to re-decide."""
+    conn.executescript(
+        """
+        INSERT INTO sde_categories VALUES (18,'Drone',1);
+        INSERT INTO sde_groups VALUES (100,18,'Combat Drone',1);
+        INSERT INTO sde_types (type_id,name,group_id,portion_size,published) VALUES
+          (2456,'Hobgoblin II',100,1,1);
+        UPDATE sde_types SET meta_group_id = 2 WHERE type_id = 2456;
+        INSERT INTO assets (owner_type,owner_id,item_id,type_id,quantity,location_id,
+                            location_flag,location_type,is_singleton) VALUES
+          ('character',100,72,2456,3,2,'DroneBay','item',0),
+          ('character',100,73,34,999,2,'Cargo','item',0);
+        """
+    )
+    rows = queries.fetch_fit(conn, 2)
+    seen = 0
+    for _label, lines in fitting.group_fit(rows):
+        for line in lines:
+            seen += 1
+            assert line.type_id is None
+            assert line.meta_group_id is None
+    # Guard against passing vacuously: an empty fit would sail through the
+    # loop above without asserting anything at all.
+    assert seen >= 2, "expected the drone bay and cargo lines to actually exist"
 
 
 class _FakeClient:

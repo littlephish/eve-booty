@@ -40,6 +40,29 @@ _STATUS = {
 # Not a status level -- used for gains in the net worth delta.
 POSITIVE = ("#2E7D1E", "#7BD96A")   # 5.16:1 light, 9.51:1 dark
 
+# Background tints for the fit dialog's slot lines, keyed by SDE meta group
+# id (sde_types.meta_group_id). The mapping follows the game client's own
+# colour language -- faction green, officer purple, deadspace blue, abyssal
+# red -- because that is what an EVE player's eye is already trained on;
+# every other meta group (T1/T2/T3, storyline, structure, ...) deliberately
+# gets no tint at all.
+#
+# These are backgrounds under default theme text, not text colours, so the
+# contrast requirement runs the other way from _STATUS above: the theme's
+# text colour must stay AA-readable on top of them. That means pale washes
+# on light and dark washes on dark -- a colour saturated enough to read as
+# "green text" would fail as "green background". Measured in
+# tests/test_contrast.py like everything else here.
+META_FACTION, META_OFFICER, META_DEADSPACE, META_ABYSSAL = 4, 5, 6, 15
+
+#                          light bg    dark bg
+RARITY_TINTS = {
+    META_FACTION:   ("#DFF0DF", "#1E3423"),
+    META_OFFICER:   ("#ECE0F5", "#33244A"),
+    META_DEADSPACE: ("#DFEAF7", "#1D2C47"),
+    META_ABYSSAL:   ("#F9E2DE", "#46211F"),
+}
+
 
 def is_dark(palette: QPalette | None = None) -> bool:
     """Dark themes are detected from the palette rather than from a setting,
@@ -59,6 +82,16 @@ def status_hex(level: int, palette: QPalette | None = None) -> str | None:
 def status_brush(level: int, palette: QPalette | None = None) -> QBrush | None:
     colour = status_hex(level, palette)
     return None if colour is None else QBrush(QColor(colour))
+
+
+def rarity_hex(meta_group_id: int | None, palette: QPalette | None = None) -> str | None:
+    """Background hex for a meta group's rarity tint, or None for the many
+    meta groups (and the None most items carry) that stay on the plain theme
+    background."""
+    pair = RARITY_TINTS.get(meta_group_id)
+    if pair is None:
+        return None
+    return pair[1] if is_dark(palette) else pair[0]
 
 
 def delta_hex(positive: bool, palette: QPalette | None = None) -> str:
