@@ -78,6 +78,33 @@ def test_positive_delta_is_readable_on_dark(background):
     assert contrast(pal.POSITIVE[1], background) >= AA_NORMAL
 
 
+@pytest.mark.parametrize("meta_group_id", sorted(pal.RARITY_TINTS))
+def test_rarity_tints_keep_black_text_readable_on_light(meta_group_id):
+    """Rarity tints are backgrounds under default theme text, so the contrast
+    requirement runs the other way from the status colours: the theme's black
+    text has to stay AA-readable on top of the wash."""
+    background = pal.RARITY_TINTS[meta_group_id][0]
+    assert contrast("#000000", background) >= AA_NORMAL, (
+        f"black on {background} is {contrast('#000000', background):.2f}:1"
+    )
+
+
+@pytest.mark.parametrize("meta_group_id", sorted(pal.RARITY_TINTS))
+def test_rarity_tints_keep_white_text_readable_on_dark(meta_group_id):
+    background = pal.RARITY_TINTS[meta_group_id][1]
+    assert contrast("#FFFFFF", background) >= AA_NORMAL, (
+        f"white on {background} is {contrast('#FFFFFF', background):.2f}:1"
+    )
+
+
+def test_most_meta_groups_deliberately_get_no_tint():
+    """Only faction, officer, deadspace and abyssal are tinted -- the id most
+    items carry (None) and an ordinary meta group like Tech II must map to no
+    background at all, or every line in the dialog ends up coloured."""
+    assert pal.rarity_hex(None) is None
+    assert pal.rarity_hex(2) is None  # Tech II
+
+
 def test_the_old_hand_picked_colours_would_have_failed():
     """Characterises what this module fixed. If someone reintroduces one of
     these, the numbers here say why not to."""

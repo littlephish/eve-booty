@@ -105,7 +105,9 @@ The full list lives in `SCOPES` in `src/evasset/config.py`. What each one buys:
 
 Public endpoints used with no token at all: `/contracts/public/{region}` and
 `/contracts/public/items/{id}` for capital pricing, `/universe/names` for
-counterparties, and Fuzzwork for Jita aggregates.
+counterparties, Fuzzwork for Jita aggregates, and CCP's image service
+(`images.evetech.net`) for the type icons in the fit dialog, fetched on
+demand and cached on disk.
 
 Note that `esi-wallet.read_corporation_wallet.v1` (singular) is not a scope ESI
 declares any more. The one you want is `esi-wallet.read_corporation_wallets.v1`

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from dataclasses import dataclass
 
 _SLOT_GROUPS = [
     ("High slots", [f"HiSlot{i}" for i in range(8)]),
@@ -68,6 +69,23 @@ _GROUP_ORDER = [label for label, _ in _ALL_GROUPS]
 _SLOT_LABELS = {label for label, _ in _SLOT_GROUPS}
 
 
+@dataclass
+class FitLine:
+    """One display line of a grouped fit.
+
+    type_id and meta_group_id are only set for slot-rack module lines -- they
+    are what the dialog needs to show the module's icon and tint the line by
+    its rarity. Hold/bay/cargo lines carry text alone: the "slot racks only"
+    scope decision lives here, expressed in data, rather than being re-decided
+    by whoever renders the lines. On a module-plus-charge line both ids are
+    the module's, never the charge's -- the line is about the module.
+    """
+
+    text: str
+    type_id: int | None = None
+    meta_group_id: int | None = None
+
+
 def _humanize_flag(flag: str) -> str:
     """Fallback label for a location_flag this module has no name for, so an
     unrecognised hold type still shows up under something readable instead of
@@ -85,11 +103,11 @@ def _name(row: sqlite3.Row) -> str:
     return row["custom_name"] or row["item"]
 
 
-def _render_flat(items: list[sqlite3.Row]) -> list[str]:
-    return [f"{r['quantity']:,} x {_name(r)}" for r in items]
+def _render_flat(items: list[sqlite3.Row]) -> list[FitLine]:
+    return [FitLine(text=f"{r['quantity']:,} x {_name(r)}") for r in items]
 
 
-def _render_slots(items: list[sqlite3.Row]) -> list[str]:
+def _render_slots(items: list[sqlite3.Row]) -> list[FitLine]:
     by_flag: dict[str, list[sqlite3.Row]] = {}
     for r in items:
         by_flag.setdefault(r["location_flag"], []).append(r)
@@ -101,8 +119,11 @@ def _render_slots(items: list[sqlite3.Row]) -> list[str]:
         charges = [r for r in occupants if (r["category"] or "") == "Charge"]
         if not modules and not charges:
             continue
+        type_id = meta_group_id = None
         if modules:
             line = _name(modules[0])
+            type_id = modules[0]["type_id"]
+            meta_group_id = modules[0]["meta_group_id"]
             if len(modules) > 1:
                 # Should never happen -- one module per numbered slot -- but
                 # do not hide it silently if it ever does.
@@ -112,13 +133,13 @@ def _render_slots(items: list[sqlite3.Row]) -> list[str]:
         if charges:
             loaded = ", ".join(f"{c['quantity']:,} x {_name(c)}" for c in charges)
             line += f"  —  loaded: {loaded}"
-        lines.append(line)
+        lines.append(FitLine(text=line, type_id=type_id, meta_group_id=meta_group_id))
     return lines
 
 
-def group_fit(rows: list[sqlite3.Row]) -> list[tuple[str, list[str]]]:
-    """Flat fetch_fit() rows -> [(group label, [display line, ...]), ...] in
-    a sensible on-screen order."""
+def group_fit(rows: list[sqlite3.Row]) -> list[tuple[str, list[FitLine]]]:
+    """Flat fetch_fit() rows -> [(group label, [FitLine, ...]), ...] in a
+    sensible on-screen order."""
     buckets: dict[str, list[sqlite3.Row]] = {}
     for r in rows:
         flag = r["location_flag"] or ""

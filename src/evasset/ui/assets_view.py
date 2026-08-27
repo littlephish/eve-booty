@@ -307,7 +307,7 @@ class AssetsView(QWidget):
 
     def _open_fit_dialog(self, row: sqlite3.Row) -> None:
         name = row["custom_name"] or row["item"]
-        dialog = FitDialog(row["item_id"], name, self)
+        dialog = FitDialog(row["item_id"], name, ship_type_id=row["type_id"], parent=self)
         dialog.exec()
 
     def _update_summary(self) -> None:
