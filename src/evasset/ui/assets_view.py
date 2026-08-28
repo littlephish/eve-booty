@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import db, queries
+from .. import queries
 from ..config import ASSET_SAFETY_LOCATION_ID
 from .async_query import AsyncQuery
 from .fit_dialog import FitDialog
@@ -55,16 +55,11 @@ class _SortProxy(QSortFilterProxyModel):
 class AssetsView(QWidget):
     def __init__(
         self,
-        conn: sqlite3.Connection | None = None,
         parent: QWidget | None = None,
         *,
         defer_load: bool = False,
     ):
         super().__init__(parent)
-        # A connection is shared down from MainWindow so startup does not run
-        # the full schema script and migration check once per tab -- see
-        # first_load() for why the actual data query is optional here too.
-        self.conn = conn if conn is not None else db.init()
 
         root = QVBoxLayout(self)
 
@@ -362,13 +357,11 @@ class OverviewView(QWidget):
 
     def __init__(
         self,
-        conn: sqlite3.Connection | None = None,
         parent: QWidget | None = None,
         *,
         defer_load: bool = False,
     ):
         super().__init__(parent)
-        self.conn = conn if conn is not None else db.init()
 
         root = QVBoxLayout(self)
         bar = QHBoxLayout()

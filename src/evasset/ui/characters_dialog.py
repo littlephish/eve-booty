@@ -53,7 +53,12 @@ class CharactersDialog(QDialog):
         super().__init__(parent)
         self.settings = settings
         self.tokens = tokens
-        self.conn = db.init()
+        # db.connect(), not db.init(): this dialog is only ever opened from
+        # MainWindow, which has already run db.init(), so re-running the whole
+        # schema script and migration check every time someone opens Characters
+        # buys nothing. connect() caches one connection per thread, so this is
+        # the same object the main window and the Stockpile tab are using.
+        self.conn = db.connect()
         # Shared with the main window rather than a pool of its own: this
         # dialog is not modal any more, so its work and the window's work are
         # the same queue, shown in the same status bar, deduplicated against

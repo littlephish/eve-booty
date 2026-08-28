@@ -12,8 +12,6 @@ edit that took a visible moment to land would feel broken.
 
 from __future__ import annotations
 
-import sqlite3
-
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
@@ -314,13 +312,16 @@ class AddItemDialog(QDialog):
 class StockpileView(QWidget):
     def __init__(
         self,
-        conn: sqlite3.Connection | None = None,
         parent: QWidget | None = None,
         *,
         defer_load: bool = False,
     ):
         super().__init__(parent)
-        self.conn = conn if conn is not None else db.init()
+        # Unlike the other tabs this one writes, and edits land on the GUI
+        # thread (see the module docstring), so it does need a connection of
+        # its own. db.connect() returns this thread's cached one -- the very
+        # object MainWindow's db.init() created, not a second connection.
+        self.conn = db.connect()
         self._query = AsyncQuery(self)
 
         root = QVBoxLayout(self)

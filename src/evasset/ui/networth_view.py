@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import db, networth
+from .. import networth
 from .async_query import AsyncQuery
 from .models import fmt_isk, fmt_short_isk
 from .palette import delta_hex
@@ -79,13 +79,11 @@ TABLE_COLUMNS = [
 class NetWorthView(QWidget):
     def __init__(
         self,
-        conn=None,
         parent: QWidget | None = None,
         *,
         defer_load: bool = False,
     ):
         super().__init__(parent)
-        self.conn = conn if conn is not None else db.init()
 
         root = QVBoxLayout(self)
 

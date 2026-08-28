@@ -52,17 +52,20 @@ def app():
 
 @pytest.fixture
 def view(app):
-    """A view over the default database, seeded. It has to be the default
-    path, not a tmp_path file: AsyncQuery runs the query on a pool thread
-    against db.connect(), which always opens the configured database. (The
-    test suite's conftest points that at a scratch directory.)"""
+    """A view over the default database, seeded.
+
+    It has to be the default database, not a tmp_path file: the view takes no
+    connection, and AsyncQuery runs its query on a pool thread against
+    db.connect(), which always opens the configured database. The seam for
+    tests is EVASSET_DATA_DIR, which conftest points at a scratch directory.
+    """
     conn = db.init()
     # The default database lives for the whole test session, so the seed is
     # written to be re-runnable rather than assuming an empty file.
     conn.executescript("DELETE FROM assets; DELETE FROM prices;")
     conn.executescript(SEED)
     conn.commit()
-    widget = TreemapView(conn, defer_load=True)
+    widget = TreemapView(defer_load=True)
     widget.resize(900, 500)
     widget.show()  # so the layout gives the canvas a real size to tile into
     QtWidgets.QApplication.processEvents()

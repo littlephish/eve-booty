@@ -43,22 +43,26 @@ class MainWindow(QMainWindow):
         self.resize(1440, 880)
 
         self.tabs = QTabWidget()
-        # One connection, shared down to every tab, and every tab's first
-        # real query deferred until it is actually shown. Each view used to
-        # open its own connection via db.init(), which re-runs the full
-        # CREATE TABLE script and migration check every time -- harmless once,
-        # wasteful five times over on the main thread before the window even
-        # paints. And all five tabs used to reload() (query + format + resize)
-        # unconditionally in their own __init__, meaning a cold start paid for
-        # Assets, Overview, both Wallet tables and Net worth before you could
-        # look at any of them. Now only the tab on screen loads.
-        self.assets = AssetsView(self.conn, defer_load=True)
-        self.overview = OverviewView(self.conn, defer_load=True)
-        self.networth = NetWorthView(self.conn, defer_load=True)
-        self.wallet = WalletView(self.conn, defer_load=True)
-        self.structures = StructuresView(self.conn, defer_load=True)
-        self.stockpile = StockpileView(self.conn, defer_load=True)
-        self.treemap = TreemapView(self.conn, defer_load=True)
+        # Every tab's first real query is deferred until it is actually shown.
+        # All of them used to reload() (query + format + resize) in their own
+        # __init__, so a cold start paid for Assets, Overview, both Wallet
+        # tables and Net worth before you could look at any of them. Now only
+        # the tab on screen loads.
+        #
+        # The views take no connection. Their reads all go through AsyncQuery,
+        # which uses db.connect() on the pool thread it runs on, and the few
+        # GUI-thread queries (this class, the Stockpile tab's writes) call
+        # db.connect() for this thread's. db.connect() caches one connection
+        # per thread, so the db.init() above is what actually opens the main
+        # thread's -- and the schema script and migration check run once here
+        # rather than once per view.
+        self.assets = AssetsView(defer_load=True)
+        self.overview = OverviewView(defer_load=True)
+        self.networth = NetWorthView(defer_load=True)
+        self.wallet = WalletView(defer_load=True)
+        self.structures = StructuresView(defer_load=True)
+        self.stockpile = StockpileView(defer_load=True)
+        self.treemap = TreemapView(defer_load=True)
         self.log = _LogPane()
 
         self.tabs.addTab(self.assets, "Assets")

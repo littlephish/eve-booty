@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import csv
 import json
-import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QTimer
@@ -34,7 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import db, queries
+from .. import queries
 from .assets_view import _SortProxy
 from .async_query import AsyncQuery
 from .models import fill_combo
@@ -294,13 +293,11 @@ class _StructuresModel(QAbstractTableModel):
 class StructuresView(QWidget):
     def __init__(
         self,
-        conn: sqlite3.Connection | None = None,
         parent: QWidget | None = None,
         *,
         defer_load: bool = False,
     ):
         super().__init__(parent)
-        self.conn = conn if conn is not None else db.init()
         self._query = AsyncQuery(self)
 
         root = QVBoxLayout(self)
