@@ -11,8 +11,10 @@ Windows exe built with Nuitka.
 
 ## What it does
 
-- One flat asset table across all your characters and their corps, searchable by
-  item, group, container name, station, system, region or owner
+- One asset table across all your characters and their corps, filtered through a
+  single omnibox with a typed grammar (see below) and groupable by location,
+  system, region, owner, category or group — collapsible headers carry live
+  stacks / m³ / ISK rollups for whatever the filter leaves
 - Container trees flattened, so a module in a can in a ship in a station still
   reports the station
 - Items sitting in Asset Safety show up labelled as such rather than as an
@@ -24,11 +26,24 @@ Windows exe built with Nuitka.
   drones, fighters, cargo, fleet hangar and every specialized hold
 - Copy a fit straight into Pyfa as ESI fitting JSON, or as EFT text for a
   forum post or the in-game fitting window
-- Rollups by location, system, region, owner, category or group
-- A Treemap tab showing the same rollup as area, so "most of my ISK is in
+- A rollup rail beside the table: every location (or system, region, owner,
+  category, group) with its stacks, volume, value and a proportional value bar.
+  One click adds the label as a filter chip; stars pin favourites to the top,
+  and unresolved "Unknown location" entries fold into one row. When you search
+  for an item by name the rail flips to "where is it" — per-location quantities
+  of the matched items
+- A Treemap tab showing the same rollups as area, so "most of my ISK is in
   implants" is a glance rather than a read. Group by item group, system,
   region, owner or category; size by Jita buy or sell; right-click a tile to
-  filter the Assets tab to it
+  send it to the Assets tab as a filter chip
+- An estate strip above the table — net worth, assets, liquid ISK, volume,
+  unpriced count and a one-row value map of your top locations — always
+  whole-estate, never faceted by the filters below it
+- A row inspector (`Enter`): both price bases, price source and quote age,
+  volume, location and slot, plus Where else? / Refresh price / Pin price…
+- Honest price flagging: unpriced and manually pinned stacks are badged in the
+  value cells, quotes older than 48 h carry their age, and a manual price is
+  never overwritten by a reprice until you unpin it
 - Net worth per character, snapshotted on every sync and charted over time at
   both Jita buy and Jita sell, split into assets / wallet / sell orders / buy
   escrow / contracts / in-production
@@ -36,6 +51,41 @@ Windows exe built with Nuitka.
   type and buy/sell, with counterparty names resolved
 - CSV export of whatever the current filter shows
 - A `--sync` CLI mode so you can put it on a scheduler and just look at the chart
+
+## The Assets tab
+
+Everything that narrows the table is a token in one search field. Bare words
+match item and custom names; everything else is a `prefix:value` chip:
+
+```
+loc:"Jita IV - Moon 4"     sys:Jita      region:"The Forge"
+owner:Main                 cat:Ship      group:Battleship      meta:"Tech II"
+is:fitted  is:safety  is:unpriced  is:bpc
+val:>10m   val:<1b
+-owner:Alt                 (a leading - negates any token)
+```
+
+Typed tokens become deletable chips as you commit them, each washed in its
+kind's own colour (negations always in red); rail rows, value-map segments
+and the cell context menu all add chips the same way, and `Ctrl+F` (or the +
+button) opens a two-stage chip builder that first lists what can be filtered
+and then completes real values. Multiple chips of one kind OR together,
+different kinds AND. `Esc` peels the newest layer of state; Clear all drops
+the lot.
+
+Selection maths live in the footer (units · m³ · ISK for the selection, or the
+whole filtered set when nothing is selected), with Copy list (EVE multibuy
+text) and Appraise (copies the same text and opens
+[Janice](https://janice.e-351.com/)).
+
+Keyboard: `/` omnibox · `Ctrl+F` build a filter chip · `j`/`k` rows ·
+`space` select · `f` filter to the focused cell · `x` exclude it · `w` where
+else is this item · `Enter` inspector · `g` cycle group-by · `1`–`9` recall
+a saved view, `Ctrl+1`–`9` save one (filter, grouping and rail level
+together) · `?` the full key map.
+
+Pins and saved views persist in the database next to the assets they
+describe, so a copied database carries them along.
 
 ## Pricing
 
@@ -250,14 +300,16 @@ written against. Bump it after reading CCP's changelog, not before.
 uv run pytest
 ```
 
-No network needed. Most of them need no Qt either; the few that do build a real
-widget and are skipped automatically if PySide6 is missing. They cover the value
-maths, the search and rollup queries, the container-tree resolver (including a
-cyclic-parent case that would otherwise hang), the contract outlier filter and
-its packaged-volume floor, the `from_id` walk-back for transactions, append-only
-journal behaviour, the `/universe/names` batch-splitting retry, the treemap
-layout (that it tiles exactly, without overlaps, in proportion to value), and
-every text colour the UI draws, measured against WCAG AA in both themes.
+No network needed, and Qt runs offscreen where a widget is involved. They cover
+the value maths, the omnibox grammar and its SQL (quoting, negation, `val:`
+comparisons, saved-view round-trips), the rail rollup and facet queries, the
+grouped tree model, the Assets tab wired end to end, the treemap layout (that
+it tiles exactly, without overlaps, in proportion to value), the container-tree
+resolver (including a cyclic-parent case that would otherwise hang), the
+contract outlier filter and its packaged-volume floor, the `from_id` walk-back
+for transactions, append-only journal behaviour, the `/universe/names`
+batch-splitting retry, and every text colour the UI draws, measured against
+WCAG AA in both themes.
 
 To poke at the UI without an EVE account:
 

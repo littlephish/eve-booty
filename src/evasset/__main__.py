@@ -30,6 +30,14 @@ def main() -> int:
     app.setApplicationName("EVE Assets")
     app.setOrganizationName("evasset")
 
+    # Windows 11's dark palette ships Shadow -- the role all muted text in
+    # this app draws in -- as pure black, and AlternateBase as pure white.
+    # See ui/palette.normalised for the measurements; applied here, once,
+    # before any widget reads a colour.
+    from .ui.palette import normalised
+
+    app.setPalette(normalised(app.palette()))
+
     # db.init() -- the schema script, the migration check, and (just once,
     # the first launch after an upgrade that adds one) building a brand new
     # index over however many rows are already in the table -- used to run

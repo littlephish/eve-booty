@@ -1,11 +1,15 @@
-"""The Overview tab's numbers as a picture: one rectangle per group, sized by
-value, so "where is my ISK" is a glance rather than a read.
+"""Rollups as a picture: one rectangle per group, sized by value, so "where
+is my ISK" is a glance rather than a read.
 
-Same query as OverviewView (queries.location_totals) and the same grouping
-levels, deliberately -- this is a second rendering of one dataset, not a
-second dataset. Right-clicking a tile emits the same filter_assets_requested
-signal the Overview table does, so click-through to a filtered Assets tab
-behaves identically whichever view you came from.
+Reads queries.rail_rollups() -- the same rollup the Assets tab's side rail
+runs, over the same queries.ROLLUP_LEVELS vocabulary. Deliberately one
+dataset with two renderings rather than two queries that could disagree: the
+rail answers it as a ranked list, this answers it as area, and area is what
+makes "implants are most of it" land without reading a single number.
+
+Right-clicking a tile hands the label to the Assets tab as an omnibox filter
+chip. The level keys are the same strings as omni.LEVEL_KINDS, so a level is
+already a chip kind and nothing has to be translated between the two.
 
 The layout maths lives in evasset.treemap (Qt-free, unit tested); this file
 is the chrome, the painting and the hit testing. QtCharts is used elsewhere
@@ -183,13 +187,13 @@ def _is_other(tile: treemap.Tile) -> bool:
 
 
 class TreemapView(QWidget):
-    """Assets by value, as area. Group by the same levels the Overview table
-    offers."""
+    """Assets by value, as area, over the same levels the rail groups by."""
 
     LEVELS = queries.ROLLUP_LEVELS
 
-    # (level_key, value), same contract as OverviewView.filter_assets_requested
-    # so MainWindow can hand both to AssetsView.apply_external_filter().
+    # (level key, label) -- MainWindow turns it into an omnibox chip on the
+    # Assets tab. A signal rather than reaching for AssetsView directly, so
+    # this view does not need to know who is listening.
     filter_assets_requested = Signal(str, str)
 
     # (label, column key) for the value the tiles are sized by.
@@ -270,7 +274,11 @@ class TreemapView(QWidget):
         level = self.current_level()
 
         def fetch(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-            return queries.location_totals(conn, level)
+            # Unfiltered on purpose: the treemap is a whole-estate picture,
+            # the same way the estate strip above the Assets table is. The
+            # rail passes a WHERE here to stay in step with the omnibox;
+            # this deliberately does not.
+            return queries.rail_rollups(conn, level)
 
         self._query.run(fetch, self._on_rows, self._on_query_failed)
 
@@ -319,7 +327,7 @@ class TreemapView(QWidget):
             return None
         menu = QMenu(self)
         level = self.current_level()
-        action = menu.addAction(f'Filter Assets to "{tile.label}"')
+        action = menu.addAction(f'Show "{tile.label}" in Assets')
         action.triggered.connect(
             lambda: self.filter_assets_requested.emit(level, tile.label)
         )

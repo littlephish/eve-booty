@@ -220,6 +220,11 @@ CREATE INDEX IF NOT EXISTS idx_assets_owner ON assets(owner_type, owner_id);
 -- is exactly a WHERE location_id = ? lookup, and without this it is a full
 -- table scan of everything you own every time someone opens the fit dialog.
 CREATE INDEX IF NOT EXISTS idx_assets_direct_loc ON assets(location_id);
+-- item_id alone (the PK starts with owner_type, so it cannot serve this):
+-- the fitted/loose clause correlates p.item_id = a.location_id, and without
+-- this index the is:fitted chip was a full-scan-per-row query -- measured
+-- 17 seconds over 25k stacks, 7 ms with the index.
+CREATE INDEX IF NOT EXISTS idx_assets_item ON assets(item_id);
 
 CREATE TABLE IF NOT EXISTS wallets (
     owner_type TEXT NOT NULL,
@@ -401,6 +406,25 @@ CREATE TABLE IF NOT EXISTS networth_snapshots (
     total_sell_isk    REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_snap_owner ON networth_snapshots(owner_type, owner_id, taken_at);
+
+-- ------------------------------------------------------------ assets tab UI
+-- Rail pins and saved omnibox views live in the database, not settings.json:
+-- they reference data (labels, filter grammar) rather than preferences, and
+-- keeping them beside the assets means a copied database carries them along.
+-- Brand new tables, so CREATE TABLE IF NOT EXISTS is the whole migration.
+CREATE TABLE IF NOT EXISTS pinned_labels (
+    level TEXT NOT NULL,
+    label TEXT NOT NULL,
+    PRIMARY KEY (level, label)
+);
+
+-- state_json is the omnibox spec plus whatever view state the Assets tab
+-- chooses to remember (group-by, rail level); the schema stays agnostic so
+-- the UI can grow the payload without a migration.
+CREATE TABLE IF NOT EXISTS saved_views (
+    slot       INTEGER PRIMARY KEY,
+    state_json TEXT NOT NULL
+);
 
 -- ----------------------------------------------------------- http etag cache
 CREATE TABLE IF NOT EXISTS http_cache (

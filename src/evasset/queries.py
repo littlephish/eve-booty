@@ -10,10 +10,10 @@ from .config import ASSET_SAFETY_LOCATION_ID
 # "Asset Safety" label for anything CCP repackaged after an eviction/pod loss
 # (see ASSET_SAFETY_LOCATION_ID -- a fixed constant, not a real place, so it
 # never resolves to a station/structure/system name on its own). Shared
-# between ASSET_ROWS itself and OVERVIEW_FILTER_EXPR below so the text a user
-# clicks in the Overview tab is the exact same expression filtered on when
-# they ask to see just that location in Assets -- no risk of the two
-# disagreeing on what a location is "called".
+# between ASSET_ROWS itself and OVERVIEW_FILTER_EXPR below so the label a
+# user clicks in the rail (or picks from a completion) is the exact same
+# expression the table is then filtered on -- no risk of the two disagreeing
+# on what a location is "called".
 LOCATION_EXPR = f"""CASE WHEN a.root_location_id = {ASSET_SAFETY_LOCATION_ID} THEN 'Asset Safety'
          ELSE COALESCE(st.name, sr.name, rsys.name,
                         'Unknown location ' || a.root_location_id)
@@ -44,6 +44,7 @@ SELECT
     COALESCE(p.buy_price, 0)                                               AS buy_price,
     COALESCE(p.sell_price, 0)                                              AS sell_price,
     COALESCE(p.source, 'none')                                             AS price_source,
+    p.updated_at                                                           AS price_updated_at,
     a.quantity * COALESCE(p.buy_price, 0)                                  AS buy_value,
     a.quantity * COALESCE(p.sell_price, 0)                                 AS sell_value,
     COALESCE(t.volume, 0)                                                  AS unit_volume,
@@ -87,11 +88,12 @@ NUMERIC_COLUMNS = {
 }
 ISK_COLUMNS = {"buy_price", "sell_price", "buy_value", "sell_value"}
 
-# (display label, level key) for every way the assets can be rolled up. Lives
-# here rather than on a view because two of them now offer it -- the Overview
-# table and the Treemap tab -- and a level that appears in one but not the
-# other would be a puzzle for the user and a silent KeyError for the
-# right-click filter below.
+# (display label, level key) for every way the assets can be rolled up. The
+# shared vocabulary between the UI that offers the levels -- the rail's level
+# combo, the Assets group-by, the Treemap tab -- and the SQL that implements
+# them: the UI shows the labels, and the keys index OVERVIEW_FILTER_EXPR and
+# _LEVEL_COLUMN below. A level added here without a matching entry in each is
+# caught immediately rather than drifting apart per layer.
 ROLLUP_LEVELS = [
     ("Location", "location"),
     ("Solar system", "system"),
@@ -101,11 +103,11 @@ ROLLUP_LEVELS = [
     ("Group", "group"),
 ]
 
-# One WHERE-usable expression per grouping level in ROLLUP_LEVELS, so
-# right-clicking a rolled-up row ("Jita IV - Moon 4 ...", "Asset Safety", a
-# region, an owner, ...) can hand back a clause that picks out exactly the
-# assets that rolled into it. Keyed the same as ROLLUP_LEVELS' second element
-# and location_totals()'s `col` dict.
+# One WHERE-usable expression per grouping level in ROLLUP_LEVELS, so an
+# exact-label chip ("Jita IV - Moon 4 ...", "Asset Safety", a region, an
+# owner, ...) filters on the very expression the rollups group by -- see
+# omni.py, which builds its clauses from this table. Keyed the same as
+# ROLLUP_LEVELS' second element and _LEVEL_COLUMN below.
 OVERVIEW_FILTER_EXPR = {
     "location": LOCATION_EXPR,
     "system": "sys.name",
@@ -167,38 +169,181 @@ def fetch_fit(conn: sqlite3.Connection, ship_item_id: int) -> list[sqlite3.Row]:
     return list(conn.execute(FIT_ROWS, (ship_item_id,)))
 
 
-def location_totals(conn: sqlite3.Connection, level: str = "location") -> list[sqlite3.Row]:
-    """Roll assets up by location, system, region, owner, category or group."""
-    col = {
-        "location": "location",
-        "system": "system",
-        "region": "region",
-        "owner": "owner",
-        "category": "category",
-        "group": "grp",
-    }.get(level, "location")
+def group_names(
+    conn: sqlite3.Connection, level: str, where: str = "", params: tuple = ()
+) -> list[str]:
+    """Distinct labels for one grouping level, faceted by the current filters.
+
+    Faceted on purpose: a picker fed from here takes the same WHERE the table
+    is showing, so it only ever lists names that still have rows behind them
+    -- picking one always narrows to something visible instead of an empty
+    table. Names only, no totals: this is a filter vocabulary, not a report,
+    and the table underneath already sums whatever the pick leaves. The WHERE
+    is written against ASSET_ROWS' inner aliases (t.name,
+    a.root_location_id, ...), so it must be injected inside the subquery, not
+    around it.
+    """
+    col = _LEVEL_COLUMN.get(level, "location")
     sql = f"""
-        SELECT COALESCE({col}, 'Unknown') AS label,
-               COUNT(*)         AS stacks,
-               SUM(quantity)    AS units,
-               SUM(buy_value)   AS buy_value,
-               SUM(sell_value)  AS sell_value,
-               SUM(volume)      AS volume
-        FROM ({ASSET_ROWS})
+        SELECT DISTINCT {col} AS label
+        FROM ({ASSET_ROWS} {f"WHERE {where}" if where else ""})
+        WHERE label IS NOT NULL
+        ORDER BY label COLLATE NOCASE
+    """
+    return [r["label"] for r in conn.execute(sql, params)]
+
+
+# Level key -> ASSET_ROWS output column, shared by group_names, rail_rollups
+# and where_is_item so all three agree on what each level is labelled by.
+# "group" maps to "grp" because ASSET_ROWS has to dodge the SQL keyword.
+_LEVEL_COLUMN = {
+    "location": "location",
+    "system": "system",
+    "region": "region",
+    "owner": "owner",
+    "category": "category",
+    "group": "grp",
+}
+
+_RAIL_ORDER = {
+    "value": "sell_value DESC",
+    "name": "label COLLATE NOCASE ASC",
+    "volume": "volume DESC",
+}
+
+
+def rail_rollups(
+    conn: sqlite3.Connection,
+    level: str,
+    where: str = "",
+    params: tuple = (),
+    sort: str = "value",
+) -> list[sqlite3.Row]:
+    """Per-label rollups: label, stacks, units, volume, buy_value, sell_value.
+
+    Feeds the side rail and the Treemap tab. buy_value is carried alongside
+    sell_value because the treemap lets you size tiles by either basis; the
+    rail only reads sell_value, and one extra SUM over an already-grouped
+    scan is cheaper than a second near-identical query.
+
+    Faceted the same way as group_names -- the WHERE is written against
+    ASSET_ROWS' inner aliases and injected inside the subquery -- so the rail
+    only ever offers labels that still have rows behind them under the
+    current filters. NULL labels (an unresolved system mid-sync, a missing
+    meta group) are dropped rather than rendered as a blank unclickable row.
+    An unknown sort falls back to value: the sort key crosses the UI boundary
+    as a plain string, and a typo there should degrade, not raise.
+    """
+    col = _LEVEL_COLUMN.get(level, "location")
+    order = _RAIL_ORDER.get(sort, _RAIL_ORDER["value"])
+    sql = f"""
+        SELECT {col}         AS label,
+               COUNT(*)      AS stacks,
+               SUM(quantity) AS units,
+               SUM(volume)   AS volume,
+               SUM(buy_value)  AS buy_value,
+               SUM(sell_value) AS sell_value
+        FROM ({ASSET_ROWS} {f"WHERE {where}" if where else ""})
+        WHERE label IS NOT NULL
+        GROUP BY label
+        ORDER BY {order}
+    """
+    return list(conn.execute(sql, params))
+
+
+def where_is_item(
+    conn: sqlite3.Connection, level: str, where: str = "", params: tuple = ()
+) -> list[sqlite3.Row]:
+    """Total quantity per label -- the rail's "where is it" flip.
+
+    When the user is hunting one item, per-label ISK rollups answer the wrong
+    question; what matters is how many of the thing sit at each place, biggest
+    pile first. Same faceting and NULL handling as rail_rollups.
+    """
+    col = _LEVEL_COLUMN.get(level, "location")
+    sql = f"""
+        SELECT {col} AS label, SUM(quantity) AS quantity
+        FROM ({ASSET_ROWS} {f"WHERE {where}" if where else ""})
+        WHERE label IS NOT NULL
+        GROUP BY label
+        ORDER BY quantity DESC
+    """
+    return list(conn.execute(sql, params))
+
+
+def _enabled_owner_sql(alias: str) -> str:
+    """WHERE fragment keeping only rows that belong to a counted owner.
+
+    Mirrors networth.compute_all's roster exactly: characters flagged
+    enabled, plus corporations that have a token to be synced through
+    (via_character_id set). Data for a disabled character stays in the
+    database -- disabling is "stop counting this", not "forget this" -- so
+    every whole-estate figure must apply the same roster, or the strip and
+    the Net worth tab disagree over the same file the moment a character is
+    switched off.
+    """
+    return f"""(({alias}.owner_type = 'character' AND {alias}.owner_id IN
+             (SELECT character_id FROM characters WHERE enabled = 1))
+        OR ({alias}.owner_type = 'corporation' AND {alias}.owner_id IN
+             (SELECT corporation_id FROM corporations WHERE via_character_id IS NOT NULL)))"""
+
+
+def estate_summary(conn: sqlite3.Connection) -> dict:
+    """Whole-estate figures for the net-worth strip.
+
+    Whole-estate means every enabled owner, and deliberately not the table's
+    current filters: the strip answers "what is everything worth" while the
+    table underneath answers "what am I looking at", and tying the strip to
+    the filters would make the headline number jump around every time a chip
+    is added. Assets are valued at Jita sell only -- the strip is a glance,
+    not the two-basis report the Net worth tab already provides.
+    wallet_liquid is the same liquid bucket networth.py computes per owner
+    (balances, plus sell orders at their listed price -- the ISK actually
+    coming back if they fill -- plus buy-order escrow), summed over the same
+    enabled-owner roster so the two screens always agree.
+    """
+    row = conn.execute(
+        f"""SELECT SUM(sell_value) AS assets_sell,
+                   SUM(volume)     AS volume,
+                   SUM(CASE WHEN price_source = 'none' THEN 1 ELSE 0 END) AS unpriced_stacks
+            FROM ({ASSET_ROWS} WHERE {_enabled_owner_sql("a")})"""
+    ).fetchone()
+    assets_sell = float(row["assets_sell"] or 0)
+    liquid = conn.execute(
+        f"""SELECT COALESCE((SELECT SUM(balance) FROM wallets w
+                             WHERE {_enabled_owner_sql("w")}), 0)
+                 + COALESCE((SELECT SUM(volume_remain * price) FROM market_orders o
+                             WHERE o.is_buy_order = 0 AND {_enabled_owner_sql("o")}), 0)
+                 + COALESCE((SELECT SUM(escrow) FROM market_orders o
+                             WHERE o.is_buy_order = 1 AND {_enabled_owner_sql("o")}), 0)"""
+    ).fetchone()[0]
+    return {
+        "assets_sell": assets_sell,
+        "wallet_liquid": float(liquid or 0),
+        "total": assets_sell + float(liquid or 0),
+        "volume": float(row["volume"] or 0),
+        "unpriced_stacks": int(row["unpriced_stacks"] or 0),
+    }
+
+
+def value_map(conn: sqlite3.Connection, limit: int = 6) -> list[sqlite3.Row]:
+    """Top locations estate-wide by sell value: label, sell_value.
+
+    Feeds the strip's one-row value map: same enabled-owner roster as
+    estate_summary (the segments must sum to what the strip's headline
+    counts), unfiltered like the rest of the strip. The limit only bounds
+    the query -- the widget itself culls to what its width can show and
+    folds the rest into a residue segment (see ui/strip.py).
+    """
+    sql = f"""
+        SELECT location AS label, SUM(sell_value) AS sell_value
+        FROM ({ASSET_ROWS} WHERE {_enabled_owner_sql("a")})
+        WHERE label IS NOT NULL
         GROUP BY label
         ORDER BY sell_value DESC
+        LIMIT {int(limit)}
     """
     return list(conn.execute(sql))
-
-
-OVERVIEW_COLUMNS = [
-    ("label", "Grouping"),
-    ("stacks", "Stacks"),
-    ("units", "Units"),
-    ("buy_value", "Buy value"),
-    ("sell_value", "Sell value"),
-    ("volume", "Volume m3"),
-]
 
 
 def price_coverage(conn: sqlite3.Connection) -> dict:

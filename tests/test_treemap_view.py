@@ -175,7 +175,7 @@ def test_right_click_offers_a_filter_that_matches_the_grouping(view):
     menu = view.menu_for_tile(tile)
     assert menu is not None
     (action,) = menu.actions()
-    assert action.text() == f'Filter Assets to "{tile.label}"'
+    assert action.text() == f'Show "{tile.label}" in Assets'
     assert seen == [], "building the menu must not emit anything on its own"
 
     action.trigger()

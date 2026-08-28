@@ -4,11 +4,15 @@
 
 | Feature | Notes |
 | --- | --- |
-| Multi-character assets | Flat table, free-text search, owner/category/region filters |
+| Multi-character assets | One table, groupable with live rollup headers, filtered through the omnibox grammar (`loc:` `owner:` `is:unpriced` `val:>10m` …) |
 | Corp assets | Per-character opt-in, needs the in-game role |
 | Container flattening | Ship-in-ship-in-can resolves to the station |
 | Player structures | Named via `/universe/structures`; no-access ones are marked and not re-asked |
-| Rollups | By location, system, region, owner, category, group |
+| Rollup rail | Per-label stacks / m³ / ISK with value bars at six grouping levels; click-to-filter, star pins, "where is it" flip when hunting an item |
+| Estate strip | Whole-estate net worth, assets, liquid ISK, volume, unpriced count and a value map of top locations, above the Assets table |
+| Row inspector | Both price bases, source and quote age, where-else, single-type price refresh, manual price pinning |
+| Saved views & pins | `Ctrl+1–9` saves filter + grouping + rail level to the database; rail pins persist per level |
+| Manual prices | Pin a price per type; the repricer never overwrites a pin |
 | Net worth tracker | Per character and corp, snapshot per sync, six-way split, charted at both Jita buy and Jita sell |
 | Pricing | Jita 4-4 buy and sell; capitals from public contract average where the book is thin |
 | Wallets, market orders, contracts, industry jobs, blueprints | Stored; orders/contracts/jobs feed net worth |
@@ -31,7 +35,8 @@ Roughly in the order I'd add them.
   what you own. Everything needed is already imported.
 - **Stockpile** — target quantities per item per location, with a shortfall
   column. The thing most people actually open jEveAssets for.
-- **Values / summary tab** — a proper ISK dashboard rather than the status-bar line.
+- ~~**Values / summary tab**~~ — done, as the estate strip on the Assets tab
+  (net worth, assets, liquid ISK, volume, unpriced count, value map).
 - **Realised profit per item** — the Transactions tab shows cash in against cash
   out, which is not profit. Matching a sale back to the lot it came from needs
   FIFO inventory accounting over the transaction history.
