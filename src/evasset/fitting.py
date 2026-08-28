@@ -239,3 +239,111 @@ def to_eft(ship_name: str, rows: list[sqlite3.Row]) -> str:
 
     header = f"[{ship_name}, EVE Assets export]"
     return f"{header}\n\n" + "\n\n\n".join(sections)
+
+
+# -------------------------------------------------------- ESI fitting export
+# The JSON shape used for a saved fitting: {name, ship_type_id, description,
+# items: [{flag, quantity, type_id}, ...]}. This is what Pyfa reads from the
+# clipboard -- Port.importAuto in pyfa-org/Pyfa's service/port/port.py treats
+# any buffer whose first non-blank character is "{" as an ESI fit and hands it
+# to importESI (service/port/esi.py).
+#
+# The flag numbers are inventory flag ids, taken from Pyfa's own INV_FLAGS in
+# service/port/esi.py rather than guessed. They are *integers*: importESI
+# compares flag against 5/87/158 numerically and sorts the item list by it.
+# Note that ESI's own /characters/{id}/fittings/ endpoints have since moved to
+# *string* flags ("HiSlot0"), so this payload is for Pyfa and the fit-sharing
+# format, not for POSTing straight at ESI.
+_ESI_SLOT_BASES = {
+    "LoSlot": 11,       # LoSlot0-7   -> 11-18
+    "MedSlot": 19,      # MedSlot0-7  -> 19-26
+    "HiSlot": 27,       # HiSlot0-7   -> 27-34
+    "RigSlot": 92,      # RigSlot0-7  -> 92-99
+    "SubSystemSlot": 125,
+    "ServiceSlot": 164,
+}
+_ESI_FLAG_CARGO = 5
+_ESI_FLAG_DRONE_BAY = 87
+_ESI_FLAG_FIGHTER_BAY = 158
+
+# ESI's own limits on the fitting object, worth honouring even though we are
+# handing this to Pyfa rather than to ESI: name 1-50 chars, description <= 500.
+_ESI_NAME_MAX = 50
+_ESI_DESCRIPTION_MAX = 500
+
+_SLOT_FLAG_RE = re.compile(r"^([A-Za-z]+?)(\d+)$")
+
+
+def _esi_slot_flag(location_flag: str) -> int | None:
+    """"HiSlot3" -> 30. None for anything that is not a numbered slot, which
+    includes FighterTube0-4 -- those are a bay, handled separately below."""
+    m = _SLOT_FLAG_RE.match(location_flag or "")
+    if not m:
+        return None
+    base = _ESI_SLOT_BASES.get(m.group(1))
+    return None if base is None else base + int(m.group(2))
+
+
+def to_esi_fitting(
+    ship_name: str,
+    ship_type_id: int,
+    rows: list[sqlite3.Row],
+    description: str = "",
+) -> dict:
+    """Render fetch_fit() rows as an ESI fitting object, ready to be JSON
+    encoded and pasted into Pyfa's Import From Clipboard.
+
+    Two things are worth knowing about the shape this produces:
+
+    A charge sitting in a module's slot is exported as *cargo*, not at the
+    module's own flag. That is what Pyfa's exporter does, and it is the only
+    thing that survives the round trip: importESI builds a Module() for every
+    flag it does not recognise as cargo/drone/fighter, Module() raises
+    ValueError on a charge, and the except branch drops it silently. A charge
+    left on a slot flag would therefore vanish on import; in cargo it arrives.
+
+    Holds with no fitting representation (fleet hangar, ore hold, fuel bay and
+    friends) are left out entirely -- same scope decision as to_eft above.
+    Their flags would be read as slot numbers by importESI and turn into
+    nonsense modules.
+    """
+    slots: list[tuple[int, int]] = []
+    cargo: dict[int, int] = {}
+    drones: dict[int, int] = {}
+    fighters: dict[int, int] = {}
+
+    def stack(bucket: dict[int, int], row: sqlite3.Row) -> None:
+        type_id = int(row["type_id"])
+        bucket[type_id] = bucket.get(type_id, 0) + int(row["quantity"] or 0)
+
+    for r in rows:
+        flag_name = r["location_flag"] or ""
+        slot_flag = _esi_slot_flag(flag_name)
+        if slot_flag is not None:
+            if (r["category"] or "") == "Charge":
+                stack(cargo, r)
+            else:
+                # One module per numbered slot, hence quantity 1 -- Pyfa's
+                # exporter hardcodes the same.
+                slots.append((slot_flag, int(r["type_id"])))
+        elif flag_name == _EFT_DRONE_FLAG:
+            stack(drones, r)
+        elif flag_name in _EFT_FIGHTER_FLAGS:
+            stack(fighters, r)
+        elif flag_name == _EFT_CARGO_FLAG:
+            stack(cargo, r)
+
+    items = [{"flag": flag, "quantity": 1, "type_id": tid} for flag, tid in sorted(slots)]
+    for flag, bucket in (
+        (_ESI_FLAG_CARGO, cargo),
+        (_ESI_FLAG_DRONE_BAY, drones),
+        (_ESI_FLAG_FIGHTER_BAY, fighters),
+    ):
+        items += [{"flag": flag, "quantity": q, "type_id": t} for t, q in bucket.items()]
+
+    return {
+        "name": (ship_name or "Unnamed fit")[:_ESI_NAME_MAX],
+        "ship_type_id": int(ship_type_id),
+        "description": (description or "")[:_ESI_DESCRIPTION_MAX],
+        "items": items,
+    }

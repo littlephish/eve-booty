@@ -98,3 +98,76 @@ def delta_hex(positive: bool, palette: QPalette | None = None) -> str:
     if not positive:
         return status_hex(CRITICAL, palette) or "#B3261E"
     return POSITIVE[1] if is_dark(palette) else POSITIVE[0]
+
+
+# Categorical fills for treemap tiles. Unlike everything above, these are one
+# set for both themes rather than a light/dark pair: they are data ink, the
+# same way a chart's series colours are, and recolouring the data when the OS
+# theme flips would make two screenshots of the same assets incomparable.
+#
+# What does adapt is the text drawn on top -- readable_text_on() measures each
+# fill and picks black or white, so the label's contrast is a computed result
+# rather than a hope. Every fill here clears WCAG AA against whichever it
+# picks; tests/test_contrast.py measures that independently.
+#
+# The first seven are the Okabe-Ito colourblind-safe palette ("Color Universal
+# Design", Okabe & Ito 2008), which is the reason for the slightly odd hues --
+# they stay distinguishable under the common forms of colour blindness. The
+# rest are added to get enough distinct tiles for a treemap and are checked
+# for the same contrast property, not for colourblind separability.
+TREEMAP_FILLS = [
+    "#E69F00",  # orange
+    "#56B4E9",  # sky blue
+    "#009E73",  # bluish green
+    "#F0E442",  # yellow
+    "#0072B2",  # blue
+    "#D55E00",  # vermillion
+    "#CC79A7",  # reddish purple
+    "#9467BD",  # purple
+    "#8C564B",  # brown
+    "#17BECF",  # cyan
+    "#BCBD22",  # olive
+    "#7F7F7F",  # grey
+]
+
+# The long tail rolled up by treemap.roll_up() gets a deliberately flat grey
+# instead of the next colour in the rotation -- it is not a category, and
+# giving it a hue of its own invites reading it as one.
+TREEMAP_OTHER_FILL = "#9E9E9E"
+
+_BLACK, _WHITE = "#000000", "#FFFFFF"
+
+
+def _relative_luminance(hex_colour: str) -> float:
+    """WCAG 2.1 relative luminance."""
+    raw = hex_colour.lstrip("#")
+    channels = []
+    for offset in (0, 2, 4):
+        value = int(raw[offset:offset + 2], 16) / 255
+        channels.append(
+            value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+        )
+    red, green, blue = channels
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+def contrast_ratio(a: str, b: str) -> float:
+    """WCAG 2.1 contrast ratio between two hex colours, 1.0 to 21.0."""
+    lum_a, lum_b = _relative_luminance(a), _relative_luminance(b)
+    lighter, darker = max(lum_a, lum_b), min(lum_a, lum_b)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def treemap_fill(index: int) -> str:
+    """Fill for the nth tile, cycling. Index rather than a hash of the label:
+    tiles arrive sorted by value, so cycling gives neighbouring tiles
+    different colours, where hashing would happily give two adjacent tiles the
+    same one."""
+    return TREEMAP_FILLS[index % len(TREEMAP_FILLS)]
+
+
+def readable_text_on(background_hex: str) -> str:
+    """Black or white, whichever has more contrast against the given fill."""
+    if contrast_ratio(_BLACK, background_hex) >= contrast_ratio(_WHITE, background_hex):
+        return _BLACK
+    return _WHITE

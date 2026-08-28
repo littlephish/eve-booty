@@ -43,7 +43,6 @@ Roughly in the order I'd add them.
 - **Materials** — flatten blueprint material requirements.
 - **Slots** — how many manufacturing, research, order and contract slots are in
   use against the character's skill-derived maximum.
-- **Loadouts** — read fitted modules off ships and export EFT.
 - **Mining ledger** — `/characters/{id}/mining` and the corp observers.
 - **Routing** — jump planner between the systems holding your stuff.
 - **Skills, standings, loyalty points, agents** — straightforward ESI pulls,

@@ -1,4 +1,5 @@
 """Logic tests that need no network and no Qt."""
+import json
 import os
 import sys
 import tempfile
@@ -374,6 +375,114 @@ def test_to_eft_leaves_out_holds_eft_has_no_syntax_for(conn):
     assert text == "[Dominix, EVE Assets export]\n\n"
     assert "FleetHangar" not in text
     assert "Tritanium" not in text
+
+
+def test_to_esi_fitting_uses_pyfas_inventory_flag_numbers(conn):
+    """Flag numbers cross-checked against pyfa-org/Pyfa's INV_FLAGS in
+    service/port/esi.py -- low 11, med 19, high 27, rig 92, subsystem 125,
+    cargo 5, drone bay 87, fighter bay 158. They are integers on purpose:
+    Pyfa's importESI compares flag numerically and sorts the item list by it.
+    """
+    conn.executescript(
+        """
+        INSERT INTO sde_categories VALUES (7,'Module',1),(8,'Charge',1),(18,'Drone',1);
+        INSERT INTO sde_groups VALUES (55,7,'Autocannon',1),(83,8,'Projectile Ammo',1),
+          (100,18,'Combat Drone',1),(60,7,'Damage Control',1);
+        INSERT INTO sde_types (type_id,name,group_id,portion_size,published) VALUES
+          (2873,'125mm Gatling AutoCannon II',55,1,1),
+          (206,'EMP S',83,1,1),
+          (2456,'Hobgoblin II',100,1,1),
+          (2048,'Damage Control II',60,1,1);
+        INSERT INTO assets (owner_type,owner_id,item_id,type_id,quantity,location_id,
+                            location_flag,location_type,is_singleton) VALUES
+          ('character',100,90,2048,1,2,'LoSlot0','item',1),
+          ('character',100,91,2873,1,2,'HiSlot0','item',1),
+          ('character',100,92,206,50,2,'HiSlot0','item',0),
+          ('character',100,93,2456,3,2,'DroneBay','item',0),
+          ('character',100,94,34,12345,2,'Cargo','item',0);
+        """
+    )
+    rows = queries.fetch_fit(conn, 2)
+    fit = fitting.to_esi_fitting("Dominix", 645, rows)
+
+    assert fit["name"] == "Dominix"
+    assert fit["ship_type_id"] == 645
+    assert fit["description"] == ""
+    assert fit["items"] == [
+        {"flag": 11, "quantity": 1, "type_id": 2048},   # LoSlot0
+        {"flag": 27, "quantity": 1, "type_id": 2873},   # HiSlot0
+        {"flag": 5, "quantity": 12345, "type_id": 34},  # cargo
+        {"flag": 5, "quantity": 50, "type_id": 206},    # the loaded charge, as cargo
+        {"flag": 87, "quantity": 3, "type_id": 2456},   # drone bay
+    ]
+
+
+def test_to_esi_fitting_puts_a_loaded_charge_in_cargo(conn):
+    """A charge left on its module's slot flag is silently dropped by Pyfa's
+    importESI -- it builds a Module() for any unrecognised flag and swallows
+    the ValueError a charge raises. Cargo is the only place it survives."""
+    conn.executescript(
+        """
+        INSERT INTO sde_categories VALUES (7,'Module',1),(8,'Charge',1);
+        INSERT INTO sde_groups VALUES (55,7,'Autocannon',1),(83,8,'Projectile Ammo',1);
+        INSERT INTO sde_types (type_id,name,group_id,portion_size,published) VALUES
+          (2873,'125mm Gatling AutoCannon II',55,1,1),(206,'EMP S',83,1,1);
+        INSERT INTO assets (owner_type,owner_id,item_id,type_id,quantity,location_id,
+                            location_flag,location_type,is_singleton) VALUES
+          ('character',100,91,2873,1,2,'HiSlot0','item',1),
+          ('character',100,92,206,50,2,'HiSlot0','item',0);
+        """
+    )
+    fit = fitting.to_esi_fitting("Rifter", 587, queries.fetch_fit(conn, 2))
+    charge = [i for i in fit["items"] if i["type_id"] == 206]
+    assert charge == [{"flag": 5, "quantity": 50, "type_id": 206}]
+
+
+def test_to_esi_fitting_stacks_repeated_types_in_one_entry(conn):
+    """Two stacks of the same ammo in the hold are one cargo entry, not two
+    -- a fitting lists a type once with a total."""
+    conn.executescript(
+        """
+        INSERT INTO assets (owner_type,owner_id,item_id,type_id,quantity,location_id,
+                            location_flag,location_type,is_singleton) VALUES
+          ('character',100,96,34,100,2,'Cargo','item',0),
+          ('character',100,97,34,25,2,'Cargo','item',0);
+        """
+    )
+    fit = fitting.to_esi_fitting("Rifter", 587, queries.fetch_fit(conn, 2))
+    assert fit["items"] == [{"flag": 5, "quantity": 125, "type_id": 34}]
+
+
+def test_to_esi_fitting_leaves_out_holds_a_fitting_cannot_express(conn):
+    """A fleet hangar has no fitting flag. Emitting it would have importESI
+    read the flag as a slot number and invent a module."""
+    conn.execute(
+        "INSERT INTO assets (owner_type,owner_id,item_id,type_id,quantity,location_id,"
+        "location_flag,location_type,is_singleton) VALUES "
+        "('character',100,95,34,10,2,'FleetHangar','item',0)"
+    )
+    fit = fitting.to_esi_fitting("Dominix", 645, queries.fetch_fit(conn, 2))
+    assert fit["items"] == []
+
+
+def test_to_esi_fitting_json_is_what_pyfa_sniffs_for(conn):
+    """Pyfa's Port.importAuto picks the ESI importer only when the first
+    non-blank character of the clipboard is "{"."""
+    conn.execute(
+        "INSERT INTO assets (owner_type,owner_id,item_id,type_id,quantity,location_id,"
+        "location_flag,location_type,is_singleton) VALUES "
+        "('character',100,98,34,7,2,'Cargo','item',0)"
+    )
+    fit = fitting.to_esi_fitting("Dominix", 645, queries.fetch_fit(conn, 2))
+    text = json.dumps(fit)
+    assert text.lstrip()[0] == "{"
+    assert json.loads(text)["items"][0]["flag"] == 5
+
+
+def test_to_esi_fitting_truncates_a_name_past_esis_limit(conn):
+    """ESI caps a fitting name at 50 characters."""
+    fit = fitting.to_esi_fitting("N" * 80, 645, queries.fetch_fit(conn, 2))
+    assert len(fit["name"]) == 50
 
 
 def test_group_fit_falls_back_for_an_unmapped_flag(conn):

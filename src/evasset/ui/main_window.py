@@ -25,6 +25,7 @@ from .stockpile_view import StockpileView
 from .structures_view import StructuresView
 from .task_bar import TaskBar
 from .tasks import TaskManager
+from .treemap_view import TreemapView
 from .wallet_view import WalletView
 from .workers import RepriceJob, SdeUpdateJob, SnapshotJob, SyncJob
 
@@ -57,10 +58,12 @@ class MainWindow(QMainWindow):
         self.wallet = WalletView(self.conn, defer_load=True)
         self.structures = StructuresView(self.conn, defer_load=True)
         self.stockpile = StockpileView(self.conn, defer_load=True)
+        self.treemap = TreemapView(self.conn, defer_load=True)
         self.log = _LogPane()
 
         self.tabs.addTab(self.assets, "Assets")
         self.tabs.addTab(self.overview, "Overview")
+        self.tabs.addTab(self.treemap, "Treemap")
         self.tabs.addTab(self.wallet, "Wallet")
         self.tabs.addTab(self.networth, "Net worth")
         self.tabs.addTab(self.structures, "Structures")
@@ -71,6 +74,7 @@ class MainWindow(QMainWindow):
         self._tab_first_load = {
             self.assets: self.assets.first_load,
             self.overview: self.overview.first_load,
+            self.treemap: self.treemap.first_load,
             self.wallet: self.wallet.first_load,
             self.networth: self.networth.first_load,
             self.structures: self.structures.first_load,
@@ -79,6 +83,7 @@ class MainWindow(QMainWindow):
         self._tab_reload = {
             self.assets: lambda: (self.assets.refresh_filters(), self.assets.reload()),
             self.overview: self.overview.reload,
+            self.treemap: self.treemap.reload,
             self.wallet: self.wallet.reload,
             self.networth: self.networth.refresh,
             self.structures: lambda: (
@@ -90,6 +95,7 @@ class MainWindow(QMainWindow):
         self._dirty: set = set()
         self.tabs.currentChanged.connect(self._ensure_tab_loaded)
         self.overview.filter_assets_requested.connect(self._filter_assets_from_overview)
+        self.treemap.filter_assets_requested.connect(self._filter_assets_from_overview)
         self._status_query = AsyncQuery(self)
 
         # Connected here rather than next to the TaskManager itself: warned

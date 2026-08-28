@@ -350,14 +350,8 @@ class OverviewView(QWidget):
     """Same assets, rolled up. Answers "which station is holding 40b of my
     stuff" without scrolling a 20,000 row table."""
 
-    LEVELS = [
-        ("Location", "location"),
-        ("Solar system", "system"),
-        ("Region", "region"),
-        ("Owner", "owner"),
-        ("Category", "category"),
-        ("Group", "group"),
-    ]
+    # Shared with the Treemap tab; see queries.ROLLUP_LEVELS.
+    LEVELS = queries.ROLLUP_LEVELS
 
     # (level_key, value) -- picked up by MainWindow and handed to
     # AssetsView.apply_external_filter() so a right-click here can switch to

@@ -22,7 +22,13 @@ Windows exe built with Nuitka.
 - Right-click a ship and View fit to see everything on it: fitted modules and
   loaded charges (paired up even though ESI reports both under the same slot),
   drones, fighters, cargo, fleet hangar and every specialized hold
+- Copy a fit straight into Pyfa as ESI fitting JSON, or as EFT text for a
+  forum post or the in-game fitting window
 - Rollups by location, system, region, owner, category or group
+- A Treemap tab showing the same rollup as area, so "most of my ISK is in
+  implants" is a glance rather than a read. Group by item group, system,
+  region, owner or category; size by Jita buy or sell; right-click a tile to
+  filter the Assets tab to it
 - Net worth per character, snapshotted on every sync and charted over time at
   both Jita buy and Jita sell, split into assets / wallet / sell orders / buy
   escrow / contracts / in-production
@@ -221,7 +227,8 @@ once first.
 | `src/evasset/esi/sync.py` | Character and corp pulls, container-tree flattening |
 | `src/evasset/pricing.py` | Jita sell + public-contract averaging |
 | `src/evasset/networth.py` | Snapshot maths and history |
-| `src/evasset/fitting.py` | Groups a ship's contents into slots/holds for the fit dialog |
+| `src/evasset/fitting.py` | Groups a ship's contents into slots/holds, and exports ESI-fitting JSON / EFT |
+| `src/evasset/treemap.py` | Squarified treemap layout for the Treemap tab |
 | `src/evasset/ui/` | PySide6 widgets |
 | `scripts/seed_demo.py` | Fills a throwaway database with plausible data, no EVE account needed |
 
@@ -243,11 +250,14 @@ written against. Bump it after reading CCP's changelog, not before.
 uv run pytest
 ```
 
-23 tests, no network, no Qt. They cover the value maths, the search and rollup
-queries, the container-tree resolver (including a cyclic-parent case that would
-otherwise hang), the contract outlier filter and its packaged-volume floor, the
-`from_id` walk-back for transactions, append-only journal behaviour, and the
-`/universe/names` batch-splitting retry.
+No network needed. Most of them need no Qt either; the few that do build a real
+widget and are skipped automatically if PySide6 is missing. They cover the value
+maths, the search and rollup queries, the container-tree resolver (including a
+cyclic-parent case that would otherwise hang), the contract outlier filter and
+its packaged-volume floor, the `from_id` walk-back for transactions, append-only
+journal behaviour, the `/universe/names` batch-splitting retry, the treemap
+layout (that it tiles exactly, without overlaps, in proportion to value), and
+every text colour the UI draws, measured against WCAG AA in both themes.
 
 To poke at the UI without an EVE account:
 
