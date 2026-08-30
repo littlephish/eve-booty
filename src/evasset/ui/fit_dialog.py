@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 from .. import icons, queries
 from ..fitting import group_fit, to_eft, to_esi_fitting
 from .async_query import AsyncQuery
-from .palette import rarity_hex
+from .palette import SECONDARY_TEXT, rarity_hex
 
 _MODULE_ICON_PX = 24
 _SHIP_ICON_PX = 32
@@ -112,7 +112,7 @@ class FitDialog(QDialog):
             self._icon_labels[ship_type_id] = [(self.ship_icon, _SHIP_ICON_PX)]
 
         self.status = QLabel("Loading…")
-        self.status.setStyleSheet("color: palette(shadow);")
+        self.status.setStyleSheet(f"color: {SECONDARY_TEXT};")
         layout.addWidget(self.status)
 
         scroll = QScrollArea()
@@ -191,7 +191,7 @@ class FitDialog(QDialog):
         groups = group_fit(rows)
         if not groups:
             empty = QLabel("Nothing fit, loaded or stowed on this ship.")
-            empty.setStyleSheet("color: palette(shadow);")
+            empty.setStyleSheet(f"color: {SECONDARY_TEXT};")
             self._add_row(empty)
             self._start_icon_fetch()
             return

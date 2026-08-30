@@ -36,8 +36,9 @@ from PySide6.QtWidgets import (
 from .. import queries
 from .assets_view import _SortProxy
 from .async_query import AsyncQuery
+from .debounce import Debounce
 from .models import fill_combo
-from .palette import CRITICAL, NORMAL, WARN, status_brush
+from .palette import CRITICAL, NORMAL, SECONDARY_TEXT, WARN, status_brush
 from .sort_controller import SortController
 
 # How close to empty before a fuel bay is worth shouting about. Three days is
@@ -351,15 +352,16 @@ class StructuresView(QWidget):
         )
         self.empty.setAlignment(Qt.AlignCenter)
         self.empty.setWordWrap(True)
-        self.empty.setStyleSheet("color: palette(shadow);")
+        self.empty.setStyleSheet(f"color: {SECONDARY_TEXT};")
         self.empty.setVisible(False)   # until a query says the list is empty
         root.addWidget(self.empty)
 
         self.footer = QLabel("")
-        self.footer.setStyleSheet("color: palette(shadow);")
+        self.footer.setStyleSheet(f"color: {SECONDARY_TEXT};")
         root.addWidget(self.footer)
 
-        self.search.textChanged.connect(self.reload)
+        self._debounce = Debounce(self, self.reload)
+        self.search.textChanged.connect(self._debounce.trigger)
         self.owner.currentIndexChanged.connect(self.reload)
         self.attention.currentIndexChanged.connect(self.reload)
         self.export_btn.clicked.connect(self.export_csv)

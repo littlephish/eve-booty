@@ -30,6 +30,7 @@ from .. import db
 from ..config import SCOPES, Settings
 from ..esi import TokenCache
 from ..esi.auth import delete_refresh_token, load_refresh_token, using_fallback_store
+from .palette import SECONDARY_TEXT
 from .tasks import TaskManager
 from .workers import LoginJob, SyncJob
 
@@ -84,7 +85,7 @@ class CharactersDialog(QDialog):
             )
         blurb = QLabel(text)
         blurb.setWordWrap(True)
-        blurb.setStyleSheet("color: palette(shadow);")
+        blurb.setStyleSheet(f"color: {SECONDARY_TEXT};")
         layout.addWidget(blurb)
 
         self.table = QTableWidget(0, len(HEADERS))
@@ -101,7 +102,7 @@ class CharactersDialog(QDialog):
         layout.addWidget(self.progress)
 
         self.status = QLabel("")
-        self.status.setStyleSheet("color: palette(shadow);")
+        self.status.setStyleSheet(f"color: {SECONDARY_TEXT};")
         layout.addWidget(self.status)
 
         buttons = QHBoxLayout()

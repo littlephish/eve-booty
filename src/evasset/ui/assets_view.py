@@ -6,7 +6,7 @@ from __future__ import annotations
 import csv
 import sqlite3
 
-from PySide6.QtCore import QSortFilterProxyModel, Qt, QTimer, Signal
+from PySide6.QtCore import QSortFilterProxyModel, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -27,8 +27,10 @@ from PySide6.QtWidgets import (
 from .. import queries
 from ..config import ASSET_SAFETY_LOCATION_ID
 from .async_query import AsyncQuery
+from .debounce import Debounce
 from .fit_dialog import FitDialog
 from .models import RowTableModel, fill_combo, fmt_isk, fmt_short_isk
+from .palette import SECONDARY_TEXT
 from .sort_controller import SortController
 
 # "View fit" is offered for rows in this SDE category. Scoped to just Ship --
@@ -108,7 +110,7 @@ class AssetsView(QWidget):
         bar2.addStretch(1)
 
         self.chip_label = QLabel("")
-        self.chip_label.setStyleSheet("color: palette(shadow);")
+        self.chip_label.setStyleSheet(f"color: {SECONDARY_TEXT};")
         self.chip_label.setVisible(False)
         bar2.addWidget(self.chip_label)
         self.chip_clear = QPushButton("Clear")
@@ -140,12 +142,8 @@ class AssetsView(QWidget):
         self.summary = QLabel("")
         root.addWidget(self.summary)
 
-        self._debounce = QTimer(self)
-        self._debounce.setSingleShot(True)
-        self._debounce.setInterval(220)
-        self._debounce.timeout.connect(self.reload)
-
-        self.search.textChanged.connect(self._debounce.start)
+        self._debounce = Debounce(self, self.reload)
+        self.search.textChanged.connect(self._debounce.trigger)
         for box in (self.owner_filter, self.category_filter, self.region_filter):
             box.currentIndexChanged.connect(self.reload)
         self.hide_fitted.toggled.connect(self.reload)

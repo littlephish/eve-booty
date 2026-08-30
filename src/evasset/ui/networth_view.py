@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 from .. import networth
 from .async_query import AsyncQuery
 from .models import fmt_isk, fmt_short_isk
-from .palette import delta_hex
+from .palette import SECONDARY_TEXT, delta_hex
 
 RANGES = [
     ("Last 30 days", 30),
@@ -273,7 +273,7 @@ class NetWorthView(QWidget):
         sign = "+" if delta >= 0 else "−"
         pct = f" ({delta / first * 100:+.1f}%)" if first else ""
         aside = (
-            f" &nbsp;<span style='color:palette(shadow)'>"
+            f" &nbsp;<span style='color:{SECONDARY_TEXT}'>"
             f"({'buy' if other_key.startswith('total_buy') else 'sell'} "
             f"{fmt_short_isk(other)})</span>"
             if other

@@ -11,7 +11,7 @@ import csv
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -31,7 +31,9 @@ from PySide6.QtWidgets import (
 from .. import queries
 from .assets_view import _SortProxy
 from .async_query import AsyncQuery
+from .debounce import Debounce
 from .models import RowTableModel, fill_combo, fmt_isk, fmt_short_isk
+from .palette import SECONDARY_TEXT
 from .sort_controller import SortController
 
 RANGES = [
@@ -100,11 +102,8 @@ class _HistoryTable(QWidget):
         self.summary = QLabel("")
         root.addWidget(self.summary)
 
-        self._debounce = QTimer(self)
-        self._debounce.setSingleShot(True)
-        self._debounce.setInterval(220)
-        self._debounce.timeout.connect(self.reload)
-        self.search.textChanged.connect(self._debounce.start)
+        self._debounce = Debounce(self, self.reload)
+        self.search.textChanged.connect(self._debounce.trigger)
         for box in (self.owner_filter, self.range_filter, self.extra):
             box.currentIndexChanged.connect(self.reload)
         self.export_btn.clicked.connect(self.export_csv)
@@ -291,7 +290,7 @@ class TransactionTable(_HistoryTable):
             f"{totals['trades']:,} trades · bought {fmt_short_isk(totals['bought'])} · "
             f"sold {fmt_short_isk(totals['sold'])} · "
             f"net <b>{fmt_isk(totals['net'])} ISK</b> "
-            "<span style='color:palette(shadow)'>(cash in minus cash out, not profit)</span>"
+            f"<span style='color:{SECONDARY_TEXT}'>(cash in minus cash out, not profit)</span>"
         )
         if not self._sized_once:
             self.table.resizeColumnsToContents()  # once; see AssetsView for why

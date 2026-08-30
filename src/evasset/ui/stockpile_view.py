@@ -39,8 +39,9 @@ from PySide6.QtWidgets import (
 from .. import db, stockpile
 from .assets_view import _SortProxy
 from .async_query import AsyncQuery
+from .debounce import Debounce
 from .models import fmt_isk, fmt_num
-from .palette import CRITICAL, WARN, status_brush
+from .palette import CRITICAL, SECONDARY_TEXT, WARN, status_brush
 from .sort_controller import SortController
 
 SCOPE_LABELS = [
@@ -200,7 +201,7 @@ class StockpileDialog(QDialog):
         self.jobs = QCheckBox("Manufacturing jobs still running")
         self.contracts = QCheckBox("Items in outstanding contracts")
         hint = QLabel("Assets are always counted. These add to what counts as held.")
-        hint.setStyleSheet("color: palette(shadow);")
+        hint.setStyleSheet(f"color: {SECONDARY_TEXT};")
         hint.setWordWrap(True)
         form.addRow("Also count", self.orders)
         form.addRow("", self.jobs)
@@ -268,7 +269,10 @@ class AddItemDialog(QDialog):
         self.search = QLineEdit()
         self.search.setPlaceholderText("Type at least two letters")
         self.search.setClearButtonEnabled(True)
-        self.search.textChanged.connect(self._search)
+        # This one searches synchronously on the GUI thread, so a query
+        # per keystroke is felt directly rather than just wasted.
+        self._debounce = Debounce(self, self._search)
+        self.search.textChanged.connect(self._debounce.trigger)
         layout.addWidget(self.search)
 
         self.results = QListWidget()
@@ -289,9 +293,9 @@ class AddItemDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def _search(self, text: str) -> None:
+    def _search(self) -> None:
         self.results.clear()
-        for type_id, name in stockpile.search_types(self.conn, text):
+        for type_id, name in stockpile.search_types(self.conn, self.search.text()):
             item = QListWidgetItem(name)
             item.setData(Qt.UserRole, type_id)
             self.results.addItem(item)
@@ -370,12 +374,12 @@ class StockpileView(QWidget):
         )
         self.empty.setAlignment(Qt.AlignCenter)
         self.empty.setWordWrap(True)
-        self.empty.setStyleSheet("color: palette(shadow);")
+        self.empty.setStyleSheet(f"color: {SECONDARY_TEXT};")
         self.empty.setVisible(False)
         root.addWidget(self.empty)
 
         self.footer = QLabel("")
-        self.footer.setStyleSheet("color: palette(shadow);")
+        self.footer.setStyleSheet(f"color: {SECONDARY_TEXT};")
         root.addWidget(self.footer)
 
         self.btn_new.clicked.connect(self.new_stockpile)
