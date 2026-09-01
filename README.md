@@ -1,8 +1,9 @@
-# EVE Assets
+# EVE Booty
 
-Desktop asset manager for EVE Online. Point it at your characters, hit sync, and
-get one searchable table of everything you own across every hangar, ship, can and
-corp division, plus a chart of what each character is worth over time.
+Desktop asset manager for EVE Online — all your plunder in one place. Point it at
+your characters, hit sync, and get one searchable table of everything you own
+across every hangar, ship, can and corp division, plus a chart of what each
+character is worth over time.
 
 Python 3.11+, PySide6, SQLite. Runs from source with `uv`, ships as a single
 Windows exe built with Nuitka.
@@ -233,7 +234,7 @@ Then:
 
 ```bash
 uv sync
-uv run evasset
+uv run evebooty
 ```
 
 First launch asks for the client ID, then downloads and imports the Static Data
@@ -248,7 +249,7 @@ Last result column rather than failing the whole sync.
 ### Building the exe
 
 ```bash
-uv run python build.py            # dist/evasset.dist/
+uv run python build.py            # dist/evebooty.dist/
 uv run python build.py --onefile  # one file, slower cold start
 ```
 
@@ -259,8 +260,8 @@ the next patch day.
 ### Headless
 
 ```bash
-uv run evasset --update-sde
-uv run evasset --sync
+uv run evebooty --update-sde
+uv run evebooty --sync
 ```
 
 `--sync` refreshes every enabled character, reprices, writes a snapshot and prints
@@ -281,6 +282,12 @@ once first.
 | `src/evasset/treemap.py` | Squarified treemap layout for the Treemap tab |
 | `src/evasset/ui/` | PySide6 widgets |
 | `scripts/seed_demo.py` | Fills a throwaway database with plausible data, no EVE account needed |
+| `scripts/make_icon.py` | Draws the app icon and packs the multi-size `.ico` |
+
+The on-disk name is still `evasset` — the data directory, the `EVASSET_*`
+environment variables and the keyring entry holding each character's refresh
+token all kept their original identifier, because renaming them would strand an
+existing install's database and saved logins. Only the name you read changed.
 
 Data lives in your platform's app data directory: `evasset.sqlite` for everything,
 `settings.json` for config. Refresh tokens go to the OS credential store (Windows
@@ -315,7 +322,7 @@ To poke at the UI without an EVE account:
 
 ```bash
 EVASSET_DATA_DIR=/tmp/demo uv run python scripts/seed_demo.py
-EVASSET_DATA_DIR=/tmp/demo uv run evasset
+EVASSET_DATA_DIR=/tmp/demo uv run evebooty
 ```
 
 ## Relationship to jEveAssets

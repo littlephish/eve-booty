@@ -1,13 +1,14 @@
-"""Entry point. `uv run evasset` in dev, or the Nuitka-built exe."""
+"""Entry point. `uv run evebooty` in dev, or the Nuitka-built exe."""
 
 from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(prog="evasset", description="EVE Online asset manager")
+    parser = argparse.ArgumentParser(prog="evebooty", description="EVE Booty - EVE Online asset manager")
     parser.add_argument(
         "--sync", action="store_true", help="sync, reprice and snapshot from the CLI, then exit"
     )
@@ -27,8 +28,13 @@ def main() -> int:
     from .ui.workers import StartupInitJob
 
     app = QApplication(sys.argv)
-    app.setApplicationName("EVE Assets")
+    app.setApplicationName("EVE Booty")
     app.setOrganizationName("evasset")
+    icon = app_icon()
+    if icon is not None:
+        # Set on the application, not just the window: this is what the
+        # taskbar, Alt-Tab and every dialog inherit.
+        app.setWindowIcon(icon)
 
     # Windows 11's dark palette ships Shadow -- the role all muted text in
     # this app draws in -- as pure black, and AlternateBase as pure white.
@@ -72,11 +78,32 @@ def main() -> int:
     return app.exec()
 
 
+
+def app_icon():
+    """The chest, loaded from beside the package.
+
+    Returns None rather than raising if it is missing: a build that forgot
+    --include-package-data should start with a blank icon, not refuse to run.
+    """
+    from PySide6.QtGui import QIcon
+
+    # The .ico first: it carries all six sizes, so Qt picks the one drawn for
+    # the context (16 px title bar, 32 px taskbar) instead of downscaling the
+    # 256 px art and muddying the detail the small sizes deliberately omit.
+    assets = Path(__file__).resolve().parent / "assets"
+    for name in ("booty.ico", "booty.png"):
+        path = assets / name
+        if path.exists():
+            icon = QIcon(str(path))
+            if not icon.isNull():
+                return icon
+    return None
+
 def _build_splash():
     from PySide6.QtWidgets import QLabel, QProgressBar, QVBoxLayout, QWidget
 
     w = QWidget()
-    w.setWindowTitle("EVE Assets")
+    w.setWindowTitle("EVE Booty")
     w.setFixedSize(320, 96)
     layout = QVBoxLayout(w)
     layout.addWidget(QLabel("Opening your database…"))

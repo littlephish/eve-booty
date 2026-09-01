@@ -9,6 +9,13 @@ from pathlib import Path
 
 from platformdirs import PlatformDirs
 
+# The app is called EVE Booty; this is deliberately not that. APP_NAME picks
+# the platform data directory *and* the keyring service holding every
+# character's SSO refresh token (see esi/auth.py's KEYRING_SERVICE), so
+# renaming it would strand an existing install's database, settings and saved
+# logins in a folder nothing looks in any more, and silently ask the user to
+# re-authenticate every character. The on-disk identity stays put; only what
+# the user reads changed.
 APP_NAME = "evasset"
 APP_AUTHOR = "evasset"
 USER_AGENT_CONTACT = os.environ.get("EVASSET_CONTACT", "")

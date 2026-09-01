@@ -414,7 +414,7 @@ def test_to_eft_matches_pyfas_own_format(conn):
     rows = queries.fetch_fit(conn, 2)
     text = fitting.to_eft("Dominix", rows)
     expected = (
-        "[Dominix, EVE Assets export]\n\n"
+        "[Dominix, EVE Booty export]\n\n"
         "Damage Control II\n\n"
         "125mm Gatling AutoCannon II, EMP S\n\n\n"
         "Hobgoblin II x3\n\n\n"
@@ -433,7 +433,7 @@ def test_to_eft_leaves_out_holds_eft_has_no_syntax_for(conn):
     )
     rows = queries.fetch_fit(conn, 2)
     text = fitting.to_eft("Dominix", rows)
-    assert text == "[Dominix, EVE Assets export]\n\n"
+    assert text == "[Dominix, EVE Booty export]\n\n"
     assert "FleetHangar" not in text
     assert "Tritanium" not in text
 

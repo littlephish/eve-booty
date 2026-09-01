@@ -5,7 +5,7 @@ Useful for working on the UI, taking screenshots, and checking a change did
 not break a view you were not thinking about.
 
     EVASSET_DATA_DIR=/tmp/demo uv run python scripts/seed_demo.py
-    EVASSET_DATA_DIR=/tmp/demo uv run evasset
+    EVASSET_DATA_DIR=/tmp/demo uv run evebooty
 
 The SDE is downloaded on first run and cached, so this is only slow once.
 Real type ids and station ids throughout, so the joins exercise real data.

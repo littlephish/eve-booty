@@ -39,7 +39,7 @@ class MainWindow(QMainWindow):
         self._warnings: list[str] = []
         self.tasks = TaskManager(self)
 
-        self.setWindowTitle("EVE Assets")
+        self.setWindowTitle("EVE Booty")
         self.resize(1440, 880)
 
         self.tabs = QTabWidget()
@@ -341,9 +341,10 @@ class MainWindow(QMainWindow):
 
     def about(self) -> None:
         QMessageBox.about(
-            self, "EVE Assets",
-            "<h3>EVE Assets</h3>"
-            "<p>Cross-character asset inventory and net worth tracking for EVE Online.</p>"
+            self, "EVE Booty",
+            "<h3>EVE Booty</h3>"
+            "<p>Everything you own in New Eden, counted and valued: "
+            "cross-character asset inventory and net worth tracking.</p>"
             f"<p>Database: <code>{DB_PATH}</code><br>"
             f"SDE build: {queries.sde_build(self.conn)}</p>"
             "<p>Item and market data from CCP's ESI and Static Data Export. "

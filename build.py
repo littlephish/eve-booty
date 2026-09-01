@@ -35,23 +35,25 @@ def main() -> int:
         "--assume-yes-for-downloads",
         "--enable-plugin=pyside6",
         "--include-package=evasset",
+        # the app icon lives beside the package and is loaded at runtime
+        "--include-package-data=evasset",
         # keyring finds its OS backend by entry point, which Nuitka cannot see
         "--include-package=keyring.backends",
         "--include-package=jaraco",
         "--nofollow-import-to=pytest",
         "--nofollow-import-to=tkinter",
         f"--output-dir={args.output}",
-        "--output-filename=evasset",
-        "--company-name=evasset",
-        "--product-name=EVE Assets",
+        "--output-filename=evebooty",
+        "--company-name=EVE Booty",
+        "--product-name=EVE Booty",
         "--product-version=0.1.0",
-        "--file-description=EVE Online asset manager",
+        "--file-description=EVE Booty - EVE Online asset manager",
     ]
     if args.onefile:
         cmd.append("--onefile")
     if sys.platform == "win32" and not args.console:
         cmd.append("--windows-console-mode=disable")
-    icon = ROOT / "assets" / "evasset.ico"
+    icon = ROOT / "src" / "evasset" / "assets" / "booty.ico"
     if icon.exists() and sys.platform == "win32":
         cmd.append(f"--windows-icon-from-ico={icon}")
     cmd.append(str(ENTRY))

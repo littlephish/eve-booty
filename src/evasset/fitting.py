@@ -237,7 +237,7 @@ def to_eft(ship_name: str, rows: list[sqlite3.Row]) -> str:
     if cargo:
         sections.append("\n".join(_eft_stack(r) for r in cargo))
 
-    header = f"[{ship_name}, EVE Assets export]"
+    header = f"[{ship_name}, EVE Booty export]"
     return f"{header}\n\n" + "\n\n\n".join(sections)
 
 
