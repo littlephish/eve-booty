@@ -68,7 +68,7 @@ def test_history_still_sums_when_not_comparing(two_characters):
 
 # ------------------------------------------------------------------- series
 def test_compare_mode_draws_one_line_per_owner(app, two_characters):
-    view = NetWorthView(two_characters, defer_load=True)
+    view = NetWorthView(defer_load=True)
     view._compare = True
 
     plots = view._build_series(networth.history_per_owner(two_characters), "sell")
@@ -82,7 +82,7 @@ def test_compare_mode_draws_one_line_per_owner(app, two_characters):
 def test_the_biggest_holding_is_listed_first(app, two_characters):
     """Legend order should match what the eye picks off the chart, rather
     than burying the largest holding at the bottom."""
-    view = NetWorthView(two_characters, defer_load=True)
+    view = NetWorthView(defer_load=True)
     view._compare = True
 
     plots = view._build_series(networth.history_per_owner(two_characters), "sell")
@@ -93,7 +93,7 @@ def test_the_biggest_holding_is_listed_first(app, two_characters):
 
 def test_both_totals_collapses_to_one_basis_when_comparing(app, two_characters):
     """Otherwise every owner would get two lines and the comparison drowns."""
-    view = NetWorthView(two_characters, defer_load=True)
+    view = NetWorthView(defer_load=True)
     view._compare = True
 
     plots = view._build_series(networth.history_per_owner(two_characters), "both")
@@ -103,7 +103,7 @@ def test_both_totals_collapses_to_one_basis_when_comparing(app, two_characters):
 
 
 def test_normal_mode_still_plots_components(app, two_characters):
-    view = NetWorthView(two_characters, defer_load=True)
+    view = NetWorthView(defer_load=True)
     view._compare = False
     view.breakdown.setChecked(True)
 

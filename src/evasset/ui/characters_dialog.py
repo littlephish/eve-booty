@@ -30,6 +30,7 @@ from .. import db
 from ..config import SCOPES, Settings
 from ..esi import TokenCache
 from ..esi.auth import delete_refresh_token, load_refresh_token, using_fallback_store
+from .palette import SECONDARY_TEXT
 from .tasks import TaskManager
 from .workers import LoginJob, SyncJob
 
@@ -53,7 +54,12 @@ class CharactersDialog(QDialog):
         super().__init__(parent)
         self.settings = settings
         self.tokens = tokens
-        self.conn = db.init()
+        # db.connect(), not db.init(): this dialog is only ever opened from
+        # MainWindow, which has already run db.init(), so re-running the whole
+        # schema script and migration check every time someone opens Characters
+        # buys nothing. connect() caches one connection per thread, so this is
+        # the same object the main window and the Stockpile tab are using.
+        self.conn = db.connect()
         # Shared with the main window rather than a pool of its own: this
         # dialog is not modal any more, so its work and the window's work are
         # the same queue, shown in the same status bar, deduplicated against
@@ -79,7 +85,7 @@ class CharactersDialog(QDialog):
             )
         blurb = QLabel(text)
         blurb.setWordWrap(True)
-        blurb.setStyleSheet("color: palette(shadow);")
+        blurb.setStyleSheet(f"color: {SECONDARY_TEXT};")
         layout.addWidget(blurb)
 
         self.table = QTableWidget(0, len(HEADERS))
@@ -96,7 +102,7 @@ class CharactersDialog(QDialog):
         layout.addWidget(self.progress)
 
         self.status = QLabel("")
-        self.status.setStyleSheet("color: palette(shadow);")
+        self.status.setStyleSheet(f"color: {SECONDARY_TEXT};")
         layout.addWidget(self.status)
 
         buttons = QHBoxLayout()

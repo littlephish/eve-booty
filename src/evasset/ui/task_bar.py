@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .palette import SECONDARY_TEXT
 from .tasks import RUNNING, TaskManager
 
 
@@ -63,7 +64,7 @@ class _TaskRow(QWidget):
         outer.addWidget(self.bar)
 
         self.detail = QLabel("")
-        self.detail.setStyleSheet("color: palette(shadow);")
+        self.detail.setStyleSheet(f"color: {SECONDARY_TEXT};")
         outer.addWidget(self.detail)
 
         self.update_from(task)

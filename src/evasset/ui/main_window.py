@@ -25,6 +25,7 @@ from .stockpile_view import StockpileView
 from .structures_view import StructuresView
 from .task_bar import TaskBar
 from .tasks import TaskManager
+from .treemap_view import TreemapView
 from .wallet_view import WalletView
 from .workers import RepriceJob, SdeUpdateJob, SnapshotJob, SyncJob
 
@@ -42,25 +43,31 @@ class MainWindow(QMainWindow):
         self.resize(1440, 880)
 
         self.tabs = QTabWidget()
-        # One connection, shared down to every tab, and every tab's first
-        # real query deferred until it is actually shown. Each view used to
-        # open its own connection via db.init(), which re-runs the full
-        # CREATE TABLE script and migration check every time -- harmless once,
-        # wasteful five times over on the main thread before the window even
-        # paints. And all five tabs used to reload() (query + format + resize)
-        # unconditionally in their own __init__, meaning a cold start paid for
-        # Assets, Overview, both Wallet tables and Net worth before you could
-        # look at any of them. Now only the tab on screen loads.
-        self.assets = AssetsView(self.conn, defer_load=True)
-        self.overview = OverviewView(self.conn, defer_load=True)
-        self.networth = NetWorthView(self.conn, defer_load=True)
-        self.wallet = WalletView(self.conn, defer_load=True)
-        self.structures = StructuresView(self.conn, defer_load=True)
-        self.stockpile = StockpileView(self.conn, defer_load=True)
+        # Every tab's first real query is deferred until it is actually shown.
+        # All of them used to reload() (query + format + resize) in their own
+        # __init__, so a cold start paid for Assets, Overview, both Wallet
+        # tables and Net worth before you could look at any of them. Now only
+        # the tab on screen loads.
+        #
+        # The views take no connection. Their reads all go through AsyncQuery,
+        # which uses db.connect() on the pool thread it runs on, and the few
+        # GUI-thread queries (this class, the Stockpile tab's writes) call
+        # db.connect() for this thread's. db.connect() caches one connection
+        # per thread, so the db.init() above is what actually opens the main
+        # thread's -- and the schema script and migration check run once here
+        # rather than once per view.
+        self.assets = AssetsView(defer_load=True)
+        self.overview = OverviewView(defer_load=True)
+        self.networth = NetWorthView(defer_load=True)
+        self.wallet = WalletView(defer_load=True)
+        self.structures = StructuresView(defer_load=True)
+        self.stockpile = StockpileView(defer_load=True)
+        self.treemap = TreemapView(defer_load=True)
         self.log = _LogPane()
 
         self.tabs.addTab(self.assets, "Assets")
         self.tabs.addTab(self.overview, "Overview")
+        self.tabs.addTab(self.treemap, "Treemap")
         self.tabs.addTab(self.wallet, "Wallet")
         self.tabs.addTab(self.networth, "Net worth")
         self.tabs.addTab(self.structures, "Structures")
@@ -71,6 +78,7 @@ class MainWindow(QMainWindow):
         self._tab_first_load = {
             self.assets: self.assets.first_load,
             self.overview: self.overview.first_load,
+            self.treemap: self.treemap.first_load,
             self.wallet: self.wallet.first_load,
             self.networth: self.networth.first_load,
             self.structures: self.structures.first_load,
@@ -79,6 +87,7 @@ class MainWindow(QMainWindow):
         self._tab_reload = {
             self.assets: lambda: (self.assets.refresh_filters(), self.assets.reload()),
             self.overview: self.overview.reload,
+            self.treemap: self.treemap.reload,
             self.wallet: self.wallet.reload,
             self.networth: self.networth.refresh,
             self.structures: lambda: (
@@ -90,6 +99,7 @@ class MainWindow(QMainWindow):
         self._dirty: set = set()
         self.tabs.currentChanged.connect(self._ensure_tab_loaded)
         self.overview.filter_assets_requested.connect(self._filter_assets_from_overview)
+        self.treemap.filter_assets_requested.connect(self._filter_assets_from_overview)
         self._status_query = AsyncQuery(self)
 
         # Connected here rather than next to the TaskManager itself: warned

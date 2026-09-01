@@ -87,11 +87,25 @@ NUMERIC_COLUMNS = {
 }
 ISK_COLUMNS = {"buy_price", "sell_price", "buy_value", "sell_value"}
 
-# One WHERE-usable expression per grouping level in OverviewView.LEVELS, so
-# right-clicking a rolled-up row there ("Jita IV - Moon 4 ...", "Asset
-# Safety", a region, an owner, ...) can hand back a clause that picks out
-# exactly the assets that rolled into it. Keyed the same as
-# OverviewView.LEVELS' second element and location_totals()'s `col` dict.
+# (display label, level key) for every way the assets can be rolled up. Lives
+# here rather than on a view because two of them now offer it -- the Overview
+# table and the Treemap tab -- and a level that appears in one but not the
+# other would be a puzzle for the user and a silent KeyError for the
+# right-click filter below.
+ROLLUP_LEVELS = [
+    ("Location", "location"),
+    ("Solar system", "system"),
+    ("Region", "region"),
+    ("Owner", "owner"),
+    ("Category", "category"),
+    ("Group", "group"),
+]
+
+# One WHERE-usable expression per grouping level in ROLLUP_LEVELS, so
+# right-clicking a rolled-up row ("Jita IV - Moon 4 ...", "Asset Safety", a
+# region, an owner, ...) can hand back a clause that picks out exactly the
+# assets that rolled into it. Keyed the same as ROLLUP_LEVELS' second element
+# and location_totals()'s `col` dict.
 OVERVIEW_FILTER_EXPR = {
     "location": LOCATION_EXPR,
     "system": "sys.name",

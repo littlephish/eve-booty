@@ -134,3 +134,46 @@ def test_no_view_still_uses_the_failing_role():
         and re.search(r"palette\(mid\)", path.read_text(encoding="utf-8"))
     ]
     assert not offenders, f"palette(mid) is 1.99:1 -- still used in {offenders}"
+
+
+# --------------------------------------------------------------- treemap
+# The treemap draws its label directly on the tile, so the pair that has to
+# clear AA is (fill, whatever readable_text_on picked for it) -- not the
+# fill against the window background.
+
+
+@pytest.mark.parametrize("fill", pal.TREEMAP_FILLS + [pal.TREEMAP_OTHER_FILL])
+def test_treemap_labels_are_readable_on_their_own_tile(fill):
+    text = pal.readable_text_on(fill)
+    assert contrast(text, fill) >= AA_NORMAL, (
+        f"{text} on {fill} is {contrast(text, fill):.2f}:1"
+    )
+
+
+@pytest.mark.parametrize("fill", pal.TREEMAP_FILLS + [pal.TREEMAP_OTHER_FILL])
+def test_readable_text_picks_the_better_of_black_and_white(fill):
+    """Guards the chooser itself: a version that always returned white would
+    still pass the test above for most of the palette."""
+    chosen = pal.readable_text_on(fill)
+    other = "#FFFFFF" if chosen == "#000000" else "#000000"
+    assert contrast(chosen, fill) >= contrast(other, fill)
+
+
+def test_the_palettes_own_contrast_maths_agrees_with_this_files():
+    """palette.contrast_ratio is used at runtime to pick label colours; this
+    file's independent implementation is what checks it."""
+    for a, b in [("#FFFFFF", "#000000"), ("#767676", "#FFFFFF"), ("#E69F00", "#000000")]:
+        assert pal.contrast_ratio(a, b) == pytest.approx(contrast(a, b), abs=0.001)
+
+
+def test_treemap_fills_are_distinct():
+    """Two tiles the same colour side by side read as one tile."""
+    assert len(set(pal.TREEMAP_FILLS)) == len(pal.TREEMAP_FILLS)
+    assert pal.TREEMAP_OTHER_FILL not in pal.TREEMAP_FILLS
+
+
+def test_treemap_fill_cycles_rather_than_running_out():
+    """More groups than colours is the normal case, not an error."""
+    assert pal.treemap_fill(0) == pal.TREEMAP_FILLS[0]
+    assert pal.treemap_fill(len(pal.TREEMAP_FILLS)) == pal.TREEMAP_FILLS[0]
+    assert pal.treemap_fill(len(pal.TREEMAP_FILLS) + 3) == pal.TREEMAP_FILLS[3]

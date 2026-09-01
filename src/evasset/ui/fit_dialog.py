@@ -18,6 +18,7 @@ icons drop in when the fetch lands (immediately, once cached).
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal, Slot
@@ -34,9 +35,9 @@ from PySide6.QtWidgets import (
 )
 
 from .. import icons, queries
-from ..fitting import group_fit, to_eft
+from ..fitting import group_fit, to_eft, to_esi_fitting
 from .async_query import AsyncQuery
-from .palette import rarity_hex
+from .palette import SECONDARY_TEXT, rarity_hex
 
 _MODULE_ICON_PX = 24
 _SHIP_ICON_PX = 32
@@ -88,6 +89,7 @@ class FitDialog(QDialog):
     ):
         super().__init__(parent)
         self._ship_name = ship_name
+        self._ship_type_id = ship_type_id
         self._rows: list[sqlite3.Row] = []
         # {type_id: [(icon label, display px), ...]} -- filled as the header
         # and rows are built, read when the fetch job reports back.
@@ -110,7 +112,7 @@ class FitDialog(QDialog):
             self._icon_labels[ship_type_id] = [(self.ship_icon, _SHIP_ICON_PX)]
 
         self.status = QLabel("Loading…")
-        self.status.setStyleSheet("color: palette(shadow);")
+        self.status.setStyleSheet(f"color: {SECONDARY_TEXT};")
         layout.addWidget(self.status)
 
         scroll = QScrollArea()
@@ -124,12 +126,21 @@ class FitDialog(QDialog):
         bar = QHBoxLayout()
         self.copy_btn = QPushButton("Copy for Pyfa")
         self.copy_btn.setToolTip(
-            "Copies this fit as EFT text -- paste it into Pyfa with "
+            "Copies this fit as ESI fitting JSON -- paste it into Pyfa with "
             "File → Import From Clipboard, or Ctrl+V on the fitting window."
         )
         self.copy_btn.setEnabled(False)
-        self.copy_btn.clicked.connect(self._copy_eft)
+        self.copy_btn.clicked.connect(self._copy_esi)
         bar.addWidget(self.copy_btn)
+
+        self.copy_eft_btn = QPushButton("Copy as EFT")
+        self.copy_eft_btn.setToolTip(
+            "Copies this fit as EFT text -- the plain-text format for forums, "
+            "chat and the in-game fitting window."
+        )
+        self.copy_eft_btn.setEnabled(False)
+        self.copy_eft_btn.clicked.connect(self._copy_eft)
+        bar.addWidget(self.copy_eft_btn)
         bar.addStretch(1)
         layout.addLayout(bar)
 
@@ -175,11 +186,12 @@ class FitDialog(QDialog):
     def _on_rows(self, rows: list[sqlite3.Row]) -> None:
         self._rows = rows
         self.copy_btn.setEnabled(bool(rows))
+        self.copy_eft_btn.setEnabled(bool(rows))
         self.status.hide()
         groups = group_fit(rows)
         if not groups:
             empty = QLabel("Nothing fit, loaded or stowed on this ship.")
-            empty.setStyleSheet("color: palette(shadow);")
+            empty.setStyleSheet(f"color: {SECONDARY_TEXT};")
             self._add_row(empty)
             self._start_icon_fetch()
             return
@@ -225,8 +237,24 @@ class FitDialog(QDialog):
         # anyway rather than leaving a permanent placeholder in the header.
         self._start_icon_fetch()
 
+    def _copy_esi(self) -> None:
+        """ESI fitting JSON, which is what Pyfa's clipboard import actually
+        wants: Port.importAuto reads any buffer starting with "{" as an ESI
+        fit. json.dumps puts the brace first, so no pretty-printing here."""
+        if self._ship_type_id is None:
+            self._say("No type id for this hull, so no fit can be built.")
+            return
+        fit = to_esi_fitting(self._ship_name, self._ship_type_id, self._rows)
+        if not fit["items"]:
+            self._say("Nothing on this ship can be expressed as a fit.")
+            return
+        QApplication.clipboard().setText(json.dumps(fit))
+        self._say("Copied. In Pyfa: File → Import From Clipboard.")
+
     def _copy_eft(self) -> None:
-        text = to_eft(self._ship_name, self._rows)
-        QApplication.clipboard().setText(text)
-        self.status.setText("Copied. In Pyfa: File → Import From Clipboard.")
+        QApplication.clipboard().setText(to_eft(self._ship_name, self._rows))
+        self._say("Copied as EFT.")
+
+    def _say(self, message: str) -> None:
+        self.status.setText(message)
         self.status.show()

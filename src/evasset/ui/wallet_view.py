@@ -11,7 +11,7 @@ import csv
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -28,10 +28,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import db, queries
+from .. import queries
 from .assets_view import _SortProxy
 from .async_query import AsyncQuery
+from .debounce import Debounce
 from .models import RowTableModel, fill_combo, fmt_isk, fmt_short_isk
+from .palette import SECONDARY_TEXT
 from .sort_controller import SortController
 
 RANGES = [
@@ -45,9 +47,8 @@ RANGES = [
 class _HistoryTable(QWidget):
     """Shared chrome for the two tables: search, owner and date filters, export."""
 
-    def __init__(self, conn, columns, placeholder: str):
+    def __init__(self, columns, placeholder: str):
         super().__init__()
-        self.conn = conn if conn is not None else db.init()
 
         root = QVBoxLayout(self)
         bar = QHBoxLayout()
@@ -101,11 +102,8 @@ class _HistoryTable(QWidget):
         self.summary = QLabel("")
         root.addWidget(self.summary)
 
-        self._debounce = QTimer(self)
-        self._debounce.setSingleShot(True)
-        self._debounce.setInterval(220)
-        self._debounce.timeout.connect(self.reload)
-        self.search.textChanged.connect(self._debounce.start)
+        self._debounce = Debounce(self, self.reload)
+        self.search.textChanged.connect(self._debounce.trigger)
         for box in (self.owner_filter, self.range_filter, self.extra):
             box.currentIndexChanged.connect(self.reload)
         self.export_btn.clicked.connect(self.export_csv)
@@ -184,9 +182,8 @@ class _HistoryTable(QWidget):
 
 
 class JournalTable(_HistoryTable):
-    def __init__(self, conn=None, *, defer_load: bool = False):
+    def __init__(self, *, defer_load: bool = False):
         super().__init__(
-            conn,
             queries.JOURNAL_COLUMNS,
             "Search type, description, reason or counterparty…",
         )
@@ -251,9 +248,8 @@ class JournalTable(_HistoryTable):
 
 
 class TransactionTable(_HistoryTable):
-    def __init__(self, conn=None, *, defer_load: bool = False):
+    def __init__(self, *, defer_load: bool = False):
         super().__init__(
-            conn,
             queries.TRANSACTION_COLUMNS,
             "Search item, station or counterparty…",
         )
@@ -294,7 +290,7 @@ class TransactionTable(_HistoryTable):
             f"{totals['trades']:,} trades · bought {fmt_short_isk(totals['bought'])} · "
             f"sold {fmt_short_isk(totals['sold'])} · "
             f"net <b>{fmt_isk(totals['net'])} ISK</b> "
-            "<span style='color:palette(shadow)'>(cash in minus cash out, not profit)</span>"
+            f"<span style='color:{SECONDARY_TEXT}'>(cash in minus cash out, not profit)</span>"
         )
         if not self._sized_once:
             self.table.resizeColumnsToContents()  # once; see AssetsView for why
@@ -307,7 +303,6 @@ class TransactionTable(_HistoryTable):
 class WalletView(QWidget):
     def __init__(
         self,
-        conn=None,
         parent: QWidget | None = None,
         *,
         defer_load: bool = False,
@@ -319,8 +314,8 @@ class WalletView(QWidget):
         # its own two-tab split (Transactions, Journal), and only one of them
         # is ever on screen at a time, so there is no reason to run both
         # queries just because the Wallet tab itself got shown.
-        self.journal = JournalTable(conn, defer_load=True)
-        self.transactions = TransactionTable(conn, defer_load=True)
+        self.journal = JournalTable(defer_load=True)
+        self.transactions = TransactionTable(defer_load=True)
         self.tabs.addTab(self.transactions, "Transactions")
         self.tabs.addTab(self.journal, "Journal")
         layout.addWidget(self.tabs)

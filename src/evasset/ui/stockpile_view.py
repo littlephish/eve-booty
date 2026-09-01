@@ -41,8 +41,9 @@ from PySide6.QtWidgets import (
 from .. import db, stockpile
 from .assets_view import _SortProxy
 from .async_query import AsyncQuery
+from .debounce import Debounce
 from .models import fmt_isk, fmt_num
-from .palette import CRITICAL, WARN, status_brush
+from .palette import CRITICAL, SECONDARY_TEXT, WARN, status_brush
 from .sort_controller import SortController
 
 SCOPE_LABELS = [
@@ -202,7 +203,7 @@ class StockpileDialog(QDialog):
         self.jobs = QCheckBox("Manufacturing jobs still running")
         self.contracts = QCheckBox("Items in outstanding contracts")
         hint = QLabel("Assets are always counted. These add to what counts as held.")
-        hint.setStyleSheet("color: palette(shadow);")
+        hint.setStyleSheet(f"color: {SECONDARY_TEXT};")
         hint.setWordWrap(True)
         form.addRow("Also count", self.orders)
         form.addRow("", self.jobs)
@@ -260,9 +261,17 @@ class StockpileDialog(QDialog):
 
 
 class AddItemDialog(QDialog):
-    def __init__(self, conn, parent=None):
+    """Type-ahead picker over every published type in the SDE.
+
+    The search runs through AsyncQuery like every other read in the app. It
+    used to run inline on the GUI thread, which on a LIKE '%...%' across the
+    whole types table is long enough to feel: the window stopped repainting
+    for the duration of every keystroke. Debouncing hid most of it, but the
+    query was still landing on the wrong thread.
+    """
+
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.conn = conn
         self.setWindowTitle("Add item")
         self.setMinimumWidth(380)
         layout = QVBoxLayout(self)
@@ -270,7 +279,11 @@ class AddItemDialog(QDialog):
         self.search = QLineEdit()
         self.search.setPlaceholderText("Type at least two letters")
         self.search.setClearButtonEnabled(True)
-        self.search.textChanged.connect(self._search)
+        self._query = AsyncQuery(self)
+        # Debounce as well as async: the generation counter stops a stale
+        # result being shown, but only the timer stops the query running.
+        self._debounce = Debounce(self, self._search)
+        self.search.textChanged.connect(self._debounce.trigger)
         layout.addWidget(self.search)
 
         self.results = QListWidget()
@@ -286,17 +299,51 @@ class AddItemDialog(QDialog):
         row.addWidget(self.target, 1)
         layout.addLayout(row)
 
+        self.status = QLabel("")
+        self.status.setStyleSheet(f"color: {SECONDARY_TEXT};")
+        self.status.hide()
+        layout.addWidget(self.status)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def _search(self, text: str) -> None:
+    def _search(self) -> None:
+        # Read the box here, on the GUI thread, and close over the result.
+        # The closure below runs on a pool thread, where touching a widget is
+        # not safe.
+        needle = self.search.text()
+
+        def fetch(conn: sqlite3.Connection) -> list[tuple[int, str]]:
+            return stockpile.search_types(conn, needle)
+
+        self._query.run(fetch, self._show_matches, self._on_search_failed)
+
+    def _show_matches(self, matches: list[tuple[int, str]]) -> None:
+        # Cleared here rather than when the search starts: clearing up front
+        # made the list flash empty between every keystroke and its results.
         self.results.clear()
-        for type_id, name in stockpile.search_types(self.conn, text):
+        self.status.hide()
+        for type_id, name in matches:
             item = QListWidgetItem(name)
             item.setData(Qt.UserRole, type_id)
             self.results.addItem(item)
+
+    def _on_search_failed(self, message: str) -> None:
+        self.results.clear()
+        self.status.setText(f"Search failed: {message}")
+        self.status.show()
+
+    def done(self, result: int) -> None:
+        """exec() is about to return and this dialog is about to be dropped.
+        Two things have to be called off, not one: the search already on the
+        pool, and any keystroke still sitting on the debounce clock -- that
+        one would otherwise start a brand new query a fifth of a second after
+        the dialog was gone."""
+        self._debounce.stop()
+        self._query.cancel()
+        super().done(result)
 
     def _accept(self) -> None:
         if self.results.currentItem() is None:
@@ -314,13 +361,16 @@ class AddItemDialog(QDialog):
 class StockpileView(QWidget):
     def __init__(
         self,
-        conn: sqlite3.Connection | None = None,
         parent: QWidget | None = None,
         *,
         defer_load: bool = False,
     ):
         super().__init__(parent)
-        self.conn = conn if conn is not None else db.init()
+        # Unlike the other tabs this one writes, and edits land on the GUI
+        # thread (see the module docstring), so it does need a connection of
+        # its own. db.connect() returns this thread's cached one -- the very
+        # object MainWindow's db.init() created, not a second connection.
+        self.conn = db.connect()
         self._query = AsyncQuery(self)
 
         root = QVBoxLayout(self)
@@ -369,12 +419,12 @@ class StockpileView(QWidget):
         )
         self.empty.setAlignment(Qt.AlignCenter)
         self.empty.setWordWrap(True)
-        self.empty.setStyleSheet("color: palette(shadow);")
+        self.empty.setStyleSheet(f"color: {SECONDARY_TEXT};")
         self.empty.setVisible(False)
         root.addWidget(self.empty)
 
         self.footer = QLabel("")
-        self.footer.setStyleSheet("color: palette(shadow);")
+        self.footer.setStyleSheet(f"color: {SECONDARY_TEXT};")
         root.addWidget(self.footer)
 
         self.btn_new.clicked.connect(self.new_stockpile)
@@ -493,7 +543,7 @@ class StockpileView(QWidget):
         pile_id = self.current_id()
         if pile_id is None:
             return
-        dialog = AddItemDialog(self.conn, self)
+        dialog = AddItemDialog(self)
         if not dialog.exec():
             return
         chosen = dialog.chosen()

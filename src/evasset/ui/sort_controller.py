@@ -1,21 +1,22 @@
 """Click-to-sort, driven by hand instead of QTableView's built-in
 setSortingEnabled(True) wiring.
 
-QSortFilterProxyModel.sort() is synchronous -- Qt gives no way to run a model
-sort off the GUI thread -- so on a table with tens of thousands of rows,
-clicking a header genuinely pauses the app for as long as the sort takes.
-That is not fixable by threading it (Qt models are not thread-safe to touch
-from a worker thread); the best available fix is telling the user it is
-happening, the same way any native app would for a moment of unavoidable
-synchronous work: a wait cursor bracketing the call.
+The sort itself is asked of the *source model*, not of the proxy in front of
+it. Sorting through QSortFilterProxyModel means Qt calls data() on the Python
+model twice for every comparison, which measured 12.6 seconds of frozen GUI
+per header click on 20,000 rows; RowTableModel.sort() does the same ordering
+in about 19 ms by extracting each key once. The long version of why is in
+that method's docstring.
 
-Doing that reliably needs full control over when the sort actually runs.
-Connecting to signals QHeaderView already emits around a built-in sort is
-order-dependent -- Qt's own internal "click -> sort" connection was wired up
-inside setSortingEnabled(True) before any handler this module adds, so an
-external slot connected to the same click signal is not guaranteed to run
-before Qt's own sort does. Driving the whole thing by hand sidesteps that
-entirely.
+A sort is still synchronous -- Qt models are not safe to touch from a worker
+thread, so there is nowhere else to run it -- hence the wait cursor still
+bracketing the call. It is now almost never visible, which is the point.
+
+Driving the click by hand, rather than letting setSortingEnabled(True) do it,
+is about ordering: Qt wires its own internal "click -> sort" connection
+inside setSortingEnabled(True), before any handler this module adds, so an
+external slot on the same signal is not guaranteed to run first. Doing it by
+hand sidesteps that entirely.
 """
 
 from __future__ import annotations
@@ -51,9 +52,13 @@ class SortController(QObject):
         self._apply()
 
     def _apply(self) -> None:
+        # The source model, not self.proxy -- see the module docstring. The
+        # proxy is left unsorted, so its row mapping stays the identity and
+        # every mapToSource() call site keeps working unchanged.
+        model = self.proxy.sourceModel()
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            self.proxy.sort(self.column, self.order)
+            model.sort(self.column, self.order)
         finally:
             QApplication.restoreOverrideCursor()
         self.table.horizontalHeader().setSortIndicator(self.column, self.order)

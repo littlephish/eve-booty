@@ -91,6 +91,19 @@ class AsyncQuery(QObject):
         job.signals.failed.connect(lambda gen, msg: self._finish(job, gen, msg, on_failed))
         QThreadPool.globalInstance().start(job)
 
+    def cancel(self) -> None:
+        """Stop caring about whatever is in flight.
+
+        The job itself still runs to completion -- a sqlite3 call in progress
+        on a pool thread cannot be interrupted -- but bumping the generation
+        means its result is dropped instead of delivered. That matters for a
+        dialog, which unlike a tab can be closed and destroyed while a query
+        is still running: without this the callback fires into widgets whose
+        C++ side is already gone, which surfaces as a RuntimeError traceback
+        on stderr from a thread nobody is watching.
+        """
+        self._generation += 1
+
     def _finish(self, job: _QueryJob, generation: int, payload, callback: Callable | None) -> None:
         self._inflight.discard(job)
         if callback is not None and generation == self._generation:
