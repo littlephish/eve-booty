@@ -43,6 +43,7 @@ Progress = Callable[[str, int], None]
 JITA = "jita"
 CONTRACT_AVG = "contract_avg"
 BASE_PRICE = "base_price"
+MANUAL = "manual"
 
 _CHUNK = 800  # type ids per Fuzzwork request
 
@@ -231,7 +232,23 @@ def needs_contract_price(quote: Quote | None, settings: Settings) -> bool:
 
 
 # -------------------------------------------------------------------- store
+def manual_type_ids(conn: sqlite3.Connection) -> set[int]:
+    return {r[0] for r in conn.execute("SELECT type_id FROM prices WHERE source=?", (MANUAL,))}
+
+
 def store_prices(conn: sqlite3.Connection, quotes: dict[int, Quote]) -> None:
+    """Upsert quotes, except where a manual price is already in place.
+
+    A manual price is the user overruling the market -- typically a hull the
+    contract scan keeps mispricing, pinned to what they actually paid. The
+    market disagreeing with them is the expected state, not new information,
+    so an automated pass silently replacing the pin would defeat the entire
+    point of pinning. The guard lives here, at the single write path, so no
+    future caller of store_prices can overwrite a pin by accident either.
+    """
+    manual = manual_type_ids(conn)
+    if manual:
+        quotes = {tid: q for tid, q in quotes.items() if tid not in manual}
     ts = _now()
     rows = [(tid, q.buy, q.sell, q.source, q.samples, ts) for tid, q in quotes.items()]
     with db.transaction(conn):
@@ -243,14 +260,47 @@ def store_prices(conn: sqlite3.Connection, quotes: dict[int, Quote]) -> None:
         )
 
 
+def set_manual_price(conn: sqlite3.Connection, type_id: int, price: float) -> None:
+    """Pin one type to a user-chosen price until clear_manual_price is called.
+
+    One number fills both bases, like a contract price: a pin is a valuation,
+    not an order book. samples is NULL because there is no sample -- the
+    column records how many market observations back a figure, and a pin is
+    backed by judgement instead.
+    """
+    with db.transaction(conn):
+        db.upsert_many(
+            conn,
+            "prices",
+            ["type_id", "buy_price", "sell_price", "source", "samples", "updated_at"],
+            [(type_id, price, price, MANUAL, None, _now())],
+        )
+
+
+def clear_manual_price(conn: sqlite3.Connection, type_id: int) -> None:
+    """Delete the pin so the next repricing pass refills the row from market.
+
+    Deleting rather than flipping the source is deliberate: the pinned figure
+    is the user's number, not a market observation, so leaving it behind under
+    another label would present it as data it never was. Until the next
+    reprice the type simply reads as unpriced, which is the honest state.
+    """
+    conn.execute("DELETE FROM prices WHERE type_id=? AND source=?", (type_id, MANUAL))
+
+
 def refresh_prices(
     conn: sqlite3.Connection,
     client: ESIClient | None,
     settings: Settings,
     progress: Progress | None = None,
 ) -> dict[str, int]:
-    """Repricing pass over everything currently owned."""
-    all_ids = owned_type_ids(conn)
+    """Repricing pass over everything currently owned, manual pins excepted."""
+    # Manually pinned types are left out from the start rather than filtered
+    # at store time only: fetching a quote we are forbidden to store wastes a
+    # slice of the Fuzzwork request and, worse, counts the pin in the summary
+    # as if the market had priced it.
+    manual = manual_type_ids(conn)
+    all_ids = [t for t in owned_type_ids(conn) if t not in manual]
     if not all_ids:
         return {"total": 0}
 

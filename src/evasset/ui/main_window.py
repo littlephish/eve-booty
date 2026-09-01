@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 from .. import db, queries
 from ..config import DB_PATH, Settings
 from ..esi import TokenCache
-from .assets_view import AssetsView, OverviewView
+from .assets_view import AssetsView
 from .async_query import AsyncQuery
 from .characters_dialog import CharactersDialog
 from .networth_view import NetWorthView
@@ -45,19 +45,18 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         # Every tab's first real query is deferred until it is actually shown.
         # All of them used to reload() (query + format + resize) in their own
-        # __init__, so a cold start paid for Assets, Overview, both Wallet
-        # tables and Net worth before you could look at any of them. Now only
-        # the tab on screen loads.
+        # __init__, so a cold start paid for Assets, both Wallet tables and
+        # Net worth before you could look at any of them. Now only the tab on
+        # screen loads.
         #
         # The views take no connection. Their reads all go through AsyncQuery,
         # which uses db.connect() on the pool thread it runs on, and the few
-        # GUI-thread queries (this class, the Stockpile tab's writes) call
-        # db.connect() for this thread's. db.connect() caches one connection
-        # per thread, so the db.init() above is what actually opens the main
-        # thread's -- and the schema script and migration check run once here
-        # rather than once per view.
+        # GUI-thread queries (this class, the Assets and Stockpile writes)
+        # call db.connect() for this thread's. db.connect() caches one
+        # connection per thread, so the db.init() above is what actually opens
+        # the main thread's -- and the schema script and migration check run
+        # once here rather than once per view.
         self.assets = AssetsView(defer_load=True)
-        self.overview = OverviewView(defer_load=True)
         self.networth = NetWorthView(defer_load=True)
         self.wallet = WalletView(defer_load=True)
         self.structures = StructuresView(defer_load=True)
@@ -66,7 +65,6 @@ class MainWindow(QMainWindow):
         self.log = _LogPane()
 
         self.tabs.addTab(self.assets, "Assets")
-        self.tabs.addTab(self.overview, "Overview")
         self.tabs.addTab(self.treemap, "Treemap")
         self.tabs.addTab(self.wallet, "Wallet")
         self.tabs.addTab(self.networth, "Net worth")
@@ -77,7 +75,6 @@ class MainWindow(QMainWindow):
 
         self._tab_first_load = {
             self.assets: self.assets.first_load,
-            self.overview: self.overview.first_load,
             self.treemap: self.treemap.first_load,
             self.wallet: self.wallet.first_load,
             self.networth: self.networth.first_load,
@@ -85,8 +82,7 @@ class MainWindow(QMainWindow):
             self.stockpile: self.stockpile.first_load,
         }
         self._tab_reload = {
-            self.assets: lambda: (self.assets.refresh_filters(), self.assets.reload()),
-            self.overview: self.overview.reload,
+            self.assets: self.assets.refresh_all,
             self.treemap: self.treemap.reload,
             self.wallet: self.wallet.reload,
             self.networth: self.networth.refresh,
@@ -98,8 +94,7 @@ class MainWindow(QMainWindow):
         self._loaded: set = set()
         self._dirty: set = set()
         self.tabs.currentChanged.connect(self._ensure_tab_loaded)
-        self.overview.filter_assets_requested.connect(self._filter_assets_from_overview)
-        self.treemap.filter_assets_requested.connect(self._filter_assets_from_overview)
+        self.treemap.filter_assets_requested.connect(self._filter_assets_from_treemap)
         self._status_query = AsyncQuery(self)
 
         # Connected here rather than next to the TaskManager itself: warned
@@ -303,15 +298,18 @@ class MainWindow(QMainWindow):
                 lambda _checked=False, c=cid, n=name: self.sync_character(c, n)
             )
 
-    def _filter_assets_from_overview(self, level: str, value: str) -> None:
-        """Right-click "Filter Assets to ..." in Overview -- switch to the
-        Assets tab (loading it first if it has never been shown) and apply
-        the filter. AssetsView.reload() is safe to call again immediately
-        after a lazy-load's own reload() -- AsyncQuery only ever delivers the
-        most recent request, so calling it twice in a row just means the
-        first result is quietly dropped, not that it races."""
+    def _filter_assets_from_treemap(self, level: str, value: str) -> None:
+        """Right-click a treemap tile -> show me those assets.
+
+        The Assets tab filters through the omnibox now, so this adds a chip
+        rather than calling an apply_external_filter() that no longer exists.
+        The level keys in ROLLUP_LEVELS are deliberately the same strings as
+        omni.LEVEL_KINDS, so a level is already a chip kind and needs no
+        translation table between the two.
+        """
         self.tabs.setCurrentWidget(self.assets)
-        self.assets.apply_external_filter(level, value)
+        self._ensure_tab_loaded(self.tabs.currentIndex())
+        self.assets.omnibox.add_chip(level, value)
 
     def _reset_sort(self) -> None:
         # The Log tab has no table/sorter at all, hence the getattr guard.

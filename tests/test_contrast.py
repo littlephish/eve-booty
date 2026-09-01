@@ -105,6 +105,123 @@ def test_most_meta_groups_deliberately_get_no_tint():
     assert pal.rarity_hex(2) is None  # Tech II
 
 
+HEAT_FRACTIONS = [0.25, 0.5, 1.0]
+
+
+@pytest.mark.parametrize("fraction", HEAT_FRACTIONS)
+def test_heat_tints_keep_black_text_readable_on_light(fraction):
+    """The heat wash is a background under default theme text, like the
+    rarity tints -- the strongest wash the scale can produce must still leave
+    black text at AA, or the most valuable rows become the least readable."""
+    background = pal._heat_hex(fraction, dark=False)
+    assert background is not None
+    assert contrast("#000000", background) >= AA_NORMAL, (
+        f"black on {background} (fraction {fraction}) is "
+        f"{contrast('#000000', background):.2f}:1"
+    )
+
+
+@pytest.mark.parametrize("fraction", HEAT_FRACTIONS)
+def test_heat_tints_keep_white_text_readable_on_dark(fraction):
+    background = pal._heat_hex(fraction, dark=True)
+    assert background is not None
+    assert contrast("#FFFFFF", background) >= AA_NORMAL, (
+        f"white on {background} (fraction {fraction}) is "
+        f"{contrast('#FFFFFF', background):.2f}:1"
+    )
+
+
+def test_zero_heat_means_no_wash_at_all():
+    """Fraction 0 is the unpriced/worthless case; it must map to no colour
+    rather than a 0%-strength blend that still repaints every cold cell."""
+    assert pal._heat_hex(0.0, dark=False) is None
+    assert pal._heat_hex(0.0, dark=True) is None
+    assert pal._heat_hex(-0.5, dark=False) is None
+
+
+_ALL_CHIP_PAIRS = [
+    ("accent", pal.CHIP_ACCENT),
+    ("negated", pal.CHIP_NEGATED),
+    *sorted(pal.CHIP_KIND_TINTS.items()),
+]
+
+
+@pytest.mark.parametrize("pair", [p for _n, p in _ALL_CHIP_PAIRS],
+                         ids=[n for n, _p in _ALL_CHIP_PAIRS])
+def test_chip_washes_keep_black_text_readable_on_light(pair):
+    """Chip washes sit under default theme text like the rarity tints --
+    every per-kind wash included, not just the two originals."""
+    assert contrast("#000000", pair[0]) >= AA_NORMAL, (
+        f"black on {pair[0]} is {contrast('#000000', pair[0]):.2f}:1"
+    )
+
+
+@pytest.mark.parametrize("pair", [p for _n, p in _ALL_CHIP_PAIRS],
+                         ids=[n for n, _p in _ALL_CHIP_PAIRS])
+def test_chip_washes_keep_white_text_readable_on_dark(pair):
+    assert contrast("#FFFFFF", pair[1]) >= AA_NORMAL, (
+        f"white on {pair[1]} is {contrast('#FFFFFF', pair[1]):.2f}:1"
+    )
+
+
+def test_every_chip_kind_has_its_own_wash_and_none_collide():
+    """The per-kind colours ARE the feature: every kind the grammar can mint
+    must appear in the table, and no two kinds may share a wash in either
+    theme -- two kinds converging would silently un-ship the distinction."""
+    from evasset import omni
+
+    minted_kinds = {*omni.LEVEL_KINDS, "item", "is", "val"}
+    assert set(pal.CHIP_KIND_TINTS) == minted_kinds
+    for theme in (0, 1):
+        washes = [pair[theme] for pair in pal.CHIP_KIND_TINTS.values()]
+        assert len(washes) == len(set(washes)), f"duplicate wash in theme {theme}"
+
+
+def test_the_unpriced_badge_text_inverts_readably_against_its_warning_fill():
+    """The estate strip's "show" pill fills with the WARN colour and inverts
+    its text: white on the light theme's dark amber, black on the dark
+    theme's bright amber. Both directions must clear AA or the one figure
+    flagged as untrustworthy becomes the one figure you cannot read."""
+    light_fill, dark_fill = pal._STATUS[pal.WARN]
+    assert contrast("#FFFFFF", light_fill) >= AA_NORMAL, (
+        f"white on {light_fill} is {contrast('#FFFFFF', light_fill):.2f}:1"
+    )
+    assert contrast("#000000", dark_fill) >= AA_NORMAL, (
+        f"black on {dark_fill} is {contrast('#000000', dark_fill):.2f}:1"
+    )
+
+
+def test_chip_tint_prefers_negation_and_survives_unknown_kinds():
+    """Negation must out-shout the kind colour (an excluding chip is the
+    higher-stakes signal), and a saved view from a newer build with a kind
+    this build has never heard of must still render on the neutral accent."""
+    assert pal.chip_tint("owner", negated=True) in pal.CHIP_NEGATED
+    assert pal.chip_tint("owner") in pal.CHIP_KIND_TINTS["owner"]
+    assert pal.chip_tint("from-the-future") in pal.CHIP_ACCENT
+
+
+# WCAG 2.1 section 1.4.11: graphical objects need 3:1, not the 4.5:1 text
+# threshold. The rail bar is a filled bar drawn on the theme background, with
+# no text on top of it, so 3:1 against the background is the requirement.
+AA_GRAPHIC = 3.0
+
+
+@pytest.mark.parametrize("background", LIGHT_BACKGROUNDS)
+def test_the_rail_bar_is_visible_on_light(background):
+    assert contrast(pal.RAIL_BAR[0], background) >= AA_GRAPHIC, (
+        f"{pal.RAIL_BAR[0]} on {background} is "
+        f"{contrast(pal.RAIL_BAR[0], background):.2f}:1"
+    )
+
+
+@pytest.mark.parametrize("background", DARK_BACKGROUNDS)
+def test_the_rail_bar_is_visible_on_dark(background):
+    assert contrast(pal.RAIL_BAR[1], background) >= AA_GRAPHIC, (
+        f"{pal.RAIL_BAR[1]} on {background} is "
+        f"{contrast(pal.RAIL_BAR[1], background):.2f}:1"
+    )
+
+
 def test_the_old_hand_picked_colours_would_have_failed():
     """Characterises what this module fixed. If someone reintroduces one of
     these, the numbers here say why not to."""
@@ -115,8 +232,46 @@ def test_the_old_hand_picked_colours_would_have_failed():
 
 def test_secondary_text_points_at_a_role_that_passes():
     """palette(mid) measured 1.99:1 against a white Base and was what every
-    hint and footer in the app used. palette(shadow) is 4.54:1."""
+    hint and footer in the app used. palette(shadow) is 4.54:1 -- on the
+    classic light palette; Windows 11's dark palette ships it as #000000,
+    which is why normalised() (tested below) repairs the role at startup."""
     assert pal.SECONDARY_TEXT == "palette(shadow)"
+
+
+def test_normalised_repairs_the_windows_dark_palette_roles():
+    """Measured on the real Windows 11 dark palette (style "windows11",
+    2026-08-28): Shadow -- the role every muted caption, hint and meta line
+    draws in -- is #000000, and AlternateBase is #ffffff. That rendered the
+    entire secondary text layer black on #1e1e1e and the value map's track
+    glaring white. The repair must land AA substitutes on the dark roles and
+    leave a healthy light palette untouched."""
+    from PySide6.QtGui import QColor, QPalette
+
+    win_dark = QPalette()
+    win_dark.setColor(QPalette.Base, QColor("#2d2d2d"))
+    win_dark.setColor(QPalette.Shadow, QColor("#000000"))
+    win_dark.setColor(QPalette.AlternateBase, QColor("#ffffff"))
+    fixed = pal.normalised(win_dark)
+    shadow = fixed.color(QPalette.Shadow).name().upper()
+    for background in [*DARK_BACKGROUNDS, "#2D2D2D"]:
+        assert contrast(shadow, background) >= AA_NORMAL, (
+            f"{shadow} on {background} is {contrast(shadow, background):.2f}:1"
+        )
+    assert fixed.color(QPalette.AlternateBase).lightness() < 128, (
+        "a white AlternateBase must not survive into a dark palette"
+    )
+
+    healthy_light = QPalette()
+    healthy_light.setColor(QPalette.Base, QColor("#ffffff"))
+    healthy_light.setColor(QPalette.Shadow, QColor("#767676"))
+    assert pal.normalised(healthy_light).color(QPalette.Shadow).name() == "#767676"
+
+    harsh_light = QPalette()
+    harsh_light.setColor(QPalette.Base, QColor("#ffffff"))
+    harsh_light.setColor(QPalette.Shadow, QColor("#000000"))
+    repaired = pal.normalised(harsh_light).color(QPalette.Shadow).name().upper()
+    for background in LIGHT_BACKGROUNDS:
+        assert contrast(repaired, background) >= AA_NORMAL
 
 
 def test_no_view_still_uses_the_failing_role():

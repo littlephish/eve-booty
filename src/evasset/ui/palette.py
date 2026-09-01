@@ -64,6 +64,138 @@ RARITY_TINTS = {
 }
 
 
+# Omnibox chip washes -- backgrounds under default theme text, same regime as
+# RARITY_TINTS above: the theme's own text colour must stay AA-readable on top
+# of the wash, so light theme gets pale washes and dark theme gets deep ones.
+# The accent pair marks an including chip; the negated pair leans on the same
+# hue family as CRITICAL because an exclusion is the destructive half of the
+# grammar. Measured in tests/test_contrast.py.
+#                light bg    dark bg
+CHIP_ACCENT = ("#DCE9F8", "#1D3350")
+CHIP_NEGATED = ("#F8DEDE", "#4A2020")
+
+# One wash per chip kind, so a glance at the omnibox says *what axes* are
+# filtered before any prefix is read -- three blue-ish chips reads as "three
+# location-flavoured filters", one amber chip stands out as the odd category.
+# Hues sit far enough apart to tell neighbours apart, but every pair keeps
+# the same discipline as CHIP_ACCENT: a pale wash on light, a dark wash on
+# dark, default text AA-readable on both (measured in tests/test_contrast.py,
+# which also pins the washes pairwise-distinct so two kinds cannot silently
+# converge). Negation is NOT in this table on purpose: an excluding chip
+# always wears CHIP_NEGATED's red regardless of kind, because "this filter
+# throws things away" is the higher-stakes signal and must not be diluted
+# into ten flavours.
+#                     light bg    dark bg
+CHIP_KIND_TINTS = {
+    "location": ("#DCE9F8", "#1D3350"),   # blue -- the most-used kind keeps the familiar accent
+    "system":   ("#D8F0F2", "#163B40"),   # teal
+    "region":   ("#E2E4F9", "#262B52"),   # periwinkle
+    "owner":    ("#DDF0DD", "#1E3423"),   # green
+    "category": ("#F4EAD6", "#3E3117"),   # tan
+    "group":    ("#F8E5D8", "#45291A"),   # orange
+    "meta":     ("#ECE0F5", "#33244A"),   # purple
+    "item":     ("#E4E8EC", "#2A3138"),   # slate
+    "is":       ("#F6DFEC", "#43213B"),   # pink
+    "val":      ("#F2EFC8", "#3A3712"),   # yellow
+}
+
+
+def chip_tint(kind: str, negated: bool = False, palette: QPalette | None = None) -> str:
+    """Background hex for one omnibox chip: the kind's wash, the negation red
+    for excluding chips, and CHIP_ACCENT for a kind this build has never
+    heard of (a saved view from a newer build must still render)."""
+    if negated:
+        pair = CHIP_NEGATED
+    else:
+        pair = CHIP_KIND_TINTS.get(kind, CHIP_ACCENT)
+    return pair[1] if is_dark(palette) else pair[0]
+
+
+# The rail's per-row value bar. A filled bar, not a background under text, so
+# the WCAG requirement is the 3:1 floor for graphical objects (WCAG 2.1,
+# 1.4.11 non-text contrast) rather than the 4.5:1 text threshold --
+# tests/test_contrast.py holds these to 3:1 against both theme backgrounds.
+RAIL_BAR = ("#3B76C4", "#6FA8E8")
+
+# The value-cell heat wash: one accent hue throughout, blended toward the
+# theme base by the row's heat fraction. The strength band runs from a
+# barely-there 8% at the bottom of the log scale to a clearly-visible 26% at
+# the top; past that the wash starts fighting the rarity tints and the
+# selection colour for attention, and on light backgrounds it stops reading
+# as a wash at all.
+_HEAT_BASE = ("#FFFFFF", "#1E1E1E")
+_HEAT_ACCENT = ("#1B66C9", "#5C9BE8")
+_HEAT_MIN, _HEAT_MAX = 0.08, 0.26
+
+
+def _blend(a_hex: str, b_hex: str, t: float) -> str:
+    """Per-channel linear mix of a toward b (t=0 gives a, t=1 gives b).
+
+    Solid colours on purpose: a translucent QBrush composites against
+    whatever the style happens to paint underneath, which differs between
+    stylesheet and palette rendering, so the "alpha" is precomputed against
+    the known theme base instead of left to the compositor.
+    """
+    a, b = a_hex.lstrip("#"), b_hex.lstrip("#")
+    channels = []
+    for offset in (0, 2, 4):
+        va = int(a[offset:offset + 2], 16)
+        vb = int(b[offset:offset + 2], 16)
+        channels.append(round(va + (vb - va) * t))
+    return "#{:02X}{:02X}{:02X}".format(*channels)
+
+
+def _heat_hex(fraction: float, dark: bool) -> str | None:
+    """Theme-explicit half of heat_tint, split out so the contrast tests can
+    measure both variants without standing up a QApplication."""
+    if fraction <= 0:
+        return None
+    strength = _HEAT_MIN + (_HEAT_MAX - _HEAT_MIN) * min(fraction, 1.0)
+    which = 1 if dark else 0
+    return _blend(_HEAT_BASE[which], _HEAT_ACCENT[which], strength)
+
+
+def heat_tint(fraction: float, palette: QPalette | None = None) -> str | None:
+    """Background hex for a value cell's heat fraction, or None for no wash.
+
+    Fraction 0 (an unpriced or worthless row) deliberately maps to None
+    rather than a 0%-strength blend, so callers can skip creating a brush at
+    all for the common cold cell.
+    """
+    return _heat_hex(fraction, is_dark(palette))
+
+
+def normalised(base: QPalette) -> QPalette:
+    """A copy of the palette with the roles this app's text depends on made
+    readable.
+
+    Measured on Windows 11's own dark palette (style "windows11",
+    2026-08-28): Shadow is #000000 -- and Shadow is the one role every muted
+    caption, hint and meta line here draws in, so the whole secondary text
+    layer rendered black on #1e1e1e. AlternateBase was #ffffff, which made
+    the value map's empty track glare white. Repairing the roles once at
+    startup fixes every present and future palette(shadow) stylesheet and
+    QPalette.Shadow paint in one place, instead of retrofitting a colour
+    constant into two dozen call sites.
+
+    Substitutes are measured like everything else in this file: #A6A6A6
+    clears AA on both dark backgrounds (6.8:1 on #1E1E1E, 5.7:1 on #2D2D2D);
+    #6E6E6E clears it on both light ones (5.1:1 on white, 4.7:1 on #F5F5F5).
+    A light palette whose Shadow already reads (the classic #767676) passes
+    through untouched.
+    """
+    p = QPalette(base)
+    dark = p.color(QPalette.Base).lightness() < 128
+    shadow = p.color(QPalette.Shadow).lightness()
+    if dark and shadow < 128:
+        p.setColor(QPalette.Shadow, QColor("#A6A6A6"))
+    elif not dark and shadow < 60:
+        p.setColor(QPalette.Shadow, QColor("#6E6E6E"))
+    if dark and p.color(QPalette.AlternateBase).lightness() > 128:
+        p.setColor(QPalette.AlternateBase, QColor("#3A3A3A"))
+    return p
+
+
 def is_dark(palette: QPalette | None = None) -> bool:
     """Dark themes are detected from the palette rather than from a setting,
     so following the OS theme keeps working without anything to configure."""

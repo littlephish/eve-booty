@@ -79,12 +79,73 @@ def test_search_narrows(conn):
     assert queries.fetch_assets(conn, where, params) == []
 
 
-def test_overview_rollup(conn):
-    rows = {r["label"]: r for r in queries.location_totals(conn, "region")}
-    assert rows["The Forge"]["sell_value"] == pytest.approx(2_365_500_000)
-    assert rows["The Forge"]["buy_value"] == pytest.approx(2_345_000_000)
-    cats = {r["label"]: r for r in queries.location_totals(conn, "category")}
-    assert cats["Ship"]["sell_value"] == pytest.approx(2_360_000_000)
+def test_group_names_every_level_resolves_to_its_own_column(conn):
+    """Each key in ROLLUP_LEVELS must map to a real ASSET_ROWS column; a broken
+    mapping would either raise or silently serve the fallback column, so
+    three levels are pinned to exact content the fixture makes distinct."""
+    seen = 0
+    for _display, level in queries.ROLLUP_LEVELS:
+        names = queries.group_names(conn, level)
+        assert names, f"level {level!r} came back empty over seeded data"
+        assert all(isinstance(n, str) for n in names)
+        seen += 1
+    assert seen == 6, "ROLLUP_LEVELS itself must still carry all six grouping levels"
+    # Region and group would collide if the mapping fell back to location --
+    # and location itself is pinned exactly, because every other level's name
+    # set is non-empty too and a mis-mapped "location" would otherwise pass
+    # as someone else's plausible-looking strings.
+    assert queries.group_names(conn, "region") == ["The Forge"]
+    assert queries.group_names(conn, "group") == ["Battleship", "Freighter", "Mineral"]
+    assert queries.group_names(conn, "location") == [
+        "Jita IV - Moon 4 - Caldari Navy Assembly Plant"
+    ]
+
+
+def test_group_names_facets_on_the_callers_where_clause(conn):
+    """Faceting means narrowing with the other active filters -- a search
+    for one item must shrink the group list to that item's group, not keep
+    offering picks that would land on an empty table."""
+    where, params = queries.search_clause("charon")
+    assert queries.group_names(conn, "group", where, params) == ["Freighter"]
+    # The same clause faceting a different level: still only Charon's rows.
+    assert queries.group_names(conn, "category", where, params) == ["Ship"]
+
+
+def test_group_names_orders_case_insensitively(conn):
+    """Byte-order sorting would banish every lowercase-first name below Z,
+    so a lowercase group is seeded to prove COLLATE NOCASE is really on."""
+    conn.executescript("""
+      INSERT INTO sde_groups VALUES (200,4,'ammo',1);
+      INSERT INTO sde_types (type_id,name,group_id,volume,portion_size,published)
+        VALUES (300,'Test Ammo',200,0.025,1,1);
+      INSERT INTO assets (owner_type,owner_id,item_id,type_id,quantity,location_id,
+                          location_flag,location_type,is_singleton,root_location_id,
+                          system_id,region_id) VALUES
+        ('character',100,4,300,10,60003760,'Hangar','station',0,60003760,30000142,10000002);
+    """)
+    assert queries.group_names(conn, "group") == ["ammo", "Battleship", "Freighter", "Mineral"]
+
+
+def test_group_names_treats_an_unknown_level_as_location(conn):
+    """The level key crosses a UI boundary as a plain string; a typo there
+    should degrade to the default grouping, not raise or return nothing."""
+    fallback = queries.group_names(conn, "no-such-level")
+    assert fallback == queries.group_names(conn, "location")
+    assert fallback, "the fallback must serve real labels, not agree on empty"
+
+
+def test_group_names_leaves_out_null_labels(conn):
+    """An asset with no resolved system or region (asset safety, mid-sync)
+    must not surface as a None entry that would render as a blank,
+    unclickable row."""
+    conn.execute(
+        f"""INSERT INTO assets (owner_type,owner_id,item_id,type_id,quantity,location_id,
+              location_flag,location_type,is_singleton,root_location_id,system_id,region_id)
+            VALUES ('character',100,5,34,10,{ASSET_SAFETY_LOCATION_ID},'AssetSafety',
+                    'asset_safety',0,{ASSET_SAFETY_LOCATION_ID},NULL,NULL)"""
+    )
+    assert queries.group_names(conn, "region") == ["The Forge"]
+    assert queries.group_names(conn, "system") == ["Jita"]
 
 
 def test_networth_breakdown_on_both_bases(conn):
@@ -1100,6 +1161,234 @@ def test_confirmed_broken_scopes_stay_out_of_the_default_request():
         assert scope not in SCOPES, f"{scope} was confirmed broken -- keep it out of SCOPES"
     # The character-level blueprints equivalent is unaffected and should stay requested.
     assert "esi-characters.read_blueprints.v1" in SCOPES
+
+
+# ---------------------------------------------------- rail and strip queries
+def test_asset_rows_expose_the_price_quote_age(conn):
+    """The stale-price badge needs to know when a quote was taken; a row with
+    no price at all must read as NULL, not crash the join."""
+    conn.executescript("""
+      INSERT INTO sde_types (type_id,name,group_id,volume,portion_size,published)
+        VALUES (999,'Paint Widget',18,2,1,1);
+      INSERT INTO assets (owner_type,owner_id,item_id,type_id,quantity,location_id,
+                          location_flag,location_type,is_singleton,root_location_id,
+                          system_id,region_id) VALUES
+        ('character',100,50,999,3,60003760,'Hangar','station',0,60003760,30000142,10000002);
+    """)
+    by_item = {r["item"]: r for r in queries.fetch_assets(conn)}
+    assert by_item["Charon"]["price_updated_at"] == "2026-08-04T00:00:00+00:00"
+    assert by_item["Paint Widget"]["price_updated_at"] is None
+
+
+def test_rail_rollups_aggregate_and_sort_on_all_three_keys(conn):
+    """The fixture is arranged so value, name and volume each produce a
+    different label order -- a sort key that silently fell back to another
+    would flunk at least one of the three."""
+    # A second mineral stack: makes Mineral the top value (2.75b), the middle
+    # volume (5m m3), and proves stacks/units really aggregate.
+    conn.execute(
+        "INSERT INTO assets (owner_type,owner_id,item_id,type_id,quantity,location_id,"
+        "location_flag,location_type,is_singleton,root_location_id,system_id,region_id) "
+        "VALUES ('character',100,51,34,499000000,60003760,'Hangar','station',0,"
+        "60003760,30000142,10000002)"
+    )
+    by_value = queries.rail_rollups(conn, "group", sort="value")
+    assert [r["label"] for r in by_value] == ["Mineral", "Freighter", "Battleship"]
+    mineral = by_value[0]
+    assert mineral["stacks"] == 2
+    assert mineral["units"] == 500_000_000
+    assert mineral["volume"] == pytest.approx(5_000_000)
+    assert mineral["sell_value"] == pytest.approx(2_750_000_000)
+
+    by_name = queries.rail_rollups(conn, "group", sort="name")
+    assert [r["label"] for r in by_name] == ["Battleship", "Freighter", "Mineral"]
+
+    by_volume = queries.rail_rollups(conn, "group", sort="volume")
+    assert [r["label"] for r in by_volume] == ["Freighter", "Mineral", "Battleship"]
+
+
+def test_rail_rollups_facet_on_the_callers_where_clause(conn):
+    rows = queries.rail_rollups(conn, "group", "cat.name = ?", ("Ship",))
+    assert [r["label"] for r in rows] == ["Freighter", "Battleship"]
+    assert rows[0]["sell_value"] == pytest.approx(2_000_000_000)
+
+
+def test_rail_rollups_drop_null_labels(conn):
+    """An asset-safety row has no system; the system-level rail must not
+    offer a blank row for it."""
+    conn.execute(
+        f"INSERT INTO assets (owner_type,owner_id,item_id,type_id,quantity,location_id,"
+        f"location_flag,location_type,is_singleton,root_location_id,system_id,region_id) "
+        f"VALUES ('character',100,52,34,10,{ASSET_SAFETY_LOCATION_ID},'AssetSafety',"
+        f"'asset_safety',0,{ASSET_SAFETY_LOCATION_ID},NULL,NULL)"
+    )
+    assert [r["label"] for r in queries.rail_rollups(conn, "system")] == ["Jita"]
+    # At location level the same row is addressable, under its fixed label.
+    labels = [r["label"] for r in queries.rail_rollups(conn, "location")]
+    assert "Asset Safety" in labels
+
+
+def test_where_is_item_sums_quantities_biggest_pile_first(conn):
+    rows = queries.where_is_item(conn, "group")
+    assert [(r["label"], r["quantity"]) for r in rows] == [
+        ("Mineral", 1_000_000), ("Battleship", 2), ("Freighter", 1),
+    ]
+    faceted = queries.where_is_item(conn, "location", "t.name LIKE ?", ("%Tritanium%",))
+    assert [(r["label"], r["quantity"]) for r in faceted] == [
+        ("Jita IV - Moon 4 - Caldari Navy Assembly Plant", 1_000_000),
+    ]
+
+
+def test_estate_summary_matches_hand_computed_fixture_values(conn):
+    """Assets 2,365.5m at sell, liquid 500m wallet + 600m sell orders + 0.45m
+    escrow, volume 16.25m + 0.909m + 0.01m m3 -- every figure below is worked
+    out from the fixture by hand, plus one deliberately unpriced stack."""
+    conn.executescript("""
+      INSERT INTO sde_types (type_id,name,group_id,volume,portion_size,published)
+        VALUES (999,'Paint Widget',18,2,1,1);
+      INSERT INTO assets (owner_type,owner_id,item_id,type_id,quantity,location_id,
+                          location_flag,location_type,is_singleton,root_location_id,
+                          system_id,region_id) VALUES
+        ('character',100,50,999,3,60003760,'Hangar','station',0,60003760,30000142,10000002);
+    """)
+    s = queries.estate_summary(conn)
+    assert s["assets_sell"] == pytest.approx(2_365_500_000)
+    assert s["wallet_liquid"] == pytest.approx(1_100_450_000)
+    assert s["total"] == pytest.approx(3_465_950_000)
+    assert s["volume"] == pytest.approx(17_169_006)  # includes the widget's 3 x 2 m3
+    assert s["unpriced_stacks"] == 1
+
+
+def test_estate_summary_and_value_map_only_count_enabled_owners(conn):
+    """The strip is pinned to "all enabled owners", the same roster
+    networth.compute_all uses. A disabled character's wealth staying in the
+    database (disabling means stop counting, not forget) must not leak into
+    any strip figure -- a repro before the fix showed the strip and the Net
+    worth tab quoting wildly different liquid ISK over the same file."""
+    conn.executescript("""
+      INSERT INTO characters (character_id,name,corporation_id,scopes,enabled)
+        VALUES (102,'Retired Alt',2000,'s',0);
+      INSERT INTO sde_stations VALUES
+        (60008494,'Amarr VIII (Oris) - Emperor Family Academy',30002187,10000043);
+      INSERT INTO assets (owner_type,owner_id,item_id,type_id,quantity,location_id,
+                          location_flag,location_type,is_singleton,root_location_id,
+                          system_id,region_id) VALUES
+        ('character',102,55,20185,1,60008494,'Hangar','station',1,60008494,NULL,NULL);
+      INSERT INTO wallets VALUES ('character',102,1,900000000);
+      INSERT INTO market_orders (owner_type,owner_id,order_id,type_id,is_buy_order,price,
+                                 volume_remain,escrow) VALUES
+        ('character',102,9101,645,0,5000000000,10,0),
+        ('character',102,9102,34,1,4.5,100000,999000000);
+    """)
+    s = queries.estate_summary(conn)
+    # Identical to the enabled-only fixture numbers: the alt's 2b Charon,
+    # 900m wallet, 50b of sell orders and 999m escrow all stay out.
+    assert s["assets_sell"] == pytest.approx(2_365_500_000)
+    assert s["wallet_liquid"] == pytest.approx(1_100_450_000)
+    assert s["total"] == pytest.approx(3_465_950_000)
+    assert s["volume"] == pytest.approx(17_169_000)
+    assert s["unpriced_stacks"] == 0
+    # And the strip agrees with the Net worth tab computed over the same DB.
+    assert s["wallet_liquid"] == pytest.approx(
+        sum(b.liquid for b in networth.compute_all(conn))
+    )
+    assert s["assets_sell"] == pytest.approx(
+        sum(b.assets_sell for b in networth.compute_all(conn))
+    )
+    # The value map must not offer the disabled alt's station as a segment.
+    assert [r["label"] for r in queries.value_map(conn)] == [
+        "Jita IV - Moon 4 - Caldari Navy Assembly Plant"
+    ]
+
+
+def test_value_map_ranks_locations_by_sell_value_and_honours_the_limit(conn):
+    conn.executescript("""
+      INSERT INTO sde_stations VALUES
+        (60008494,'Amarr VIII (Oris) - Emperor Family Academy',30002187,10000043);
+      INSERT INTO assets (owner_type,owner_id,item_id,type_id,quantity,location_id,
+                          location_flag,location_type,is_singleton,root_location_id,
+                          system_id,region_id) VALUES
+        ('character',100,53,645,1,60008494,'Hangar','station',1,60008494,NULL,NULL);
+    """)
+    rows = queries.value_map(conn)
+    assert [(r["label"], r["sell_value"]) for r in rows] == [
+        ("Jita IV - Moon 4 - Caldari Navy Assembly Plant", pytest.approx(2_365_500_000)),
+        ("Amarr VIII (Oris) - Emperor Family Academy", pytest.approx(180_000_000)),
+    ]
+    top = queries.value_map(conn, limit=1)
+    assert [r["label"] for r in top] == ["Jita IV - Moon 4 - Caldari Navy Assembly Plant"]
+
+
+# ------------------------------------------------------------- manual prices
+def test_manual_price_survives_a_repricing_run(conn, monkeypatch):
+    """A pinned price is the user overruling the market; the next automated
+    pass replacing it would defeat the point of pinning. The pinned type must
+    not even be asked for -- its Fuzzwork slot is wasted otherwise."""
+    pricing.set_manual_price(conn, 20185, 3_500_000_000.0)
+    requested: list[int] = []
+
+    def fake_jita(ids, s, progress=None):
+        requested.extend(ids)
+        return {tid: pricing.Quote(buy=1.0, sell=2.0, source=pricing.JITA) for tid in ids}
+
+    monkeypatch.setattr(pricing, "fetch_jita", fake_jita)
+    pricing.refresh_prices(conn, _NoContractsClient(), Settings())
+
+    row = conn.execute("SELECT * FROM prices WHERE type_id=20185").fetchone()
+    assert row["source"] == "manual"
+    assert (row["buy_price"], row["sell_price"]) == (3.5e9, 3.5e9)
+    assert row["samples"] is None
+    assert 20185 not in requested
+    # The run itself really happened: an unpinned type took the new quote.
+    other = conn.execute("SELECT * FROM prices WHERE type_id=645").fetchone()
+    assert (other["buy_price"], other["sell_price"]) == (1.0, 2.0)
+
+
+def test_store_prices_refuses_to_overwrite_a_manual_row(conn):
+    """The guard sits on the single write path, not just in refresh_prices,
+    so no future caller can clobber a pin by accident."""
+    pricing.set_manual_price(conn, 34, 12.0)
+    pricing.store_prices(conn, {
+        34: pricing.Quote(buy=5.0, sell=5.5, source=pricing.JITA),
+        645: pricing.Quote(buy=1.0, sell=2.0, source=pricing.JITA),
+    })
+    pinned = conn.execute("SELECT * FROM prices WHERE type_id=34").fetchone()
+    assert pinned["source"] == "manual"
+    assert (pinned["buy_price"], pinned["sell_price"]) == (12.0, 12.0)
+    updated = conn.execute("SELECT * FROM prices WHERE type_id=645").fetchone()
+    assert (updated["buy_price"], updated["sell_price"]) == (1.0, 2.0)
+
+
+def test_clear_manual_price_restores_normal_repricing(conn, monkeypatch):
+    pricing.set_manual_price(conn, 34, 99.0)
+    pricing.clear_manual_price(conn, 34)
+    assert conn.execute("SELECT * FROM prices WHERE type_id=34").fetchone() is None
+
+    monkeypatch.setattr(
+        pricing, "fetch_jita",
+        lambda ids, s, progress=None: {34: pricing.Quote(buy=5.0, sell=5.5, source=pricing.JITA)},
+    )
+    pricing.refresh_prices(conn, _NoContractsClient(), Settings())
+    row = conn.execute("SELECT * FROM prices WHERE type_id=34").fetchone()
+    assert row["source"] == "jita"
+    assert (row["buy_price"], row["sell_price"]) == (5.0, 5.5)
+
+
+def test_clear_manual_price_leaves_market_rows_alone(conn):
+    pricing.clear_manual_price(conn, 645)
+    row = conn.execute("SELECT * FROM prices WHERE type_id=645").fetchone()
+    assert row is not None and row["source"] == "jita"
+
+
+def test_pinned_labels_and_saved_views_tables_exist(conn):
+    """The Assets tab persists rail pins and saved views here; the schema
+    must provide the tables and their uniqueness rules from a fresh init."""
+    conn.execute("INSERT INTO pinned_labels VALUES ('location','Jita')")
+    with pytest.raises(db.sqlite3.IntegrityError):
+        conn.execute("INSERT INTO pinned_labels VALUES ('location','Jita')")
+    conn.execute("INSERT INTO saved_views VALUES (1,'{}')")
+    with pytest.raises(db.sqlite3.IntegrityError):
+        conn.execute("INSERT INTO saved_views VALUES (1,'{}')")
 
 
 def test_corp_blueprints_still_skip_gracefully_without_the_scope(conn):
