@@ -1,0 +1,161 @@
+name: Release
+
+# Tag a commit and push the tag to build the Windows artifacts and publish a
+# release:
+#
+#   git tag v1.0.0
+#   git push origin v1.0.0
+#
+# Ships a portable program folder as a zip -- deliberately NOT a onefile exe.
+# A onefile build unpacks itself to %TEMP% and runs from there, which Defender
+# and CrowdStrike both score as dropper behaviour; a plain program folder does
+# not, and the folder layout is what makes the in-app folder-swap update
+# possible at all (see src/evasset/updater.py).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # to create the GitHub Release
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pytest
+      - run: sudo apt-get update && sudo apt-get install -y libegl1
+      - env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest -q
+
+  release:
+    name: Build & publish Windows artifacts
+    needs: test          # never publish a build whose tests did not pass
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . nuitka
+
+      - name: Cache Nuitka compilation cache
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\Nuitka\Nuitka\Cache
+          key: nuitka-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: nuitka-${{ runner.os }}-
+
+      - name: Read version from the tag
+        id: ver
+        shell: pwsh
+        run: |
+          # "v1.2.3" -> "1.2.3"; Windows version resources want x.y.z[.w], and
+          # the updater compares this against the tag of the next release.
+          $v = "${{ github.ref_name }}".TrimStart("v")
+          if ($v -notmatch '^\d+(\.\d+){1,3}$') { $v = "0.0.0" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "version=$v"
+
+      # The icon is generated rather than committed as the source of truth, so
+      # a release always carries the current art (and this fails loudly if the
+      # generator breaks, instead of shipping an icon-less exe).
+      - name: Generate the app icon
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python scripts/make_icon.py
+          if (-not (Test-Path "src/evasset/assets/booty.ico")) {
+            throw "make_icon.py did not produce booty.ico"
+          }
+
+      # --standalone, never --onefile: see the header.
+      - name: Build (Nuitka standalone, version-stamped from the tag)
+        shell: pwsh
+        run: |
+          python -m nuitka `
+            --standalone `
+            --assume-yes-for-downloads `
+            --enable-plugin=pyside6 `
+            --include-package=evasset `
+            --include-package-data=evasset `
+            --include-package=keyring.backends `
+            --include-package=jaraco `
+            --nofollow-import-to=pytest `
+            --nofollow-import-to=tkinter `
+            --windows-console-mode=disable `
+            --windows-icon-from-ico=src/evasset/assets/booty.ico `
+            --company-name="LittlePhish" `
+            --product-name="EVE Booty" `
+            --file-version="${{ steps.ver.outputs.version }}" `
+            --product-version="${{ steps.ver.outputs.version }}" `
+            --file-description="EVE Booty - EVE Online asset manager" `
+            --copyright="EVE Booty" `
+            --output-dir=build `
+            --output-filename=evebooty.exe `
+            src/evasset/__main__.py
+
+      # Static, dependency-free update.exe. cargo ships preinstalled on
+      # windows-latest. It goes inside the program folder; the app copies it to
+      # temp and runs it to apply an update without PowerShell, and therefore
+      # without tripping over a locked-down ExecutionPolicy.
+      - name: Build updater (Rust)
+        shell: pwsh
+        run: |
+          cargo build --release --manifest-path updater\Cargo.toml
+          if (-not (Test-Path "updater\target\release\update.exe")) {
+            throw "cargo did not produce update.exe"
+          }
+
+      - name: Stage the program folder
+        shell: pwsh
+        run: |
+          $dist = Get-ChildItem build -Directory -Filter *.dist | Select-Object -First 1
+          if (-not $dist) { throw "Nuitka produced no program folder" }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item $dist.FullName dist\EVEBooty -Recurse
+          Copy-Item updater\target\release\update.exe dist\EVEBooty\update.exe
+          # Assert the shape the updater relies on, here, where the error is
+          # readable -- not on a user's machine mid-swap.
+          foreach ($f in @("evebooty.exe", "update.exe", "evasset\assets\booty.ico")) {
+            if (-not (Test-Path "dist\EVEBooty\$f")) { throw "staged folder is missing $f" }
+          }
+
+      # The updater looks for an asset matching *win*.zip, so keep "win" in the
+      # name (src/evasset/updater.py:pick_asset).
+      - name: Zip the portable build
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\EVEBooty `
+            -DestinationPath dist\EVEBooty-${{ steps.ver.outputs.version }}-win64.zip
+
+      - name: Show what will be released
+        shell: pwsh
+        run: Get-ChildItem dist -File | Select-Object Name, Length | Format-Table
+
+      # Published, not a draft: the updater reads /releases/latest, which skips
+      # drafts and prereleases entirely and would never see this otherwise.
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: EVE Booty ${{ github.ref_name }}
+          draft: false
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/EVEBooty-*-win64.zip

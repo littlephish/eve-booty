@@ -257,6 +257,36 @@ The SDE is not bundled. The app checks CCP's build number on demand and only
 re-downloads when it moves, which beats shipping a 95 MB blob that goes stale on
 the next patch day.
 
+### Releases and in-app updates
+
+CI runs ruff and the test suite on every push, and compile-checks the Rust
+updater on Windows. Releases are cut by tag:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+That builds a Nuitka `--standalone` **program folder**, drops `update.exe` in
+beside the app, zips it as `EVEBooty-<version>-win64.zip` and publishes a
+GitHub release. Deliberately not a onefile exe: onefile unpacks itself to
+`%TEMP%` and runs from there, which Defender and CrowdStrike both score as
+dropper behaviour, and the folder layout is what makes an in-place update
+possible at all.
+
+Help → Check for updates asks GitHub for the newest release, downloads the zip
+and hands the swap to `updater/` — a small statically-linked Rust binary. A
+running process cannot overwrite its own directory on Windows, so the app
+copies `update.exe` to a temp folder and runs it from there; that is what lets
+the new build replace the whole install, including the installed `update.exe`.
+It is not a PowerShell script because a machine ExecutionPolicy of `AllSigned`
+or `Restricted` silently refuses to run an unsigned `.ps1`, and the update
+would just never happen.
+
+The menu item is disabled when running from source: there is nothing there an
+updater should be mirroring over. `updater/` is MIT-licensed and shared across
+projects; the rest of this repo is not.
+
 ### Headless
 
 ```bash

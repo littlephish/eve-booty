@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
+    QApplication,
     QMainWindow,
     QMessageBox,
     QTabWidget,
@@ -13,7 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import db, queries
+from .. import db, queries, updater
 from ..config import DB_PATH, Settings
 from ..esi import TokenCache
 from .assets_view import AssetsView
@@ -27,7 +28,7 @@ from .task_bar import TaskBar
 from .tasks import TaskManager
 from .treemap_view import TreemapView
 from .wallet_view import WalletView
-from .workers import RepriceJob, SdeUpdateJob, SnapshotJob, SyncJob
+from .workers import RepriceJob, SdeUpdateJob, SnapshotJob, SyncJob, UpdateCheckJob
 
 
 class MainWindow(QMainWindow):
@@ -185,6 +186,14 @@ class MainWindow(QMainWindow):
         self.help_menu = help_menu = menu.addMenu("&Help")
         about = QAction("About", self)
         about.triggered.connect(self.about)
+        self.act_update = QAction("Check for &updates…", self)
+        self.act_update.triggered.connect(self.check_for_updates)
+        # Only the packaged build can replace itself; from source this would
+        # be an offer to overwrite somebody's git checkout.
+        self.act_update.setEnabled(updater.can_update())
+        if not updater.can_update():
+            self.act_update.setToolTip("Updates apply to the installed build only")
+        help_menu.addAction(self.act_update)
         help_menu.addAction(about)
 
     def _build_statusbar(self) -> None:
@@ -338,6 +347,48 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self.settings, self)
         if dialog.exec():
             self.log.add("Settings saved.")
+
+    def check_for_updates(self) -> None:
+        """Check, download and hand over to the swap helper.
+
+        The download runs through the same TaskManager as every other long
+        job, so it shows in the status bar and cannot be started twice.
+        """
+        if not updater.can_update():
+            QMessageBox.information(
+                self, "Updates",
+                "Automatic updates apply to the installed Windows build. "
+                "This copy is running from source, so update it with git.",
+            )
+            return
+        self.tasks.submit("update", "Check for updates", UpdateCheckJob(),
+                          done=self._on_update_ready)
+
+    def _on_update_ready(self, result) -> None:
+        if not result:
+            QMessageBox.information(self, "Updates", "EVE Booty is up to date.")
+            return
+        release = result["release"]
+        answer = QMessageBox.question(
+            self, "Update available",
+            f"<b>{release.version}</b> is available (you have {release.current}).<br><br>"
+            "EVE Booty will close, swap itself for the new build, and reopen.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        from pathlib import Path
+        if updater.apply(Path(result["folder"])):
+            # The helper waits for this exe to unlock before it mirrors, so
+            # quitting is the last step of applying the update, not a
+            # side effect of it.
+            QApplication.quit()
+        else:
+            QMessageBox.warning(
+                self, "Update failed",
+                "The update helper could not be started. "
+                "Download the latest release manually instead.",
+            )
 
     def about(self) -> None:
         QMessageBox.about(

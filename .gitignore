@@ -16,3 +16,6 @@ settings.json
 .env
 .DS_Store
 uv.lock
+
+# Rust updater build output
+updater/target/

@@ -7,7 +7,7 @@ import traceback
 
 from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
-from .. import db, networth, pricing, sde
+from .. import db, networth, pricing, sde, updater
 from ..config import Settings
 from ..esi import ESIClient, TokenCache
 from ..esi.auth import login as sso_login
@@ -79,6 +79,34 @@ class StartupInitJob(Job):
         db.init()
         return None
 
+
+
+class UpdateCheckJob(Job):
+    """Ask GitHub whether there is a newer release, and fetch it if so.
+
+    Check and download are one job rather than two because the answer to
+    "is there an update" is only actionable with the zip in hand, and a second
+    round trip through the task queue to get it buys nothing. Returns None when
+    already current, so the caller can tell "nothing to do" from "here it is".
+    """
+
+    def run_job(self):
+        self._progress("Checking for updates", 5)
+        release = updater.check()
+        if release is None:
+            return None
+        if self.cancelled:
+            return None
+        self._progress(f"Downloading {release.version}", 10)
+        archive = updater.download(
+            release,
+            progress=lambda pct: self._progress(
+                f"Downloading {release.version}", 10 + int(pct * 0.85)
+            ),
+        )
+        self._progress("Unpacking", 97)
+        folder = updater.extract(archive)
+        return {"release": release, "folder": str(folder)}
 
 class SdeUpdateJob(Job):
     def __init__(self, settings: Settings):

@@ -1,0 +1,69 @@
+name: CI
+
+# Fast checks on every push and PR: lint, the test suite, and a compile of the
+# Rust updater. No packaging here -- the Windows folder and zip are built by
+# release.yml, on version tags only, because a Nuitka build takes minutes and
+# nothing about a pull request needs one.
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Lint & tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # PySide6 and the rest, plus the dev tools the suite needs. Installed
+      # from pyproject so CI and a developer checkout cannot drift.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pytest ruff
+
+      - name: Ruff
+        run: ruff check src tests scripts
+
+      # Most tests are pure logic, but the ones that build a real widget need a
+      # platform plugin; offscreen is the whole reason they can run headless.
+      # libEGL comes from the runner image's Qt deps, which PySide6 needs even
+      # offscreen.
+      - name: Install Qt runtime deps
+        run: sudo apt-get update && sudo apt-get install -y libegl1
+
+      - name: Tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest -q
+
+  updater:
+    name: Updater compiles (Rust)
+    # windows-latest, not ubuntu: the updater is Windows-only and built with
+    # the MSVC toolchain and crt-static, and a cross-compile here would prove
+    # the wrong thing.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            updater/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('updater/Cargo.toml', 'updater/src/**') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      # build, not check: this links, which is what exercises the crt-static
+      # and windows_subsystem paths that only fail at link time.
+      - name: cargo build
+        run: cargo build --manifest-path updater/Cargo.toml
