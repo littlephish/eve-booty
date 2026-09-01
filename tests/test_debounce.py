@@ -96,6 +96,28 @@ def test_flush_fires_immediately_when_something_is_pending(owner):
     assert calls == [1], "flush did not fire the pending call"
 
 
+def test_stop_discards_what_was_pending(owner):
+    """Teardown, not delivery: a view closing with a keystroke still on the
+    clock must not fire a query after it has gone."""
+    calls = []
+    d = Debounce(owner, lambda: calls.append(1), interval=20)
+    d.trigger()
+    d.stop()
+    pump(lambda: calls, timeout=0.3)
+    assert calls == [], "a stopped debounce still fired"
+
+
+def test_stop_then_trigger_still_works(owner):
+    """stop() cancels what is pending, it does not disable the debounce."""
+    calls = []
+    d = Debounce(owner, lambda: calls.append(1), interval=20)
+    d.trigger()
+    d.stop()
+    d.trigger()
+    assert pump(lambda: calls)
+    assert calls == [1]
+
+
 def test_flush_does_nothing_when_nothing_is_pending(owner):
     calls = []
     d = Debounce(owner, lambda: calls.append(1), interval=10_000)

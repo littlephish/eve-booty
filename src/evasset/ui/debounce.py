@@ -48,6 +48,12 @@ class Debounce(QObject):
         widget anyway."""
         self._timer.start()
 
+    def stop(self) -> None:
+        """Forget anything pending. For teardown: a dialog closing with a
+        keystroke still on the clock would otherwise start a fresh query a
+        fifth of a second after it went away."""
+        self._timer.stop()
+
     def flush(self) -> None:
         """Fire now if something is pending. For the cases where waiting is
         wrong: Enter pressed, focus lost, a dialog about to be accepted."""
