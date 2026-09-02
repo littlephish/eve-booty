@@ -79,6 +79,31 @@ def test_a_structure_esi_stopped_reporting_is_marked(conn):
     assert rows[2] is not None
 
 
+def test_a_structure_that_vanished_long_before_the_feature_is_still_caught(conn):
+    """The detection is retroactive, and this is the test that says so.
+
+    Marking compares the rows we hold against the response we just got. It has
+    no memory of when a structure was last seen, so "unanchored an hour ago"
+    and "unanchored last year, back when nothing was watching" are the same
+    case: present in the table, absent from ESI. A backfill for structures
+    that went missing before any of this shipped would therefore be dead code
+    -- the first sync after upgrading catches them all.
+    """
+    structure(conn, 1, "Still There")
+    structure(conn, 2, "Gone Last Year")
+    # frozen months back: this row has not been refreshed since it vanished
+    conn.execute(
+        "UPDATE structures SET updated_at='2025-01-01T00:00:00+00:00' WHERE structure_id=2"
+    )
+
+    FakeSyncer(conn).mark(2000, [1])
+
+    assert conn.execute(
+        "SELECT gone_at FROM structures WHERE structure_id=2").fetchone()["gone_at"]
+    assert conn.execute(
+        "SELECT gone_at FROM structures WHERE structure_id=1").fetchone()["gone_at"] is None
+
+
 def test_nothing_is_marked_when_esi_returns_nothing(conn):
     """"This corp owns no structures" and "ESI handed back an empty page this
     once" are indistinguishable from here. Wrongly flagging an entire corp is
