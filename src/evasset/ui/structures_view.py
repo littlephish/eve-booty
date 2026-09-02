@@ -352,11 +352,13 @@ class StructuresView(QWidget):
         # Off by default: an unanchored structure keeps whatever state and
         # fuel clock it had the day it went away, so leaving them in means a
         # frozen timer sitting in the list reading like a live one.
-        self.show_unanchored = QCheckBox("Unanchored")
+        # "Show unanchored", not "Unanchored": a bare adjective on a tick box
+        # does not say which way it goes -- filter *to* them, or include them.
+        self.show_unanchored = QCheckBox("Show unanchored")
         self.show_unanchored.setToolTip(
-            "Show structures that have been unanchored, or that ESI has "
+            "Include structures that have been unanchored, or that ESI has "
             "stopped reporting. Their state and fuel times are frozen at "
-            "whenever they were last seen."
+            "whenever they were last seen, so they are hidden by default."
         )
         bar.addWidget(self.show_unanchored)
 
