@@ -631,6 +631,44 @@ class Syncer:
                 json.dumps(s.get("services") or []), now,
             ))
         db.upsert_many(self.conn, "structures", self.STRUCTURE_COLS, rows)
+        self._mark_unanchored(corp_id, [s["structure_id"] for s in got])
+
+    def _mark_unanchored(self, corp_id: int, seen: list[int]) -> None:
+        """Flag structures ESI no longer reports for this corp.
+
+        An unanchored structure simply stops appearing in the response. Left
+        alone the row stays owned=1 forever, still claiming whatever state and
+        fuel_expires it had on the day it went away -- and a fuel clock frozen
+        in the past reads as "out of fuel" rather than "gone", which is the
+        same mistake _corp_extractions already refuses to make with stale
+        chunk timers.
+
+        Marked, not deleted: this table is also how an asset sitting in that
+        structure gets a location name (ASSET_ROWS joins it), so deleting the
+        row would rename somebody's hangar to "Unknown location 1048...".
+
+        Nothing is marked when the response is empty. "This corp owns no
+        structures" and "ESI handed back an empty page this once" are
+        indistinguishable from here, and wrongly flagging an entire corp's
+        structures is far more expensive than leaving a genuinely emptied one
+        listed until someone notices.
+        """
+        if not seen:
+            return
+        placeholders = ",".join("?" * len(seen))
+        self.conn.execute(
+            f"""UPDATE structures
+                   SET gone_at = ?
+                 WHERE owned = 1
+                   AND owner_id = ?
+                   AND gone_at IS NULL
+                   AND structure_id NOT IN ({placeholders})""",
+            (_now(), corp_id, *seen),
+        )
+        # Anything still reported had gone_at cleared for free: upsert_many is
+        # INSERT OR REPLACE, which rewrites the whole row, and gone_at is not
+        # in STRUCTURE_COLS -- so a structure that comes back (an unanchor
+        # cancelled, a bad sync) returns to NULL without a second statement.
 
     def _corp_extractions(self, corp_id: int, via: int) -> None:
         """Moon drill cycles. ESI reports only the current cycle per drill, so

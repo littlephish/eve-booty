@@ -37,6 +37,12 @@ Windows exe built with Nuitka.
   implants" is a glance rather than a read. Group by item group, system,
   region, owner or category; size by Jita buy or sell; right-click a tile to
   send it to the Assets tab as a filter chip
+- Unanchored structures drop out of the Structures tab. ESI never announces an
+  unanchor — the structure just stops being reported — so sync marks what went
+  missing rather than deleting it, because assets still recorded there need its
+  name to resolve. Their frozen state and fuel clocks are blanked rather than
+  counted down to a date nothing will refresh, and an Unanchored tick box brings
+  them back when you want to look
 - An estate strip above the table — net worth, assets, liquid ISK, volume,
   unpriced count and a one-row value map of your top locations — always
   whole-estate, never faceted by the filters below it

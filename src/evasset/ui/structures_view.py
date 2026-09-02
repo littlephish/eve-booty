@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QTimer
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
@@ -108,6 +109,18 @@ def sort_key(value) -> float:
     first -- a structure with no timer is not the most urgent thing on screen."""
     when = parse_utc(value)
     return float("inf") if when is None else when.timestamp()
+
+
+def is_unanchored(row) -> bool:
+    """Two things mean "not there any more", and both belong behind one
+    switch: ESI actively reporting the unanchored state, and ESI having
+    stopped reporting the structure at all (sync sets gone_at -- see
+    Syncer._mark_unanchored). The second is the common one; a structure that
+    finishes unanchoring simply vanishes from the response.
+    """
+    if row["gone_at"]:
+        return True
+    return str(row["state"] or "").lower() == "unanchored"
 
 
 def state_label(state) -> str:
@@ -220,8 +233,15 @@ class _StructuresModel(QAbstractTableModel):
 
     def display(self, row, key: str) -> str:
         if key in self.DEADLINES:
+            # A fuel clock frozen in the past counts down to a date nothing
+            # will refresh, and reads as an imminent deadline. Blank it.
+            if is_unanchored(row):
+                return ""
             return fmt_deadline(row[key])
         if key == "state":
+            # Say what it is now, not what it was when the lights went out.
+            if is_unanchored(row):
+                return "Unanchored"
             return state_label(row["state"])
         if key == "reinforce_hour":
             return fmt_vuln_window(
@@ -233,6 +253,13 @@ class _StructuresModel(QAbstractTableModel):
         return "" if value is None else str(value)
 
     def severity(self, row) -> int:
+        # An unanchored structure is not an emergency, whatever its last
+        # reported state said. Everything the severity is computed from --
+        # the state, the fuel clock, the service list -- froze on the day it
+        # stopped being reported, so scoring it would put a permanent red row
+        # in the list demanding action nobody can take.
+        if is_unanchored(row):
+            return NORMAL
         return max(
             state_severity(row["state"]),
             fuel_severity(row["fuel_expires"]),
@@ -300,6 +327,7 @@ class StructuresView(QWidget):
     ):
         super().__init__(parent)
         self._query = AsyncQuery(self)
+        self._hidden_unanchored = 0
 
         root = QVBoxLayout(self)
 
@@ -320,6 +348,17 @@ class StructuresView(QWidget):
             "Needs attention: reinforced, vulnerable, low on fuel, or a service offline"
         )
         bar.addWidget(self.attention, 1)
+
+        # Off by default: an unanchored structure keeps whatever state and
+        # fuel clock it had the day it went away, so leaving them in means a
+        # frozen timer sitting in the list reading like a live one.
+        self.show_unanchored = QCheckBox("Unanchored")
+        self.show_unanchored.setToolTip(
+            "Show structures that have been unanchored, or that ESI has "
+            "stopped reporting. Their state and fuel times are frozen at "
+            "whenever they were last seen."
+        )
+        bar.addWidget(self.show_unanchored)
 
         self.export_btn = QPushButton("Export CSV...")
         bar.addWidget(self.export_btn)
@@ -364,6 +403,7 @@ class StructuresView(QWidget):
         self.search.textChanged.connect(self._debounce.trigger)
         self.owner.currentIndexChanged.connect(self.reload)
         self.attention.currentIndexChanged.connect(self.reload)
+        self.show_unanchored.toggled.connect(self.reload)
         self.export_btn.clicked.connect(self.export_csv)
 
         # Every deadline column is a countdown, so the table goes stale just by
@@ -395,18 +435,26 @@ class StructuresView(QWidget):
         needle = self.search.text().strip().lower()
         owner = self.owner.currentText()
         only_attention = self.attention.currentIndex() == 1
+        with_unanchored = self.show_unanchored.isChecked()
 
         def render(rows):
             keep = [
                 row for row in rows
-                if self._matches(row, needle, owner, only_attention)
+                if self._matches(row, needle, owner, only_attention, with_unanchored)
             ]
+            self._hidden_unanchored = (
+                0 if with_unanchored else sum(1 for r in rows if is_unanchored(r))
+            )
             self.model.set_rows(keep)
             self._render_footer(keep, len(rows))
 
         self._query.run(queries.fetch_structures, render)
 
-    def _matches(self, row, needle: str, owner: str, only_attention: bool) -> bool:
+    def _matches(
+        self, row, needle: str, owner: str, only_attention: bool, with_unanchored: bool
+    ) -> bool:
+        if not with_unanchored and is_unanchored(row):
+            return False
         if owner and not owner.startswith("All") and row["owner_name"] != owner:
             return False
         if needle:
@@ -431,6 +479,11 @@ class StructuresView(QWidget):
         text = f"{len(shown)} of {total} structure(s)"
         if attention:
             text += f" - {attention} need attention"
+        # Named rather than just subtracted from the count: "125 of 128" makes
+        # someone go hunting for three structures they cannot see.
+        hidden = self._hidden_unanchored
+        if hidden:
+            text += f" - {hidden} unanchored hidden"
         self.footer.setText(text + " - times are EVE time (UTC)")
 
     def _repaint_times(self) -> None:

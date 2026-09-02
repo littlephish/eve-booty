@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .config import DB_PATH
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -110,7 +110,13 @@ CREATE TABLE IF NOT EXISTS structures (
     next_reinforce_apply TEXT,
     unanchors_at         TEXT,
     services             TEXT,
-    updated_at           TEXT
+    updated_at           TEXT,
+    -- Set when a structure stops being reported by ESI, which is what an
+    -- unanchor looks like from out here: the row is kept rather than deleted
+    -- because this table doubles as the name resolver for asset locations
+    -- (see ASSET_ROWS), and dropping it would turn anything still recorded
+    -- there into "Unknown location 1048...".
+    gone_at              TEXT
 );
 
 -- Moon drill extractions, one row per drill. ESI only ever reports the
@@ -634,6 +640,16 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
                FROM {old}""",
         )
         done.append("structures: added state, fuel and timer columns (table rebuilt)")
+
+    # v3 -> v4: mark structures ESI has stopped reporting (an unanchor) rather
+    # than leaving them in the list with a frozen state and a fuel clock that
+    # keeps counting down to a date nothing will ever refresh. A plain ALTER
+    # is enough here where the block above needed a rebuild: the column is
+    # nullable with no default, so existing rows are simply NULL -- "still
+    # here as far as we know", which is the right answer until the next sync.
+    if _table_exists(conn, "structures") and "gone_at" not in columns(conn, "structures"):
+        conn.execute("ALTER TABLE structures ADD COLUMN gone_at TEXT")
+        done.append("structures: added gone_at")
 
     if done:
         set_meta(conn, "migrated_at", str(SCHEMA_VERSION))
