@@ -126,3 +126,41 @@ def test_about_reports_the_version(window, monkeypatch):
     body = shown[0]
     assert evasset.__version__ in body
     assert "github.com/littlephish/eve-booty" in body
+
+
+def test_the_update_dialog_shows_what_changed(app):
+    """The user is asked to approve an update *after* the build has already
+    been downloaded, so the notes are the only evidence they have for the
+    decision. A yes/no box naming two version numbers gave them none."""
+    from PySide6.QtWidgets import QTextBrowser
+
+    from evasset.ui.main_window import _UpdateDialog
+    from evasset.updater import Release
+
+    release = Release(
+        version="v2.0.0", url="http://x/EVEBooty-2.0.0-win64.zip", current="1.0.0.0",
+        notes="## What's Changed\n* A change the user should see first",
+        page_url="https://github.com/littlephish/eve-booty/releases/tag/v2.0.0",
+    )
+    dialog = _UpdateDialog(release)
+    browser = dialog.findChild(QTextBrowser)
+
+    assert "A change the user should see first" in browser.toPlainText()
+    # Rendered as Markdown, not dumped as source.
+    assert "##" not in browser.toPlainText()
+    # Display only: read-only, and links leave for a real browser.
+    assert browser.isReadOnly()
+    assert browser.openExternalLinks()
+    dialog.deleteLater()
+
+
+def test_the_update_dialog_handles_a_release_with_no_notes(app):
+    """An empty panel reads as a failure to load; say so instead."""
+    from PySide6.QtWidgets import QTextBrowser
+
+    from evasset.ui.main_window import _UpdateDialog
+    from evasset.updater import Release
+
+    dialog = _UpdateDialog(Release(version="v2", url="u", current="1"))
+    assert "No release notes" in dialog.findChild(QTextBrowser).toPlainText()
+    dialog.deleteLater()

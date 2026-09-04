@@ -62,6 +62,13 @@ class Release:
     version: str
     url: str
     current: str
+    # What changed, as published on the release. The workflow sets
+    # generate_release_notes, so GitHub writes this from the commits in the
+    # tag -- it was being fetched and thrown away, leaving the user asked to
+    # approve an update whose contents they had no way to see. Optional
+    # because a release can be published with an empty body.
+    notes: str = ""
+    page_url: str = ""
 
 
 def parse_version(text: str) -> tuple[int, ...]:
@@ -188,7 +195,13 @@ def check(timeout: float = 15.0) -> Release | None:
     tag = str(data.get("tag_name") or "")
     if asset is None or parse_version(tag) <= parse_version(current):
         return None
-    return Release(version=tag, url=asset["browser_download_url"], current=current)
+    return Release(
+        version=tag,
+        url=asset["browser_download_url"],
+        current=current,
+        notes=str(data.get("body") or "").strip(),
+        page_url=str(data.get("html_url") or ""),
+    )
 
 
 def download(release: Release, progress=None, timeout: float = 300.0) -> Path:

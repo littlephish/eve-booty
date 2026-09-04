@@ -6,9 +6,13 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
+    QDialogButtonBox,
+    QLabel,
     QMainWindow,
     QMessageBox,
     QTabWidget,
+    QTextBrowser,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -369,13 +373,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Updates", "EVE Booty is up to date.")
             return
         release = result["release"]
-        answer = QMessageBox.question(
-            self, "Update available",
-            f"<b>{release.version}</b> is available (you have {release.current}).<br><br>"
-            "EVE Booty will close, swap itself for the new build, and reopen.",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if answer != QMessageBox.Yes:
+        if _UpdateDialog(release, self).exec() != QDialog.Accepted:
             return
         from pathlib import Path
         if updater.apply(Path(result["folder"])):
@@ -476,6 +474,60 @@ class MainWindow(QMainWindow):
             f"Register this callback URL on that application:\n{self.settings.redirect_uri}",
         )
         self.open_settings()
+
+
+class _UpdateDialog(QDialog):
+    """What is in the update, before being asked to install it.
+
+    A plain yes/no box naming two version numbers asks somebody to approve a
+    change they have been told nothing about -- and by the time it appears the
+    build has already been downloaded, so the only thing left to decide is
+    whether to trust it. The release notes are the evidence for that decision
+    and were being fetched and discarded.
+
+    Rendered as Markdown because that is what GitHub returns, and shown in a
+    QTextBrowser rather than a QMessageBox so a long list of changes scrolls
+    instead of growing the dialog off the screen. The browser stays read-only
+    and opens links externally; it renders no scripts, so notes are display
+    data and nothing more.
+    """
+
+    def __init__(self, release, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Update available")
+        self.resize(560, 460)
+        layout = QVBoxLayout(self)
+
+        heading = QLabel(
+            f"<b>{release.version}</b> is available. You have {release.current}."
+        )
+        heading.setTextFormat(Qt.RichText)
+        layout.addWidget(heading)
+
+        notes = QTextBrowser()
+        notes.setOpenExternalLinks(True)
+        if release.notes:
+            notes.setMarkdown(release.notes)
+        else:
+            # A release can be published with an empty body. Say so rather
+            # than showing a blank panel that looks like a failure to load.
+            notes.setPlainText("No release notes were published for this version.")
+        layout.addWidget(notes, 1)
+
+        if release.page_url:
+            link = QLabel(f'<a href="{release.page_url}">View this release on GitHub</a>')
+            link.setOpenExternalLinks(True)
+            layout.addWidget(link)
+
+        layout.addWidget(QLabel("EVE Booty will close, swap itself for the new build, and reopen."))
+
+        buttons = QDialogButtonBox()
+        install = buttons.addButton("Update and restart", QDialogButtonBox.AcceptRole)
+        buttons.addButton("Not now", QDialogButtonBox.RejectRole)
+        install.setDefault(True)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
 
 class _LogPane(QWidget):

@@ -129,3 +129,69 @@ def test_a_read_only_install_directory_blocks_the_update(monkeypatch, tmp_path):
 def test_the_repo_is_overridable_from_the_environment():
     """So a fork can point its own build at its own releases without a patch."""
     assert "/" in updater.UPDATE_REPO
+
+
+# ------------------------------------------------------------- release notes
+class _FakeResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+class _FakeClient:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get(self, url, headers=None):
+        return _FakeResponse(self._payload)
+
+
+PAYLOAD = {
+    "tag_name": "v9.9.9",
+    "html_url": "https://github.com/littlephish/eve-booty/releases/tag/v9.9.9",
+    "body": "## What's Changed\n* Something worth reading before installing it",
+    "assets": [{"name": "EVEBooty-9.9.9-win64.zip", "browser_download_url": "https://x/z.zip"}],
+}
+
+
+def _check_with(monkeypatch, payload):
+    monkeypatch.setattr(updater, "current_version", lambda: "1.0.0.0")
+    monkeypatch.setattr(updater.httpx, "Client", lambda **kw: _FakeClient(payload))
+    return updater.check()
+
+
+def test_the_release_notes_are_captured(monkeypatch):
+    """generate_release_notes is set in the workflow, so GitHub writes a body
+    from the commits in the tag. It used to be fetched and discarded, leaving
+    the user approving an update they had been told nothing about."""
+    release = _check_with(monkeypatch, PAYLOAD)
+
+    assert "Something worth reading" in release.notes
+    assert release.page_url.endswith("/releases/tag/v9.9.9")
+
+
+def test_a_release_with_no_body_is_not_an_error(monkeypatch):
+    """A release can be published with an empty body, and null rather than ""
+    is what the API returns for one."""
+    release = _check_with(monkeypatch, {**PAYLOAD, "body": None, "html_url": None})
+
+    assert release.notes == ""
+    assert release.page_url == ""
+    assert release.version == "v9.9.9"  # still a perfectly good update
+
+
+def test_notes_default_to_empty_so_a_release_can_be_built_without_them():
+    release = updater.Release(version="v1", url="u", current="0")
+    assert release.notes == ""
+    assert release.page_url == ""
