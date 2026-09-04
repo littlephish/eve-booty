@@ -1,9 +1,85 @@
 # Roadmap
 
-## What's in v0.1
+A burn-down. Anything not ticked is not built. Tick it in the commit that
+builds it and move it to [Shipped](#shipped) when it goes out in a release.
 
-| Feature | Notes |
-| --- | --- |
+Items say what they actually require, because several obvious-sounding features
+are capped by what ESI exposes rather than by effort. Where that is true it is
+recorded next to the item so nobody rediscovers it.
+
+## Next
+
+- [ ] **Asset safety wraps, searchable** (jEveAssets parity)
+
+      Items in asset safety already resolve to an "Asset Safety" location and
+      match `is:safety`, but they list flat. jEveAssets shows the wrap as a
+      container you can open.
+
+      ESI tags every asset with a `location_flag`, and `AssetSafety` is one
+      value; `Deliveries` and `CapsuleerDeliveries` have the same shape of
+      problem and should be solved once. Start with a spike: confirm whether
+      wrap contents come back as children of the wrap's `item_id` or as flat
+      rows. That answer decides whether this is a query change or a sync
+      change, and it is cheap to establish before designing anything.
+
+- [ ] **Citadel service view**
+
+      What a structure is running, from `/corporations/{id}/structures`.
+      `services` is already synced and stored as JSON on the `structures`
+      table, so this is a UI job with no new sync work.
+
+      Know the ceiling before designing it: that endpoint returns `services[]`
+      as `{name, state}` and nothing more. ESI has no endpoint for a
+      structure's rigs or modules, so this can show which services are online
+      or offline and nothing about the fit. Naming it a "fitting view" would
+      promise more than it can deliver.
+
+- [ ] **Citadel profile assignment**
+
+      `/corporations/{id}/structures` returns `profile_id`, the access
+      profile applied to each structure. We do not store it, so this needs one
+      column and one sync field.
+
+      What it buys is grouping: "these six citadels share a profile and this
+      one does not", which is how a misconfigured structure gets noticed.
+
+      ESI exposes nothing else. Searched the whole 182-path spec: there is no
+      `acl`, `access` or `profile` path, so the name of a profile and its
+      contents are unavailable. This can show *which* profile is set and never
+      *what is in it*. If the bare number is not useful enough, drop the item
+      rather than build it badly.
+
+## Later
+
+- [ ] **Tree view** - assets as an expandable location → container → item tree instead
+  of a flat table. The data model already carries the parent links.
+- [ ] **Item database** - browse and search every published type in the SDE, not just
+  what you own. Everything needed is already imported.
+- [ ] **Realised profit per item** - the Transactions tab shows cash in against cash
+  out, which is not profit. Matching a sale back to the lot it came from needs
+  FIFO inventory accounting over the transaction history.
+- [ ] **Reprocessing** - value items by their refined output instead of the item.
+  Needs `typeMaterials.jsonl` from the SDE, which is not imported yet.
+- [ ] **Materials** - flatten blueprint material requirements.
+- [ ] **Slots** - how many manufacturing, research, order and contract slots are in
+  use against the character's skill-derived maximum.
+- [ ] **Mining ledger** - `/characters/{id}/mining` and the corp observers.
+- [ ] **Routing** - jump planner between the systems holding your stuff.
+- [ ] **Skills, standings, loyalty points, agents** - straightforward ESI pulls,
+  low priority for an asset tool.
+
+**Not planned**
+
+## Not planned
+
+- Price history charts per item. Adam4EVE and EVE Ref do this better than a
+  desktop app can.
+- In-game overlay, or anything that reads the client.
+- Structure rigs and modules, and access list contents. Not a judgement call:
+  ESI has no endpoint for either.
+
+## Shipped
+
 | Multi-character assets | One table, groupable with live rollup headers, filtered through the omnibox grammar (`loc:` `owner:` `is:unpriced` `val:>10m` …) |
 | Corp assets | Per-character opt-in, needs the in-game role |
 | Container flattening | Ship-in-ship-in-can resolves to the station |
@@ -21,49 +97,10 @@
 | CSV export | Whatever the current filter shows |
 | Stockpile | Target quantities per item, scoped by owner and location; opt-in held sources; shortfall in units, ISK and m3; doctrine multiplier |
 | Treemap | Value as area, grouped six ways, click through to a filter chip |
-| Structures tab | Corp citadels with fuel, reinforcement timers and moon drills; unanchored ones detected and hidden |
+| Structures tab | Corp citadels with fuel, reinforcement timers and moon drills |
+| Unanchor tracking | ESI never announces an unanchor, the structure just stops being reported, so sync records `gone_at` rather than deleting the row (assets still there need its name). A "Show unanchored" tick box brings them back |
 | In-app updates | Help -> Check for updates; folder swap via a static Rust helper |
 | Headless sync | `evebooty --sync` for schedulers |
-
-## What jEveAssets has that this doesn't
-
-Taken from the tab list in
-[GoldenGnu/jeveassets](https://github.com/GoldenGnu/jeveassets/tree/main/src/main/java/net/nikr/eve/jeveasset/gui/tabs).
-Roughly in the order I'd add them.
-
-**Next up**
-
-- **Tree view** - assets as an expandable location → container → item tree instead
-  of a flat table. The data model already carries the parent links.
-- **Item database** - browse and search every published type in the SDE, not just
-  what you own. Everything needed is already imported.
-- ~~**Stockpile**~~ - done. Target quantities per item, scoped to an owner and a
-  station/system/region, with held / target / shortfall, the shortfall costed in
-  ISK and m3, and a doctrine multiplier. Narrower than jEveAssets' arbitrary
-  filter tree by choice; see the module docstring for why.
-- ~~**Values / summary tab**~~ - done, as the estate strip on the Assets tab
-  (net worth, assets, liquid ISK, volume, unpriced count, value map).
-- **Realised profit per item** - the Transactions tab shows cash in against cash
-  out, which is not profit. Matching a sale back to the lot it came from needs
-  FIFO inventory accounting over the transaction history.
-
-**Later**
-
-- **Reprocessing** - value items by their refined output instead of the item.
-  Needs `typeMaterials.jsonl` from the SDE, which is not imported yet.
-- **Materials** - flatten blueprint material requirements.
-- **Slots** - how many manufacturing, research, order and contract slots are in
-  use against the character's skill-derived maximum.
-- **Mining ledger** - `/characters/{id}/mining` and the corp observers.
-- **Routing** - jump planner between the systems holding your stuff.
-- **Skills, standings, loyalty points, agents** - straightforward ESI pulls,
-  low priority for an asset tool.
-
-**Not planned**
-
-- Price history charts per item. Adam4EVE and EVE Ref already do this better than
-  a desktop app can.
-- In-game overlay or anything that reads the client.
 
 ## Known rough edges
 
