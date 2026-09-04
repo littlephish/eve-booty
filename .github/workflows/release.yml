@@ -179,6 +179,8 @@ jobs:
           $env:EVEBOOTY_DATA_DIR = $scratch
           $env:EVEBOOTY_CACHE_DIR = $scratch
           $out = & "dist\EVEBooty\evebooty.exe" --sync 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host "exit code: $code"
           Write-Host $out
           if ($out -match "Traceback|ImportError|ModuleNotFoundError") {
             throw "the built exe raised on startup:`n$out"
@@ -190,6 +192,13 @@ jobs:
             throw "the built exe did not create its database"
           }
           Write-Host "OK: the built exe starts, migrates and opens its database"
+          # --sync returns 1 when there are no characters to sync, which is the
+          # expected outcome here and is the whole point of running it this way.
+          # A pwsh step inherits $LASTEXITCODE from the last native command, so
+          # without this the step fails on the exe's exit code even though every
+          # assertion above passed -- which is exactly what happened on v0.1.1:
+          # it printed "OK" and then failed the release anyway.
+          exit 0
 
       # The updater looks for an asset matching *win*.zip, so keep "win" in the
       # name (src/evasset/updater.py:pick_asset).
