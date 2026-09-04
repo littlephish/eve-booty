@@ -19,8 +19,8 @@ in a commit message must come from seeded demo data.**
 Generate it:
 
 ```bash
-EVASSET_DATA_DIR=/tmp/demo uv run python scripts/seed_demo.py
-EVASSET_DATA_DIR=/tmp/demo uv run evebooty
+EVEBOOTY_DATA_DIR=/tmp/demo uv run python scripts/seed_demo.py
+EVEBOOTY_DATA_DIR=/tmp/demo uv run evebooty
 ```
 
 `scripts/seed_demo.py` exists for exactly this. It creates two characters and
@@ -29,7 +29,7 @@ Holdings`), NPC stations, and prices sampled once and hardcoded. Anything it
 produces is safe to publish because anyone can reproduce it byte-for-byte from
 the committed seeder.
 
-`EVASSET_DATA_DIR` is what makes this safe: it points the whole app at a
+`EVEBOOTY_DATA_DIR` is what makes this safe: it points the whole app at a
 scratch database, so the real one is never opened and cannot leak into the
 frame. Set it. Do not screenshot the app running against the default data
 directory and then crop.
@@ -253,10 +253,13 @@ it. Never hardcode a version anywhere, and never commit a release number into
 `_version.py` — the committed value stays `0.0.0.dev0`, and a test enforces
 that.
 
-**The on-disk identity is `evasset`, not `evebooty`.** `APP_NAME`, the
-`EVASSET_*` environment variables and the keyring service name must not be
-renamed: doing so strands every existing install's database and saved logins.
-See the comment in `config.py`.
+**`APP_NAME` moves three things at once.** It picks the data directory, the
+cache directory and the keyring service holding every refresh token, so
+renaming it strands the database and silently logs out every character. It was
+changed from `evasset` to `eve-booty` only because both halves of the migration
+exist: `config._adopt_legacy_dir` moves the folders, and
+`auth._adopt_legacy_token` re-homes each token on first use. If you rename it
+again, add the old name to `LEGACY_APP_NAMES` and check both still cover it.
 
 **Before proposing anything is finished:**
 
@@ -272,7 +275,7 @@ pricing rules and the updater be tested without a display. Do not add a
 module-level `PySide6` import outside `ui/`.
 
 **`config.py` resolves paths at import time.** `tests/conftest.py` sets
-`EVASSET_DATA_DIR` *before* importing the package for that reason. Never
+`EVEBOOTY_DATA_DIR` *before* importing the package for that reason. Never
 import `evasset` at the top of a test helper that runs before conftest, and
 never make a test write to the default data directory.
 

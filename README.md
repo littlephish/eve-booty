@@ -383,10 +383,13 @@ once first.
 | `scripts/make_icon.py` | Draws the app icon and packs the multi-size `.ico` |
 | `scripts/set_version.py` | Stamps `_version.py` from the release tag |
 
-The on-disk name is still `evasset` — the data directory, the `EVASSET_*`
-environment variables and the keyring entry holding each character's refresh
-token all kept their original identifier, because renaming them would strand an
-existing install's database and saved logins. Only the name you read changed.
+The app stores everything under `eve-booty` in your platform's app data
+directory. Installs made before the rename kept their data under `evasset`; on
+first launch the folder is moved across, and each character's saved login is
+re-homed in the OS credential store the first time it is used, so an upgrade
+neither loses the database nor asks anyone to log in again. The `EVEBOOTY_*`
+environment variables are the current spelling and the old `EVASSET_*` names
+still work.
 
 Data lives in your platform's app data directory: `evasset.sqlite` for everything,
 `settings.json` for config. Refresh tokens go to the OS credential store (Windows
@@ -420,8 +423,8 @@ WCAG AA in both themes.
 To poke at the UI without an EVE account:
 
 ```bash
-EVASSET_DATA_DIR=/tmp/demo uv run python scripts/seed_demo.py
-EVASSET_DATA_DIR=/tmp/demo uv run evebooty
+EVEBOOTY_DATA_DIR=/tmp/demo uv run python scripts/seed_demo.py
+EVEBOOTY_DATA_DIR=/tmp/demo uv run evebooty
 ```
 
 ## Relationship to jEveAssets

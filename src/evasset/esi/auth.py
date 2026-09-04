@@ -36,6 +36,7 @@ from ..config import (
     APP_NAME,
     DATA_DIR,
     KNOWN_TAKEN_PORTS,
+    LEGACY_APP_NAMES,
     SSO_AUDIENCE,
     SSO_ISSUERS,
     SSO_METADATA_URL,
@@ -44,6 +45,11 @@ from ..config import (
 )
 
 KEYRING_SERVICE = f"{APP_NAME}-refresh-token"
+# Services this app stored tokens under before it was renamed. Moving the
+# data directory is not enough on its own: the credential store is keyed by
+# service name, so without these every character would silently need
+# re-authorising after an upgrade.
+LEGACY_KEYRING_SERVICES = tuple(f"{n}-refresh-token" for n in LEGACY_APP_NAMES)
 
 _metadata: dict | None = None
 _metadata_at: float = 0.0
@@ -158,11 +164,38 @@ def store_refresh_token(character_id: int, token: str) -> None:
     _write_fallback(data)
 
 
+def _adopt_legacy_token(character_id: int) -> str | None:
+    """Find a token stored under a pre-rename service name and move it.
+
+    Done per character on first read rather than as one migration pass,
+    because the cross-platform keyring API cannot enumerate what it holds --
+    there is no way to ask "every entry under evasset-refresh-token". A
+    character id is the key, so a token can only be found when something asks
+    for that character, which is exactly when this runs.
+
+    The old entry is deleted only after the new one is written. If the delete
+    fails the token still works; if the order were reversed, a crash between
+    the two would lose the login.
+    """
+    for service in LEGACY_KEYRING_SERVICES:
+        with contextlib.suppress(Exception):
+            token = keyring.get_password(service, str(character_id))
+            if not token:
+                continue
+            keyring.set_password(KEYRING_SERVICE, str(character_id), token)
+            with contextlib.suppress(Exception):
+                keyring.delete_password(service, str(character_id))
+            return token
+    return None
+
+
 def load_refresh_token(character_id: int) -> str | None:
     if _keyring_available():
         with contextlib.suppress(Exception):
-            return keyring.get_password(KEYRING_SERVICE, str(character_id))
-        return None
+            token = keyring.get_password(KEYRING_SERVICE, str(character_id))
+            if token:
+                return token
+        return _adopt_legacy_token(character_id)
     return _read_fallback().get(str(character_id))
 
 

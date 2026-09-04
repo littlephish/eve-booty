@@ -2,23 +2,45 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from platformdirs import PlatformDirs
 
-# The app is called EVE Booty; this is deliberately not that. APP_NAME picks
-# the platform data directory *and* the keyring service holding every
-# character's SSO refresh token (see esi/auth.py's KEYRING_SERVICE), so
-# renaming it would strand an existing install's database, settings and saved
-# logins in a folder nothing looks in any more, and silently ask the user to
-# re-authenticate every character. The on-disk identity stays put; only what
-# the user reads changed.
-APP_NAME = "evasset"
-APP_AUTHOR = "evasset"
-USER_AGENT_CONTACT = os.environ.get("EVASSET_CONTACT", "")
+# APP_NAME picks the platform data directory, the cache directory *and* the
+# keyring service holding every character's SSO refresh token (esi/auth.py's
+# KEYRING_SERVICE). It was left as "evasset" long after the app was renamed
+# precisely because changing it moves all three at once: the database and
+# settings end up in a folder nothing looks in, and every saved login silently
+# disappears because the credential store is keyed by service name.
+#
+# It is safe to change now only because both halves are carried across --
+# _adopt_legacy_dir below moves the folders, and auth._adopt_legacy_token
+# re-homes each refresh token the first time its character is used. Do not
+# rename this again without checking both still cover it.
+APP_NAME = "eve-booty"
+APP_AUTHOR = "eve-booty"
+
+# What the app used to be called on disk. The data directory, the cache
+# directory and the keyring service holding every refresh token were all
+# derived from APP_NAME, so renaming it strands an existing install unless all
+# three are carried across -- see _adopt_legacy_dir below for the folders and
+# esi/auth.py for the tokens. Keep this list; it is how upgrades from any
+# previous name keep working, and it costs one stat() per launch.
+LEGACY_APP_NAMES = ("evasset",)
+
+# EVEBOOTY_* is the current spelling; EVASSET_* still works so that anyone with
+# a scheduled task or a shell profile pointing at the old names does not have
+# it break under them on upgrade.
+def _env(name: str, default: str = "") -> str:
+    return os.environ.get(f"EVEBOOTY_{name}") or os.environ.get(f"EVASSET_{name}") or default
+
+
+USER_AGENT_CONTACT = _env("CONTACT")
 
 # Where this tool lives, as sent to ESI in the User-Agent and shown in About.
 # Kept in step with updater.UPDATE_REPO, which pulls releases from the same
@@ -42,8 +64,97 @@ PROJECT_URL = f"https://github.com/{PROJECT_REPO}"
 
 _dirs = PlatformDirs(APP_NAME, APP_AUTHOR, roaming=True)
 
-DATA_DIR = Path(os.environ.get("EVASSET_DATA_DIR") or _dirs.user_data_dir)
-CACHE_DIR = Path(os.environ.get("EVASSET_CACHE_DIR") or _dirs.user_cache_dir)
+
+def _adopt_legacy_dir(current: Path, legacy: Path) -> bool:
+    """Move a pre-rename directory to where this build now looks.
+
+    Runs at import, which is deliberate: everything downstream -- the database,
+    settings.json and the tokens.json fallback -- is addressed relative to
+    DATA_DIR, so the move has to finish before any of them is opened or a fresh
+    empty database gets created next to a perfectly good old one.
+
+    Moved wholesale rather than file by file. The database may have `-wal` and
+    `-shm` siblings holding committed transactions that are not in the main
+    file yet, and separating them from it is how you turn a rename into data
+    loss. Moving the directory keeps the set together, and is also why the
+    database keeps its `evasset.sqlite` filename: renaming it would mean
+    renaming the WAL set in step, for no gain a user can see.
+
+    Returns True if something was actually moved.
+    """
+    if current.exists() and any(current.iterdir()):
+        return False  # already migrated, or this install started here
+    if not legacy.is_dir() or not any(legacy.iterdir()):
+        return False  # nothing to bring across
+
+    try:
+        current.parent.mkdir(parents=True, exist_ok=True)
+        if current.exists():
+            # An empty directory a previous launch created before failing, or
+            # one the OS pre-made. rmdir only succeeds while it is empty, which
+            # is the check we want anyway.
+            current.rmdir()
+        # os.rename, not os.replace. os.replace passes MOVEFILE_REPLACE_EXISTING
+        # to MoveFileExW, which Windows rejects outright for a directory --
+        # WinError 5, "access is denied", which reads like a permissions
+        # problem and is not one. shutil.move then covers the case os.rename
+        # cannot do at all, a data directory and an app directory sitting on
+        # different volumes, by falling back to copy-and-delete.
+        try:
+            os.rename(legacy, current)
+        except OSError:
+            shutil.move(str(legacy), str(current))
+        # PlatformDirs nests <author>/<name>, so moving the inner directory
+        # leaves an empty husk behind. rmdir refuses if anything is in it,
+        # which is the guard we want -- a sibling directory from another tool
+        # by the same author is not ours to remove.
+        with contextlib.suppress(OSError):
+            legacy.parent.rmdir()
+        return True
+    except OSError:
+        # A locked file, a half-finished move, or a volume that will not take
+        # it. Report failure so the caller keeps using the old location: an
+        # upgrade that cannot rename its folder is a nuisance, one that walks
+        # away from the folder and starts empty is data loss.
+        #
+        # Undo any half-copy first. shutil.move falls back to copy-then-delete,
+        # so a failure part way through leaves the same data in both places --
+        # and the copy is a snapshot of a database that was open at the time,
+        # so it may be torn. Left there, the next launch would find a non-empty
+        # new directory, take it as authoritative, and quietly start reading a
+        # damaged copy while the real one carried on being written next door.
+        # This is exactly what a running instance holding the database causes.
+        if legacy.is_dir() and any(legacy.iterdir()) and current.exists():
+            with contextlib.suppress(OSError):
+                shutil.rmtree(current)
+        return False
+
+
+def _resolve_dir(env_name: str, current: str, legacy_attr: str) -> Path:
+    override = _env(env_name)
+    if override:
+        # An explicit path (the test suite, or a portable install) is taken at
+        # face value and never migrated into -- moving a real install's data
+        # into a scratch directory would be the worst possible bug here.
+        return Path(override)
+    target = Path(current)
+    if target.is_dir() and any(target.iterdir()):
+        return target  # already living here; nothing to consider
+    for name in LEGACY_APP_NAMES:
+        old = Path(getattr(PlatformDirs(name, name, roaming=True), legacy_attr))
+        if not old.is_dir() or not any(old.iterdir()):
+            continue
+        if _adopt_legacy_dir(target, old):
+            return target
+        # The move failed and the data is still in the old directory. Keep
+        # using it rather than starting empty beside it, which would look
+        # exactly like every character and every asset having vanished.
+        return old
+    return target
+
+
+DATA_DIR = _resolve_dir("DATA_DIR", _dirs.user_data_dir, "user_data_dir")
+CACHE_DIR = _resolve_dir("CACHE_DIR", _dirs.user_cache_dir, "user_cache_dir")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 

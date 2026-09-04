@@ -12,8 +12,8 @@ import tempfile
 from pathlib import Path
 
 _TMP = tempfile.mkdtemp(prefix="evasset-tests-")
-os.environ.setdefault("EVASSET_DATA_DIR", _TMP)
-os.environ.setdefault("EVASSET_CACHE_DIR", _TMP)
+os.environ.setdefault("EVEBOOTY_DATA_DIR", _TMP)
+os.environ.setdefault("EVEBOOTY_CACHE_DIR", _TMP)
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
