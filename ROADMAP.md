@@ -19,7 +19,11 @@
 | Wallet journal | Append-only, filterable by owner, date and ref type, counterparties named |
 | Transactions | Append-only, buy/sell filter, bought/sold/net over the current filter |
 | CSV export | Whatever the current filter shows |
-| Headless sync | `evasset --sync` for schedulers |
+| Stockpile | Target quantities per item, scoped by owner and location; opt-in held sources; shortfall in units, ISK and m3; doctrine multiplier |
+| Treemap | Value as area, grouped six ways, click through to a filter chip |
+| Structures tab | Corp citadels with fuel, reinforcement timers and moon drills; unanchored ones detected and hidden |
+| In-app updates | Help -> Check for updates; folder swap via a static Rust helper |
+| Headless sync | `evebooty --sync` for schedulers |
 
 ## What jEveAssets has that this doesn't
 
@@ -33,8 +37,10 @@ Roughly in the order I'd add them.
   of a flat table. The data model already carries the parent links.
 - **Item database** — browse and search every published type in the SDE, not just
   what you own. Everything needed is already imported.
-- **Stockpile** — target quantities per item per location, with a shortfall
-  column. The thing most people actually open jEveAssets for.
+- ~~**Stockpile**~~ — done. Target quantities per item, scoped to an owner and a
+  station/system/region, with held / target / shortfall, the shortfall costed in
+  ISK and m3, and a doctrine multiplier. Narrower than jEveAssets' arbitrary
+  filter tree by choice; see the module docstring for why.
 - ~~**Values / summary tab**~~ — done, as the estate strip on the Assets tab
   (net worth, assets, liquid ISK, volume, unpriced count, value map).
 - **Realised profit per item** — the Transactions tab shows cash in against cash

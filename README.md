@@ -5,10 +5,35 @@ your characters, hit sync, and get one searchable table of everything you own
 across every hangar, ship, can and corp division, plus a chart of what each
 character is worth over time.
 
-Python 3.11+, PySide6, SQLite. Runs from source with `uv`, ships as a single
-Windows exe built with Nuitka.
+Python 3.10+, PySide6, SQLite. Runs from source with `uv`, and ships for Windows
+as a portable program folder built with Nuitka.
 
-![Assets tab](docs/screenshot-assets.png)
+## Download
+
+Grab the latest `EVEBooty-<version>-win64.zip` from
+[Releases](https://github.com/littlephish/eve-assets/releases/latest), unzip it
+anywhere you can write to, and run `evebooty.exe`.
+
+It is portable: no installer, nothing written outside the folder you unzipped
+and your own app data directory. To uninstall, delete the folder. Updates are
+handled in-app from Help → Check for updates, so unzip it somewhere you would
+be happy for it to update itself — `Program Files` needs admin rights and is
+the one place this cannot update in place.
+
+Unzip the whole folder and keep it together. `evebooty.exe` needs the DLLs and
+the `evasset\` folder sitting beside it, so running the exe out of the zip, or
+copying just the exe somewhere else, will not work.
+
+**Windows will warn you the first time.** The build is not code-signed — a
+certificate is a few hundred dollars a year, which this does not have — so
+SmartScreen shows "Windows protected your PC". Click **More info → Run anyway**.
+If you would rather not take that on faith, the zip is built entirely by
+[GitHub Actions from a tagged commit](.github/workflows/release.yml), on public
+runners, with no local uploads, so you can read exactly what produced it — or
+run from source instead.
+
+You will also need your own ESI application before you can add a character; see
+[Setup](#setup) below. It takes about a minute.
 
 ## What it does
 
@@ -37,7 +62,16 @@ Windows exe built with Nuitka.
   implants" is a glance rather than a read. Group by item group, system,
   region, owner or category; size by Jita buy or sell; right-click a tile to
   send it to the Assets tab as a filter chip
-- Unanchored structures drop out of the Structures tab. ESI never announces an
+- A Stockpile tab: target quantities per item, scoped to an owner and to a
+  station, system or region, with held / target / shortfall recomputed on every
+  sync and the shortfall costed in ISK and m³. What counts as "held" is opt-in
+  per stockpile — assets always, plus sell orders, contracts and in-progress
+  manufacturing if you want them, because "still mine" and "can undock with it
+  now" are different questions. A doctrine multiplier scales every target at
+  once, and Copy shortfall gives you EVE multibuy text
+- A Structures tab covering the citadels you and your corp can see: fuel
+  expiry, reinforcement timers and moon drills, in UTC because that is what CCP
+  states timers in. Unanchored ones drop out of it: ESI never announces an
   unanchor — the structure just stops being reported — so sync marks what went
   missing rather than deleting it, because assets still recorded there need its
   name to resolve. Their frozen state and fuel clocks are blanked rather than
@@ -236,7 +270,8 @@ would rather you didn't.
    is busy at login time the app says so by name rather than throwing.
 3. Copy the client ID. You do not need the secret; the app uses PKCE by default.
 
-Then:
+Then start the app — `evebooty.exe` from the
+[downloaded zip](#download), or from a source checkout:
 
 ```bash
 uv sync
@@ -259,6 +294,10 @@ uv run python build.py            # dist/evebooty.dist/
 uv run python build.py --onefile  # one file, slower cold start
 ```
 
+A local build stamps itself with whatever `src/evasset/_version.py` says, which
+in a checkout is `0.0.0.dev0` — a source build is not a release and says so.
+Real version numbers only ever come from a tag; see below.
+
 The SDE is not bundled. The app checks CCP's build number on demand and only
 re-downloads when it moves, which beats shipping a 95 MB blob that goes stale on
 the next patch day.
@@ -272,6 +311,25 @@ updater on Windows. Releases are cut by tag:
 git tag v1.0.0
 git push origin v1.0.0
 ```
+
+**The tag is the version.** Before anything is compiled, the release workflow
+runs `scripts/set_version.py` with the tag, which rewrites
+`src/evasset/_version.py`. That one file is what `pyproject.toml` reads for the
+package version, what Help → About shows, what goes in the ESI User-Agent, and
+what the Windows exe resource is stamped with — so there is no constant to bump
+by hand and no way for the app's idea of its version to drift from the tag on
+the commit that built it. After the build, the workflow reads the version back
+out of the finished exe and fails the release if it does not match the tag.
+
+A tag that is not a version (`nightly`, `release-1.2.3`) fails the job rather
+than falling back to `0.0.0`. That fallback was worth removing: `0.0.0` compares
+older than every real release, so every installed copy would have been offered a
+"newer" build forever.
+
+Tags with a suffix — `v1.2.3-rc1` — build and publish exactly like a real
+release but are marked as a GitHub prerelease. The updater asks for
+`/releases/latest`, and that endpoint skips prereleases, so an rc is a full
+dress rehearsal of the pipeline that no existing install will ever be offered.
 
 That builds a Nuitka `--standalone` **program folder**, drops `update.exe` in
 beside the app, zips it as `EVEBooty-<version>-win64.zip` and publishes a
@@ -316,9 +374,13 @@ once first.
 | `src/evasset/networth.py` | Snapshot maths and history |
 | `src/evasset/fitting.py` | Groups a ship's contents into slots/holds, and exports ESI-fitting JSON / EFT |
 | `src/evasset/treemap.py` | Squarified treemap layout for the Treemap tab |
+| `src/evasset/stockpile.py` | Target quantities, what counts as held, shortfall maths |
+| `src/evasset/updater.py` | Release check, download and hand-off to the swap helper |
+| `src/evasset/_version.py` | The version, rewritten from the tag at release time |
 | `src/evasset/ui/` | PySide6 widgets |
 | `scripts/seed_demo.py` | Fills a throwaway database with plausible data, no EVE account needed |
 | `scripts/make_icon.py` | Draws the app icon and packs the multi-size `.ico` |
+| `scripts/set_version.py` | Stamps `_version.py` from the release tag |
 
 The on-disk name is still `evasset` — the data directory, the `EVASSET_*`
 environment variables and the keyring entry holding each character's refresh
