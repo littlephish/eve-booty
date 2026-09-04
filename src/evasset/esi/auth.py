@@ -315,6 +315,41 @@ def refresh(settings: Settings, refresh_token: str) -> TokenSet:
     })
 
 
+def _exchange_error(settings: Settings, response) -> str:
+    """Something a user can act on, out of a token-endpoint failure.
+
+    SSO answers a bad token request with its own styled error *page*, so the
+    old message pasted 300 characters of HTML and script tags into a dialog --
+    the reader learned nothing except that something had gone wrong. The two
+    causes worth naming are both about identity rather than the network.
+    """
+    body = (response.text or "").strip()
+    if body.lstrip().lower().startswith(("<!doctype", "<html")):
+        detail = "SSO returned an error page rather than a token response."
+    else:
+        detail = body[:200]
+
+    if response.status_code in (400, 401):
+        if not settings.client_id.strip():
+            return (
+                "No ESI client ID is configured, so EVE SSO rejected the "
+                "request. Set one in Settings, or clear the field to fall back "
+                f"to the one this app ships with.\n\n{detail}"
+            )
+        # A refresh token is bound to the application that issued it, so the
+        # id changing invalidates every token stored under the old one. That
+        # reads as an auth failure with nothing obviously wrong in Settings,
+        # which is worth saying out loud rather than leaving to be deduced.
+        return (
+            f"EVE SSO rejected the request ({response.status_code}). Either the "
+            "client ID in Settings is not valid for this application, or the "
+            "saved logins were authorised under a different client ID and have "
+            "to be re-added in Characters…\n\n"
+            f"Client ID in use: {settings.client_id}\n{detail}"
+        )
+    return f"Token endpoint returned {response.status_code}: {detail}"
+
+
 def _exchange(settings: Settings, payload: dict) -> TokenSet:
     meta = _metadata_doc(settings)
     headers = {
@@ -331,7 +366,7 @@ def _exchange(settings: Settings, payload: dict) -> TokenSet:
 
     r = httpx.post(meta["token_endpoint"], headers=headers, data=payload, timeout=30)
     if r.status_code >= 400:
-        raise AuthError(f"Token endpoint returned {r.status_code}: {r.text[:300]}")
+        raise AuthError(_exchange_error(settings, r))
     data = r.json()
 
     claims = verify_token(data["access_token"], settings)

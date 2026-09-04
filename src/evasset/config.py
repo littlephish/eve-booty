@@ -24,6 +24,20 @@ USER_AGENT_CONTACT = os.environ.get("EVASSET_CONTACT", "")
 # Kept in step with updater.UPDATE_REPO, which pulls releases from the same
 # repository; a test asserts they do not drift apart.
 PROJECT_REPO = "littlephish/eve-booty"
+
+# The ESI application this app ships with, so a fresh install can add a
+# character without registering anything first. Public on purpose: the login
+# uses PKCE, where the client id is an identifier rather than a credential and
+# the per-login code verifier is what proves the request is genuine. There is
+# no client secret and there must never be one -- anything embedded in a
+# downloadable binary can be read straight back out of it.
+#
+# Users may substitute their own application in Settings at any time, and must
+# be able to: the callback URL registered against this id fixes the loopback
+# port at CALLBACK_PORT for everyone sharing it, so anyone who already has that
+# port bound needs their own. See docs/esi-application.md.
+DEFAULT_CLIENT_ID = "3cfb528fc0b448dc87808d1bcbfe6083"
+
 PROJECT_URL = f"https://github.com/{PROJECT_REPO}"
 
 _dirs = PlatformDirs(APP_NAME, APP_AUTHOR, roaming=True)
@@ -152,7 +166,7 @@ KNOWN_TAKEN_PORTS = {
 
 @dataclass
 class Settings:
-    client_id: str = ""
+    client_id: str = DEFAULT_CLIENT_ID
     client_secret: str = ""  # optional; unset means PKCE (recommended for a desktop app)
     callback_port: int = 8629  # clear of KNOWN_TAKEN_PORTS above
     callback_path: str = "/callback"
@@ -195,6 +209,15 @@ class Settings:
         if SETTINGS_PATH.exists():
             raw = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
             known = {f: raw[f] for f in cls.__dataclass_fields__ if f in raw}
+            # An empty client id means "use the one we ship", not "use no
+            # client id at all". A dataclass default only applies when the key
+            # is absent, and clearing the box in Settings writes "" rather than
+            # dropping the key -- so without this, emptying the field in the UI
+            # sent client_id="" to SSO and came back as a 401 with a page of
+            # HTML in it. Blank is also what every settings.json written before
+            # DEFAULT_CLIENT_ID existed contains.
+            if not str(known.get("client_id", "")).strip():
+                known.pop("client_id", None)
             return cls(**known)
         s = cls()
         s.save()

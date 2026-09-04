@@ -137,3 +137,51 @@ def test_version_string_flags_a_build_whose_exe_resource_disagrees(monkeypatch):
     shown = updater.version_string()
     assert evasset.__version__ in shown
     assert "9.9.9.0" in shown
+
+
+# ------------------------------------------------------- shipped ESI client id
+def test_a_fresh_install_gets_the_shipped_client_id():
+    """No settings file at all: the dataclass default applies."""
+    assert config.Settings().client_id == config.DEFAULT_CLIENT_ID
+    assert config.DEFAULT_CLIENT_ID
+
+
+def test_the_shipped_application_has_no_secret():
+    """PKCE only. A secret in a downloadable binary is extractable, so one must
+    never ship -- this fails the build if somebody pastes one in."""
+    assert config.Settings().client_secret == ""
+
+
+def test_an_empty_saved_client_id_falls_back_to_the_default(tmp_path, monkeypatch):
+    """Clearing the box in Settings writes "" rather than dropping the key, and
+    a dataclass default only applies when the key is absent. Without the
+    coercion in load(), client_id="" went to SSO and came back a 401.
+    """
+    import json
+
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"client_id": "", "callback_port": 8629}), encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_PATH", path)
+
+    assert config.Settings.load().client_id == config.DEFAULT_CLIENT_ID
+
+
+def test_whitespace_is_not_a_client_id(tmp_path, monkeypatch):
+    import json
+
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"client_id": "   "}), encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_PATH", path)
+
+    assert config.Settings.load().client_id == config.DEFAULT_CLIENT_ID
+
+
+def test_a_users_own_client_id_still_wins(tmp_path, monkeypatch):
+    """The whole point of the default is that it is replaceable."""
+    import json
+
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"client_id": "my-own-application"}), encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_PATH", path)
+
+    assert config.Settings.load().client_id == "my-own-application"
