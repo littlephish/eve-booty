@@ -206,6 +206,19 @@ If you touch schema:
 - Test against a **copy** of a populated database, not just a fresh one. A
   migration that works on an empty schema and drops rows on a real one is the
   failure mode here.
+- **Do not use `ALTER TABLE ... DROP COLUMN`**, in migrations or in tests. Use
+  `db._rebuild`. SQLite keeps the `CREATE TABLE` text in `sqlite_master`
+  verbatim, comments included, and DROP COLUMN edits that stored text -- so a
+  table whose last column carries a `--` comment above it (`structures` does)
+  ends up with the closing paren stranded after the comment, and older SQLite
+  cannot re-parse it:
+
+  ```
+  OperationalError: error in table structures after drop column: incomplete input
+  ```
+
+  Newer SQLite copes, so this passes locally and fails on CI, which runs an
+  older one. Rebuilding is version-independent.
 - Preserve data. `DROP TABLE` is only acceptable after the rows are copied.
 
 ### Other things that are not yours to discard

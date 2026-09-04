@@ -200,13 +200,53 @@ def test_the_structures_query_exposes_gone_at(conn):
 
 
 # ----------------------------------------------------------------- migration
+def _drop_column(conn: sqlite3.Connection, table: str, column: str) -> None:
+    """Remove a column by rebuilding the table, the way db._rebuild does.
+
+    Not `ALTER TABLE ... DROP COLUMN`. SQLite keeps the CREATE TABLE statement
+    in sqlite_master verbatim, comments included, and DROP COLUMN edits that
+    stored text. `structures` documents its last column with a `--` block just
+    above it, so removing `gone_at` leaves the closing paren stranded after a
+    run of comment lines, and older SQLite cannot re-parse the result:
+
+        OperationalError: error in table structures after drop column:
+        incomplete input
+
+    Newer SQLite copes, which is why this passed locally and failed on CI.
+    Rebuilding is version-independent, and is what the migration code itself
+    does for exactly this reason -- see db._rebuild's docstring.
+    """
+    info = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    keep = [r for r in info if r["name"] != column]
+    defs = ", ".join(
+        " ".join(
+            filter(
+                None,
+                (
+                    r["name"],
+                    r["type"],
+                    "NOT NULL" if r["notnull"] else "",
+                    f"DEFAULT {r['dflt_value']}" if r["dflt_value"] is not None else "",
+                    "PRIMARY KEY" if r["pk"] else "",
+                ),
+            )
+        )
+        for r in keep
+    )
+    names = ", ".join(r["name"] for r in keep)
+    conn.execute(f"ALTER TABLE {table} RENAME TO {table}__old")
+    conn.execute(f"CREATE TABLE {table} ({defs})")
+    conn.execute(f"INSERT INTO {table} ({names}) SELECT {names} FROM {table}__old")
+    conn.execute(f"DROP TABLE {table}__old")
+
+
 def test_an_older_database_gains_gone_at(tmp_path):
     """v3 databases have the column added in place rather than rebuilt: it is
     nullable with no default, so existing rows become NULL, which is the right
     answer ("still here as far as we know") until the next sync."""
     path = tmp_path / "old.sqlite"
     conn = db.init(path)
-    conn.execute("ALTER TABLE structures DROP COLUMN gone_at")
+    _drop_column(conn, "structures", "gone_at")
     assert "gone_at" not in db.columns(conn, "structures")
 
     done = db.migrate(conn)
