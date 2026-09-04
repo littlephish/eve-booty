@@ -103,9 +103,26 @@ tokens.json        SSO refresh tokens, when no OS credential store exists
 
 Additional rules:
 
-- **Never hardcode a `client_id` or `client_secret`.** Every user registers
-  their own ESI application. There is no shared credential and CCP would
-  rather there were not one.
+- **The `client_id` is public; the `client_secret` is not.** The app ships a
+  pre-configured `client_id` and uses PKCE, which is the SSO method CCP
+  prefers for desktop apps. That is deliberate and safe: under PKCE
+  ([RFC 7636](https://www.rfc-editor.org/rfc/rfc7636)) the client id is a
+  public identifier, not a credential — the per-login code verifier is what
+  proves the request is genuine, so knowing the id gets an attacker nothing.
+  Users may replace it with their own application at any time in Settings, and
+  nothing should ever require them to.
+
+- **Never ship, hardcode or commit a `client_secret`.** Anything embedded in a
+  distributed binary is extractable, and a leaked secret would let anyone
+  impersonate the application. `client_secret` stays empty by default and PKCE
+  stays the default flow. If a change would make a secret *required* rather
+  than optional, it is the wrong change.
+
+- **Treat the shared `client_id` as a shared resource.** All users of the
+  default id appear to CCP as one application, so abusive traffic from this
+  tool degrades every user at once. That is a reason to keep the error-limit
+  handling honest (§6), and the reason swapping in a personal application must
+  always remain possible.
 - **Never log, print or write a token.** Refresh tokens live in the OS
   credential store (`esi/auth.py`). The `tokens.json` fallback is `0600` and
   the app warns when it is used — treat that file as a password.
