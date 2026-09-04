@@ -53,6 +53,10 @@ def main() -> int:
     parser.add_argument("--onefile", action="store_true", help="produce a single exe")
     parser.add_argument("--console", action="store_true", help="keep the console window")
     parser.add_argument("--output", default="dist", help="output directory")
+    parser.add_argument(
+        "--show-bloat", action="store_true",
+        help="report what anti-bloat stripped, to check nothing needed was",
+    )
     args = parser.parse_args()
 
     app_version = version()
@@ -69,7 +73,14 @@ def main() -> int:
         # keyring finds its OS backend by entry point, which Nuitka cannot see
         "--include-package=keyring.backends",
         "--include-package=jaraco",
-        "--nofollow-import-to=pytest",
+        # Nuitka's anti-bloat plugin is auto-enabled, but its default mode is
+        # "warning": it spots a library dragging in setuptools, pytest,
+        # unittest, pydoc, IPython, dask or numba and then compiles it in
+        # anyway. nofollow is what actually drops them. None are reachable
+        # from this app -- the ones that appear at all arrive as incidental
+        # imports inside dependencies.
+        "--noinclude-default-mode=nofollow",
+        # Not covered by anti-bloat, and PySide6 has no use for it.
         "--nofollow-import-to=tkinter",
         f"--output-dir={args.output}",
         "--output-filename=evebooty",
@@ -79,6 +90,8 @@ def main() -> int:
         f"--file-version={file_version}",
         "--file-description=EVE Booty - EVE Online asset manager",
     ]
+    if args.show_bloat:
+        cmd.append("--show-anti-bloat-changes")
     if args.onefile:
         cmd.append("--onefile")
     if sys.platform == "win32" and not args.console:

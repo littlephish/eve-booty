@@ -99,7 +99,7 @@ jobs:
             --include-package-data=evasset `
             --include-package=keyring.backends `
             --include-package=jaraco `
-            --nofollow-import-to=pytest `
+            --noinclude-default-mode=nofollow `
             --nofollow-import-to=tkinter `
             --windows-console-mode=disable `
             --windows-icon-from-ico=src/evasset/assets/booty.ico `
@@ -156,6 +156,37 @@ jobs:
           foreach ($f in @("evebooty.exe", "update.exe", "evasset\assets\booty.ico")) {
             if (-not (Test-Path "dist\EVEBooty\$f")) { throw "staged folder is missing $f" }
           }
+
+      # Run the thing we are about to publish. The test job above proves the
+      # source works; it says nothing about whether the *compiled* build does,
+      # and those are different questions -- Nuitka compiles the entry point as
+      # a top-level __main__ with no parent package, so a relative import in it
+      # fails only here. That shipped once: the exe died instantly on every
+      # launch, and because the console is disabled a user saw a double-click
+      # do nothing at all. Nothing in a source test suite can catch it.
+      #
+      # --sync against a scratch data directory exercises the real startup path
+      # -- config, the database, migrations, the ESI client -- - without a
+      # network or an account, and stops at "No enabled characters".
+      - name: Smoke test the built exe
+        shell: pwsh
+        run: |
+          $scratch = Join-Path $env:RUNNER_TEMP "smoke"
+          New-Item -ItemType Directory -Force $scratch | Out-Null
+          $env:EVEBOOTY_DATA_DIR = $scratch
+          $env:EVEBOOTY_CACHE_DIR = $scratch
+          $out = & "dist\EVEBooty\evebooty.exe" --sync 2>&1 | Out-String
+          Write-Host $out
+          if ($out -match "Traceback|ImportError|ModuleNotFoundError") {
+            throw "the built exe raised on startup:`n$out"
+          }
+          if ($out -notmatch "No enabled characters") {
+            throw "the built exe did not reach its startup path:`n$out"
+          }
+          if (-not (Test-Path (Join-Path $scratch "evasset.sqlite"))) {
+            throw "the built exe did not create its database"
+          }
+          Write-Host "OK: the built exe starts, migrates and opens its database"
 
       # The updater looks for an asset matching *win*.zip, so keep "win" in the
       # name (src/evasset/updater.py:pick_asset).

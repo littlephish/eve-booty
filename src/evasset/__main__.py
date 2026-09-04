@@ -1,4 +1,17 @@
-"""Entry point. `uv run evebooty` in dev, or the Nuitka-built exe."""
+"""Entry point. `uv run evebooty` in dev, or the Nuitka-built exe.
+
+Imports here are absolute (`from evasset.config import ...`) where the rest of
+the package uses relative ones, and that is not a style slip. Nuitka compiles
+this file as the program's top-level `__main__` module, which has no parent
+package -- so every `from .config import ...` raised
+
+    ImportError: attempted relative import with no known parent package
+
+the instant the built exe started. With the console disabled, as it is for
+release builds, that surfaced to a user as double-clicking the icon and
+nothing happening at all. Absolute imports resolve identically under
+`python -m evasset`, the console script and the compiled build.
+"""
 
 from __future__ import annotations
 
@@ -23,9 +36,9 @@ def main() -> int:
     from PySide6.QtCore import QThreadPool
     from PySide6.QtWidgets import QApplication, QMessageBox
 
-    from .config import Settings
-    from .ui import MainWindow
-    from .ui.workers import StartupInitJob
+    from evasset.config import Settings
+    from evasset.ui import MainWindow
+    from evasset.ui.workers import StartupInitJob
 
     app = QApplication(sys.argv)
     app.setApplicationName("EVE Booty")
@@ -40,7 +53,7 @@ def main() -> int:
     # this app draws in -- as pure black, and AlternateBase as pure white.
     # See ui/palette.normalised for the measurements; applied here, once,
     # before any widget reads a colour.
-    from .ui.palette import normalised
+    from evasset.ui.palette import normalised
 
     app.setPalette(normalised(app.palette()))
 
@@ -115,10 +128,10 @@ def _build_splash():
 
 def _headless(args) -> int:
     """Enough of the app to drive it from a scheduled task."""
-    from . import db, networth, pricing, sde
-    from .config import Settings
-    from .esi import ESIClient, TokenCache
-    from .esi.sync import Syncer
+    from evasset import db, networth, pricing, sde
+    from evasset.config import Settings
+    from evasset.esi import ESIClient, TokenCache
+    from evasset.esi.sync import Syncer
 
     settings = Settings.load()
     conn = db.init()
