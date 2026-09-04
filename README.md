@@ -262,7 +262,8 @@ would rather you didn't.
 
 1. Go to https://developers.eveonline.com/applications, create an application,
    pick Authentication & API Access, and select the scopes listed in
-   `src/evasset/config.py` (`SCOPES`).
+   [docs/esi-application.md](docs/esi-application.md), which also records what
+   the shared application is registered with and which two scopes CCP rejects.
 2. Set the callback URL to `http://localhost:8629/callback`. If 8629 is taken on
    your machine, change the port in Settings and update it on CCP's side to match.
    8629 was picked to stay clear of other EVE tools that bind a loopback
