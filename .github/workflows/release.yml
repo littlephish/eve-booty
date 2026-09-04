@@ -67,12 +67,37 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e . nuitka
 
+      # Keyed on the ref, not on a content hash. It used to be
+      # hashFiles('pyproject.toml'), so touching a dependency -- or the version
+      # line -- threw away a cache that was still almost entirely valid and
+      # made the next build compile everything from cold.
+      #
+      # The key has to be unique per run because GitHub caches are immutable:
+      # if `key` matches an existing entry exactly, the restore is a hit and
+      # nothing is written back at the end, so the cache would freeze at
+      # whatever it held the first time. run_id makes every run save a fresh
+      # entry, and reuse comes from restore-keys prefix-matching the newest
+      # one that fits.
+      #
+      # The fallback chain, in order:
+      #   1. the same ref's previous run -- a branch keeps warming its own
+      #   2. main -- so a new branch starts warm instead of from nothing
+      #   3. any Windows Nuitka cache -- this is what tag builds actually hit,
+      #      since ref_name for a tag is "v0.1.4" and never repeats, and it is
+      #      what lets consecutive releases reuse each other's work
+      #
+      # A run can only read caches from its own ref or the default branch, so
+      # the main entry is what sibling branches share; they cannot see each
+      # other's directly.
       - name: Cache Nuitka compilation cache
         uses: actions/cache@v4
         with:
           path: ~\AppData\Local\Nuitka\Nuitka\Cache
-          key: nuitka-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
-          restore-keys: nuitka-${{ runner.os }}-
+          key: nuitka-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            nuitka-${{ runner.os }}-${{ github.ref_name }}-
+            nuitka-${{ runner.os }}-main-
+            nuitka-${{ runner.os }}-
 
       # The icon is generated rather than committed as the source of truth, so
       # a release always carries the current art (and this fails loudly if the
