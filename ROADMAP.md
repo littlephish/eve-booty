@@ -49,6 +49,40 @@ recorded next to the item so nobody rediscovers it.
       *what is in it*. If the bare number is not useful enough, drop the item
       rather than build it badly.
 
+- [ ] **MCP server**
+
+      Expose the local database to an LLM over the Model Context Protocol, so
+      questions like "what am I holding in Amarr that is worth more than 100m"
+      or "which citadel runs out of fuel first" can be asked in words.
+
+      The groundwork is already there. The database is opened
+      `journal_mode=WAL`, so a second process can read it while the app has it
+      open, and every query module (`queries`, `omni`, `stockpile`,
+      `networth`, `treemap`, `fitting`) is Qt-free and importable headless.
+      Best of all `omni.parse()` already turns a text query into SQL: the
+      omnibox grammar was built for a human typing filters, which is exactly
+      the shape a model emits. A tool that takes an omnibox string is most of
+      the feature.
+
+      This is the one item on this list that deliberately sends account data
+      to a third party, so it needs deciding before it is built, not after:
+
+      - **Read-only.** No tool writes to the database, changes settings, or
+        starts a sync. A model should not be able to alter an estate it is
+        describing.
+      - **Never expose credentials.** Refresh tokens live in the OS credential
+        store and must stay there. `settings.json` holds the client id and is
+        not a data source. No tool returns either.
+      - **stdio, not HTTP.** A local stdio server is a child process talking
+        to one client. An HTTP or SSE transport is a network listener serving
+        somebody's entire asset list and wallet history, and the moment it
+        binds a port that is a decision about other people on the network too.
+      - **Off by default,** and started explicitly. Someone who installed an
+        asset tracker did not thereby agree to hand their wallet journal to a
+        model.
+      - **Optional dependency, separate entry point.** The MCP SDK must not
+        land in the GUI build; the Nuitka artifact is already 138 MB.
+
 ## Later
 
 - [ ] **Tree view** - assets as an expandable location → container → item tree instead
