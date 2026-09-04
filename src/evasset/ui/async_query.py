@@ -63,9 +63,28 @@ class _QueryJob(QRunnable):
             conn = db.connect()
             result = self.fn(conn)
         except Exception as exc:  # noqa: BLE001 - surfaced to the caller
-            self.signals.failed.emit(self.generation, str(exc))
+            self._emit(self.signals.failed, self.generation, str(exc))
         else:
-            self.signals.done.emit(self.generation, result)
+            self._emit(self.signals.done, self.generation, result)
+
+    @staticmethod
+    def _emit(signal, *args) -> None:
+        """Deliver a result unless the window went away while we were querying.
+
+        Closing a view with a query still running left the job holding signals
+        whose C++ side Qt had already destroyed, and emitting on those raises
+
+            RuntimeError: Signal source has been deleted
+
+        out of a pool thread, where nothing is waiting to catch it. Harmless in
+        that the answer was not wanted any more, but it printed a traceback
+        over a clean shutdown, and a traceback nobody can act on trains people
+        to ignore tracebacks.
+        """
+        try:
+            signal.emit(*args)
+        except RuntimeError:
+            pass
 
 
 class AsyncQuery(QObject):
