@@ -247,19 +247,29 @@ class AssetsView(QWidget):
 
         root = QVBoxLayout(self)
 
-        bar = QHBoxLayout()
+        # The estate strip leads the tab: its headline figures describe the
+        # whole estate and never change with the filter, so they belong above
+        # the controls that narrow the table, not between those and the table.
+        self.strip = EstateStrip()
+        root.addWidget(self.strip)
+
+        # The omnibox has the whole first line to itself: it wraps chips onto
+        # further lines as filters pile up, and a neighbour on that line would
+        # either float mid-field or steal width the chips need.
         self.omnibox = Omnibox()
-        bar.addWidget(self.omnibox, 1)
-        self.export_btn = QPushButton("Export CSV…")
-        bar.addWidget(self.export_btn)
-        root.addLayout(bar)
+        root.addWidget(self.omnibox)
 
         state_row = QHBoxLayout()
         self.state_label = QLabel("")
         self.state_label.setStyleSheet(f"color: {palette.SECONDARY_TEXT};")
         state_row.addWidget(self.state_label)
         self.clear_all_btn = QPushButton("Clear all")
-        self.clear_all_btn.setFlat(True)
+        # A neutral pill rather than a flat button: flat blended into the
+        # window and only looked clickable under the pointer, and this is the
+        # one control that resets the whole filter, so it has to be findable.
+        self.clear_all_btn.setStyleSheet(
+            palette.pill_stylesheet("QPushButton", self.palette())
+        )
         self.clear_all_btn.setCursor(Qt.PointingHandCursor)
         self.clear_all_btn.setVisible(False)
         state_row.addWidget(self.clear_all_btn)
@@ -273,10 +283,12 @@ class AssetsView(QWidget):
         for label, key in queries.ROLLUP_LEVELS:
             self.group_combo.addItem(label, key)
         state_row.addWidget(self.group_combo)
+        # Export lives on the state row, after Group by: it acts on the table
+        # as currently filtered and grouped, so it sits with the controls
+        # that describe that state.
+        self.export_btn = QPushButton("Export CSV…")
+        state_row.addWidget(self.export_btn)
         root.addLayout(state_row)
-
-        self.strip = EstateStrip()
-        root.addWidget(self.strip)
 
         self.model = GroupedAssetsModel(self)
         self.tree = QTreeView()
@@ -508,8 +520,11 @@ class AssetsView(QWidget):
 
     def _update_state_row(self, shown: int) -> None:
         count = self.omnibox.spec().describe()
-        prefix = f"{count} filter{'s' if count != 1 else ''} · " if count else ""
-        self.state_label.setText(f"{prefix}{shown:,} of {self._total_stacks:,} stacks")
+        # Stacks first, filter count last: the count sits immediately left of
+        # the Clear all pill, so "8 filters  [Clear all]" reads as one unit --
+        # the thing being cleared and the control that clears it.
+        suffix = f" · {count} filter{'s' if count != 1 else ''}" if count else ""
+        self.state_label.setText(f"{shown:,} of {self._total_stacks:,} stacks{suffix}")
         self.clear_all_btn.setVisible(count > 0)
 
     def _on_query_failed(self, message: str) -> None:
@@ -610,9 +625,9 @@ class AssetsView(QWidget):
         # on a bare letter or digit is parented on the tree instead, so typing
         # in the omnibox (or the rail's filter box) never triggers it.
         key("/", self._focus_omnibox, self)
-        # Tab-wide as well: the draft-chip builder must open from the table,
-        # the rail, anywhere -- the omnibox's own Ctrl+F only reaches as far
-        # as its child widgets.
+        # Tab-wide as well, and the ONLY Ctrl+F binding: the builder must
+        # open from the table, the rail, anywhere, and a second binding on the
+        # omnibox made the pair ambiguous (see Omnibox.add_btn).
         key("Ctrl+F", self.omnibox.open_draft, self)
         for digit in range(1, 10):
             key(f"Ctrl+{digit}", lambda d=digit: self._save_view(d), self)

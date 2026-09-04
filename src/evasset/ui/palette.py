@@ -111,6 +111,43 @@ def chip_tint(kind: str, negated: bool = False, palette: QPalette | None = None)
     return pair[1] if is_dark(palette) else pair[0]
 
 
+# The neutral pill: a grey one clear step off the theme background, for a
+# secondary button that must read as a button without claiming a hue --
+# every hue is already spoken for by a chip kind, a status level or the
+# builder's green plus. Same regime as the chip washes: the theme's own text
+# stays AA-readable on the fill. Hover and press deepen it toward the text
+# colour, the direction the eye reads as "more solid" in both themes.
+#                light bg    dark bg
+NEUTRAL_PILL = ("#C8CED5", "#454C55")
+_PILL_HOVER, _PILL_PRESSED = 0.10, 0.20
+
+
+def pill_fills(palette: QPalette | None = None) -> tuple[str, str, str]:
+    """Rest, hover and pressed fills for a neutral pill in the theme in force."""
+    dark = is_dark(palette)
+    rest = NEUTRAL_PILL[1] if dark else NEUTRAL_PILL[0]
+    toward = "#FFFFFF" if dark else "#000000"
+    return rest, _blend(rest, toward, _PILL_HOVER), _blend(rest, toward, _PILL_PRESSED)
+
+
+def pill_stylesheet(selector: str, palette: QPalette | None = None) -> str:
+    """Stylesheet for a QPushButton or QToolButton drawn as a neutral pill.
+
+    Solid fills rather than rgba, for the reason _blend gives: a translucent
+    stylesheet background composites against whatever the style paints under
+    the button, and that differs between styles."""
+    rest, hover, pressed = pill_fills(palette)
+    return (
+        f"{selector} {{ background: {rest}; border: none; border-radius: 8px;"
+        " padding: 2px 9px; }"
+        f" {selector}:hover {{ background: {hover}; }}"
+        f" {selector}:pressed {{ background: {pressed}; }}"
+        # Focus ring for keyboard users, in the pressed grey rather than a
+        # stray accent.
+        f" {selector}:focus {{ border: 1px solid {pressed}; padding: 1px 8px; }}"
+    )
+
+
 # The rail's per-row value bar. A filled bar, not a background under text, so
 # the WCAG requirement is the 3:1 floor for graphical objects (WCAG 2.1,
 # 1.4.11 non-text contrast) rather than the 4.5:1 text threshold --

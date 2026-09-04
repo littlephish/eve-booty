@@ -35,8 +35,8 @@ from __future__ import annotations
 import re
 import sqlite3
 
-from PySide6.QtCore import QEvent, QModelIndex, Qt, QTimer, Signal
-from PySide6.QtGui import QKeySequence, QShortcut, QStandardItem, QStandardItemModel
+from PySide6.QtCore import QEvent, QModelIndex, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QImage, QPainter, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QCompleter,
     QFrame,
@@ -51,6 +51,7 @@ from .. import omni, queries
 from . import palette
 from .async_query import AsyncQuery
 from .debounce import Debounce
+from .flow_layout import FlowLayout
 
 # The prefixes users type, mapped to the canonical Chip kinds omni.parse
 # produces -- and back again for rendering, so a chip displays the short form
@@ -155,6 +156,78 @@ class _ChipWidget(QFrame):
         self.close_btn.setToolTip("Remove this filter")
         self.close_btn.setStyleSheet("QToolButton { border: none; padding: 0 2px; }")
         row.addWidget(self.close_btn)
+
+
+class _PlusButton(QToolButton):
+    """The draft-builder entrance: a translucent green tile with the plus cut
+    out of it, so the glyph is the omnibox's own background showing through.
+
+    Painted by hand because no stylesheet can express negative space. The
+    tile is drawn into an alpha image first -- the bars are then *cleared*
+    rather than painted, which is what makes them transparent -- and the
+    image is composited onto the widget. Hover and press deepen the wash;
+    that, not a label, is what says "this does something": a flat "+" read
+    as decoration, and a "+ Filter" label was judged noise once the colour
+    carried the message.
+    """
+
+    _TILE = 22
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        # A 1 px gutter each side gives the rounded tile breathing room
+        # against the chips and the line edit beside it.
+        self.setFixedSize(self._TILE + 2, self._TILE)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("Build a filter (Ctrl+F)")
+        self.setAccessibleName("Build a filter")
+        self.setAttribute(Qt.WA_Hover, True)
+        self.setFocusPolicy(Qt.TabFocus)
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        dpr = self.devicePixelRatioF()
+        image = QImage(
+            round(self.width() * dpr), round(self.height() * dpr), QImage.Format_ARGB32_Premultiplied
+        )
+        image.setDevicePixelRatio(dpr)
+        image.fill(Qt.transparent)
+
+        pair = palette.POSITIVE
+        green = QColor(pair[1] if palette.is_dark(self.palette()) else pair[0])
+        # Translucent by design: the wash tints whatever the field paints
+        # underneath, and the cut-out plus reads as the same surface.
+        green.setAlphaF(0.62 if self.isDown() else 0.5 if self.underMouse() else 0.34)
+
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(green)
+        painter.drawRoundedRect(1, 0, self.width() - 2, self.height(), 6, 6)
+        # Negative space: clearing to transparent is what makes the plus the
+        # background rather than a lighter green.
+        painter.setCompositionMode(QPainter.CompositionMode_Clear)
+        cx, cy = self.width() / 2, self.height() / 2
+        arm, thick = 5.0, 2.0
+        painter.drawRect(QRectF(cx - arm, cy - thick / 2, arm * 2, thick))
+        painter.drawRect(QRectF(cx - thick / 2, cy - arm, thick, arm * 2))
+        painter.end()
+
+        painter = QPainter(self)
+        painter.drawImage(0, 0, image)
+        if self.hasFocus():
+            # Keyboard users still need to see where the focus is.
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setPen(QColor(green.red(), green.green(), green.blue()))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(QRectF(1.5, 0.5, self.width() - 3, self.height() - 1), 6, 6)
 
 
 class _DraftChip(QFrame):
@@ -380,7 +453,9 @@ class Omnibox(QWidget):
             " background: palette(base); }"
         )
 
-        self._row = QHBoxLayout(self)
+        # Not a QHBoxLayout: its minimum width is the sum of its chips', and
+        # chips have no upper bound. flow_layout.py documents the failure.
+        self._row = FlowLayout(self)
         self._row.setContentsMargins(8, 4, 8, 4)
         self._row.setSpacing(6)
 
@@ -388,15 +463,14 @@ class Omnibox(QWidget):
         icon.setStyleSheet(f"color: {palette.SECONDARY_TEXT};")
         self._row.addWidget(icon)
 
-        # Mouse-side entrance to the draft-chip builder; Ctrl+F is the
-        # keyboard one. Chips insert at index 1 + len(chips), so they stack
-        # up between the glyph and this button and the + stays at the row's
-        # working edge.
-        self.add_btn = QToolButton()
-        self.add_btn.setText("+")
-        self.add_btn.setAutoRaise(True)
-        self.add_btn.setCursor(Qt.PointingHandCursor)
-        self.add_btn.setToolTip("Build a filter (Ctrl+F)")
+        # Mouse-side entrance to the draft-chip builder. Ctrl+F is the
+        # keyboard one, bound once by the hosting AssetsView with
+        # WidgetWithChildrenShortcut -- a second binding here made the two
+        # match together whenever focus sat in the line edit, and Qt answers
+        # an ambiguous match by firing neither. Chips insert at index
+        # 1 + len(chips), so they stack between the glyph and this button and
+        # the + stays at the row's working edge.
+        self.add_btn = _PlusButton()
         self.add_btn.clicked.connect(self.open_draft)
         self._row.addWidget(self.add_btn)
 
@@ -404,11 +478,15 @@ class Omnibox(QWidget):
         self.edit.setFrame(False)
         self.edit.setStyleSheet("background: transparent;")
         self.edit.setPlaceholderText("Search, or filter with loc: owner: cat: is: val: …")
-        self._row.addWidget(self.edit, 1)
+        self._row.addWidget(self.edit)
 
         self.hint = QLabel("/ to search")
         self.hint.setStyleSheet(f"color: {palette.SECONDARY_TEXT};")
         self._row.addWidget(self.hint)
+        # The edit takes whatever is left of the line the chips end on, with
+        # the hint riding after it; too little room and both drop to a fresh
+        # line rather than leaving a slot too narrow to type in.
+        self._row.set_fill(self.edit, trailer=self.hint)
 
         self._chips: list[tuple[omni.Chip, _ChipWidget]] = []
 
@@ -437,14 +515,6 @@ class Omnibox(QWidget):
         self._sync_hint()
 
         self._draft: _DraftChip | None = None
-        # WidgetWithChildrenShortcut so the builder opens whether the focus
-        # sits in the line edit, on a chip's cross, or in the draft itself.
-        QShortcut(
-            QKeySequence("Ctrl+F"),
-            self,
-            context=Qt.WidgetWithChildrenShortcut,
-            activated=self.open_draft,
-        )
 
     # ------------------------------------------------------------------- API
     def add_chip(self, kind: str, value: str, negated: bool = False) -> None:
