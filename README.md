@@ -5,6 +5,8 @@ your characters, hit sync, and get one searchable table of everything you own
 across every hangar, ship, can and corp division, plus a chart of what each
 character is worth over time.
 
+![Filtering the Assets tab down to one ship and opening its fit](docs/omnibox-to-fit.gif)
+
 Python 3.10+, PySide6, SQLite. Runs from source with `uv`, and ships for Windows
 as a portable program folder built with Nuitka.
 
