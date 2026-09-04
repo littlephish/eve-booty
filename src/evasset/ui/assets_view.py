@@ -1,5 +1,7 @@
 """Asset browser: an omnibox-filtered, groupable table across every character
-and corp, with a rollup rail, a whole-estate strip and a row inspector.
+and corp, with a rollup rail, a whole-estate strip and a row inspector that
+shows in a panel beside the table (click, Enter) or pinned in its own window
+(right-click -> Inspect in window).
 
 Every control that narrows the table speaks one verb -- add an omnibox chip.
 Rail rows, value-map segments, context-menu items and the f/x keys all end up
@@ -13,15 +15,20 @@ from __future__ import annotations
 import csv
 import json
 import sqlite3
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from PySide6.QtCore import (
     QItemSelectionModel,
     QModelIndex,
     QObject,
+    QPoint,
     QSortFilterProxyModel,
     Qt,
     QThreadPool,
+    QTimer,
     QUrl,
+    Signal,
 )
 from PySide6.QtGui import (
     QDesktopServices,
@@ -51,13 +58,24 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import db, omni, pricing, queries
+from .. import abyssal, db, omni, pricing, queries
 from ..config import Settings
+from ..esi import ESIClient, TokenCache
 from . import chest_reveal, palette
+from .abyssal_card import CARD_KINDS, AbyssalCard
 from .async_query import AsyncQuery
+from .debounce import Debounce
 from .fit_dialog import FitDialog
-from .grouped_model import GROUP_LABEL_ROLE, PRICE_BADGE_ROLE, GroupedAssetsModel
-from .inspector import Inspector
+from .grouped_model import (
+    GROUP_LABEL_ROLE,
+    PRICE_BADGE_ROLE,
+    ROLL_MEAN_KEY,
+    GroupedAssetsModel,
+    _row_get,
+    is_roll_key,
+    roll_key,
+)
+from .inspector import Inspector, InspectorWindow
 from .models import fmt_isk, fmt_short_isk
 from .omnibox import Omnibox
 from .rail import Rail
@@ -102,6 +120,9 @@ _GROUP_ROW_KEY = {
     "group": "grp",
 }
 
+# The two value columns the badge delegate paints.
+_BADGE_KEYS = {"buy_value", "sell_value"}
+
 _KEY_MAP = [
     ("/", "Focus the omnibox"),
     ("Ctrl+F", "Build a filter chip (pick a type, then a value)"),
@@ -110,9 +131,9 @@ _KEY_MAP = [
     ("f", "Filter to the focused cell"),
     ("x", "Exclude the focused cell"),
     ("w", "Where else is this item?"),
-    ("Enter", "Open the inspector"),
+    ("Enter", "Open the inspector panel"),
     ("g", "Cycle group-by"),
-    ("Esc", "Close the inspector, else remove the last filter"),
+    ("Esc", "Close the inspector panel, else remove the last filter"),
     ("1-9", "Recall saved view"),
     ("Ctrl+1-9", "Save current view"),
     ("?", "This list"),
@@ -180,39 +201,55 @@ class _TreeSortController(QObject):
     finishes and one that reads as a hung app. The wait cursor stays because
     the sort is still synchronous (Qt models cannot be touched from a worker
     thread), not because it is slow.
+
+    The sort is remembered by column KEY, not index. The roll columns come
+    and go with the abyssal filter, shifting every column after Qty, so an
+    index remembered across that change would quietly sort by whatever now
+    sits at the old position; the key is re-resolved through model.key_at on
+    every reapply, and a key whose column has vanished clears the sort.
     """
 
     def __init__(self, tree: QTreeView, model: GroupedAssetsModel, parent=None):
         super().__init__(parent)
         self.tree = tree
         self.model = model
+        self.key: str | None = None
+        # Where the key's column currently is, -1 when unsorted; derived in
+        # reapply and kept for the header indicator and for callers that
+        # only need to know whether a sort is active.
         self.column = -1
         self.order = Qt.AscendingOrder
-        self._keys = [key for key, _header in queries.ASSET_COLUMNS]
         header = tree.header()
         header.setSectionsClickable(True)
         header.setSortIndicatorShown(True)
         header.sectionClicked.connect(self._on_header_clicked)
 
     def _on_header_clicked(self, column: int) -> None:
-        if column == self.column:
+        key = self.model.key_at(column)
+        if key is None:
+            return
+        if key == self.key:
             self.order = (
                 Qt.DescendingOrder if self.order == Qt.AscendingOrder else Qt.AscendingOrder
             )
         else:
-            self.column = column
+            self.key = key
             self.order = Qt.AscendingOrder
         self.reapply()
 
     def reapply(self) -> None:
         """Apply the remembered sort; also called after every set_rows so a
         chosen order survives reloads the way the old proxy's did."""
+        keys = [key for key, _header in self.model.columns()]
+        self.column = keys.index(self.key) if self.key in keys else -1
+        if self.column < 0:
+            self.key = None
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            if self.column < 0:
+            if self.key is None:
                 self.model.reset_sort()
             else:
-                self.model.sort_by(self._keys[self.column], self.order)
+                self.model.sort_by(self.key, self.order)
         finally:
             QApplication.restoreOverrideCursor()
         self.tree.header().setSortIndicator(self.column, self.order)
@@ -220,9 +257,26 @@ class _TreeSortController(QObject):
     def reset(self) -> None:
         """Back to insertion order, arrow cleared. Wired to View -> Reset
         sort in MainWindow."""
-        self.column = -1
+        self.key = None
         self.order = Qt.AscendingOrder
         self.reapply()
+
+
+def _single_abyssal_type(spec: omni.FilterSpec) -> str | None:
+    """The one module type the positive abyssal chips name, or None when
+    they name none (every type), several, or there is no abyssal chip. This
+    is the gate for the roll columns: each type rolls its own attribute set,
+    so only a single-type table has columns that mean the same thing in
+    every row."""
+    names: list[str] = []
+    for chip in spec.chips:
+        if chip.kind != omni.ABYSSAL_KIND or chip.negated:
+            continue
+        types = omni.split_types(chip.value)
+        if not types:
+            return None
+        names.extend(t for t in types if t not in names)
+    return names[0] if len(names) == 1 else None
 
 
 class _PriceRefreshJob(Job):
@@ -244,7 +298,61 @@ class _PriceRefreshJob(Job):
         return {"priced": len(quotes)}
 
 
+class _AbyssalFetchJob(Job):
+    """Fetch one abyssal item's rolled attributes from ESI, off the GUI thread.
+
+    The Update menu's AbyssalStatsJob walks every unfetched item; the
+    inspector's button is "this one, now", so it asks for a single item.
+    retry_missing is on because the button reads Retry once ESI has 404'd
+    the item -- the user is asking again on purpose. No token is needed
+    (the dynamic-item route is public), but the client wants a cache to
+    exist, so an empty one is built rather than a second client type.
+    """
+
+    def __init__(self, item_id: int):
+        super().__init__()
+        self.item_id = item_id
+
+    def run_job(self):
+        settings = Settings.load()
+        conn = db.init()
+        client = ESIClient(settings, TokenCache(settings))
+        try:
+            return abyssal.fetch_rolls(
+                conn, client, item_ids=[self.item_id], retry_missing=True
+            )
+        finally:
+            client.close()
+
+
+@dataclass(eq=False)
+class _InspectorHost:
+    """One place an Inspector lives -- the panel or the window -- with the
+    state the view keeps per place.
+
+    The two hosts show different rows at the same time (the window pins an
+    item while the panel follows the clicks), so the row on show and the
+    rolls lookup are per host. One shared rolls AsyncQuery would let the
+    window's lookup bump the generation and silently drop the panel's, and a
+    single shared "inspected row" guard would let the window's rolls paint
+    into the panel. eq=False keeps identity semantics: hosts are compared by
+    which one they are, never by what they currently show.
+    """
+
+    inspector: Inspector
+    rolls_query: AsyncQuery
+    render: Callable[[sqlite3.Row], None]
+    show: Callable[[], None]
+    hide: Callable[[], None]
+    is_open: Callable[[], bool]
+    row: sqlite3.Row | None = None
+
+
 class AssetsView(QWidget):
+    # item_ids whose abyssal rolls the card's Fetch button asked for; the
+    # main window owns the job registry, so it submits the AbyssalStatsJob.
+    abyssal_fetch_requested = Signal(list)
+
     def __init__(
         self,
         parent: QWidget | None = None,
@@ -325,19 +433,32 @@ class AssetsView(QWidget):
         self.tree.header().setStretchLastSection(True)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_context_menu)
-        badge_delegate = _ValueBadgeDelegate(self.tree)
-        for column, (key, _header) in enumerate(queries.ASSET_COLUMNS):
-            if key in ("buy_value", "sell_value"):
-                self.tree.setItemDelegateForColumn(column, badge_delegate)
+        # Mouse routes into the panel. Enter was the only way in, which left
+        # it undiscoverable for anyone not reading the footer hint; a single
+        # click follows the row the user is looking at, the double-click
+        # stays for anyone who learned it that way.
+        self.tree.clicked.connect(self._open_panel_at)
+        self.tree.doubleClicked.connect(self._open_panel_at)
+        self._badge_delegate = _ValueBadgeDelegate(self.tree)
+        # An explicit default for every other column, so a value column that
+        # shifts right when the roll columns appear leaves a plain delegate
+        # at its old index rather than the badge painter.
+        self._plain_delegate = QStyledItemDelegate(self.tree)
+        self._apply_delegates()
 
-        # The rail and the inspector share the splitter slot: only one of
-        # them is useful at a time, and the stack means the inspector
-        # inherits the rail's width and resize behaviour for free.
+        # The rail and the panel inspector share the splitter slot: for a
+        # quick look at the clicked row only one of them is useful at a
+        # time, and the stack means the panel inherits the rail's width and
+        # resize behaviour for free. The window is the inspector's other
+        # host (see _InspectorHost): one for the tab's lifetime, hidden
+        # rather than destroyed between rows so it keeps the size and place
+        # the user gave it, and parented here so it dies with the tab.
         self.rail = Rail()
         self.inspector = Inspector()
         self.side = QStackedWidget()
         self.side.addWidget(self.rail)
         self.side.addWidget(self.inspector)
+        self.inspector_window = InspectorWindow(self)
 
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.addWidget(self.tree)
@@ -362,14 +483,25 @@ class AssetsView(QWidget):
         foot.addWidget(self.key_hints)
         root.addLayout(foot)
 
-        self._inspected_row: sqlite3.Row | None = None
         self._total_stacks = 0
         self._sized_once = False
         self._last_group_key: str | None = None
+        # The roll columns and cells of the current single-type filter, kept
+        # on the view so a regroup (which re-buckets the same rows without a
+        # reload) hands the model the same extras again.
+        self._extra_columns: list[tuple[str, str]] = []
+        self._cells: dict = {}
+        self._cell_attrs: list[dict] = []
+        # The complex-search card, built on first use and reused: one popup
+        # per view, re-seeded on every open. _card_types maps the type names
+        # it shows to type ids for the Fetch button's item lookup.
+        self._card: AbyssalCard | None = None
+        self._card_types: dict[str, int] = {}
         # Strong references per the QRunnable lifetime rules in
         # async_query.py: a price job must outlive its starting call.
         self._price_jobs: set[_PriceRefreshJob] = set()
         self._appraise_jobs: set = set()
+        self._abyssal_jobs: set[_AbyssalFetchJob] = set()
 
         # Distinct AsyncQuery instances per query stream, same reason the old
         # view held three: reload() starts the row fetch and the rail fetch
@@ -378,9 +510,46 @@ class AssetsView(QWidget):
         self._query = AsyncQuery(self)
         self._rail_query = AsyncQuery(self)
         self._strip_query = AsyncQuery(self)
+        # The inspectors' rolls lookups get their own streams too, one per
+        # host: each starts from show_row while a row reload may be in
+        # flight, must be cancellable on its own when that host closes, and
+        # must not drop the other host's lookup by bumping its generation.
+        self._rolls_query = AsyncQuery(self)
+        self._window_rolls_query = AsyncQuery(self)
+        # The card's own stream: type counts, attributes and bounds arrive
+        # while a row reload may be in flight, and a re-tick in the card
+        # must supersede the previous type's attribute fetch, not the table.
+        self._card_query = AsyncQuery(self)
+        # The card's live match count on a stream of its own: it is asked
+        # after every handle move, and on the attribute stream a count
+        # started during a type switch would supersede the attribute fetch
+        # and leave the rows on the previous type's bounds. Debounced below
+        # the omnibox's 220 ms because a drag emits per pixel and the footer
+        # should settle within the same pause a keystroke does.
+        self._card_count_query = AsyncQuery(self)
+        self._card_count = Debounce(self, self._fetch_card_count, interval=120)
+        self._panel_host = _InspectorHost(
+            self.inspector,
+            self._rolls_query,
+            render=self.inspector.show_row,
+            show=lambda: self.side.setCurrentWidget(self.inspector),
+            hide=lambda: self.side.setCurrentWidget(self.rail),
+            is_open=lambda: self.side.currentWidget() is self.inspector,
+        )
+        self._window_host = _InspectorHost(
+            self.inspector_window.inspector,
+            self._window_rolls_query,
+            render=self.inspector_window.show_row,
+            show=self._raise_window,
+            hide=self.inspector_window.hide,
+            is_open=self.inspector_window.isVisible,
+        )
 
         self.omnibox.changed.connect(self.reload)
-        self.omnibox.escape_pressed.connect(self._close_inspector)
+        self.omnibox.card_requested.connect(self._open_card)
+        # The omnibox rung of the escape ladder sheds the panel; the window
+        # is closed on its own terms (its Esc, its title bar, its × button).
+        self.omnibox.escape_pressed.connect(lambda: self._close_inspector(self._panel_host))
         self.clear_all_btn.clicked.connect(self.omnibox.clear)
         self.group_combo.currentIndexChanged.connect(self._on_group_changed)
         self.export_btn.clicked.connect(self.export_csv)
@@ -398,10 +567,14 @@ class AssetsView(QWidget):
             lambda label: self.omnibox.add_chip("location", label)
         )
 
-        self.inspector.close_clicked.connect(self._close_inspector)
-        self.inspector.where_else_clicked.connect(self._where_else_inspected)
-        self.inspector.refresh_price_clicked.connect(self._refresh_inspected_price)
-        self.inspector.pin_price_clicked.connect(self._pin_inspected_price)
+        for host in (self._panel_host, self._window_host):
+            self._wire_inspector(host)
+        # Every way out of the window runs the same cleanup: the × button
+        # (wired above), Esc inside it and the title bar's close all end in
+        # _close_inspector, the last two by way of QDialog.reject -> finished.
+        self.inspector_window.finished.connect(
+            lambda _code: self._close_inspector(self._window_host)
+        )
 
         self._build_shortcuts()
 
@@ -436,57 +609,120 @@ class AssetsView(QWidget):
     def reload(self) -> None:
         spec = self.omnibox.spec()
         where, params = spec.where()
+        single_type = _single_abyssal_type(spec)
 
         def fetch(conn: sqlite3.Connection):
             rows = queries.fetch_assets(conn, where, params)
             total = conn.execute("SELECT COUNT(*) AS c FROM assets").fetchone()["c"]
-            return rows, total
+            # The badge tooltips and the roll cells for every abyssal row on
+            # the table, from one batched query alongside the rows they
+            # describe -- so a fetch that just completed shows up on the
+            # very reload it triggers, and hovering never queries. Column
+            # probed once: a row source without it (older SELECT shapes)
+            # simply has no abyssal rows.
+            summaries: dict[int, str] = {}
+            cells: dict = {}
+            if rows and "is_dynamic_type" in rows[0].keys():
+                abyssal_ids = [r["item_id"] for r in rows if r["is_dynamic_type"]]
+                if abyssal_ids:
+                    summaries, cells = queries.abyssal_roll_data(conn, abyssal_ids)
+            # With the filter down to one module type the table grows a
+            # column per rolled attribute the estate has values for, plus the
+            # mean-quality Roll column. A type with nothing fetched yet grows
+            # none at all -- not even Roll, which would be a column of blanks
+            # -- until a fetch gives it something to show. The cells are
+            # fetched regardless (they are the same rows the summaries come
+            # from) and simply go unread without the columns.
+            attrs: list[dict] = []
+            extra: list[tuple[str, str]] = []
+            if single_type is not None:
+                attrs, _bounds = queries.abyssal_type_columns(conn, single_type)
+                if attrs:
+                    extra = [
+                        (roll_key(a["attribute_id"]), abyssal.short_label(a["name"], a["label"]))
+                        for a in attrs
+                    ]
+                    extra.append((ROLL_MEAN_KEY, "Roll"))
+            return rows, total, summaries, extra, cells, attrs
 
         self._query.run(fetch, self._on_rows, self._on_query_failed)
         self._refresh_rail()
 
     def _on_rows(self, payload) -> None:
-        rows, total = payload
+        rows, total, summaries, extra, cells, attrs = payload
         self._total_stacks = total
+        self.model.set_abyssal_summaries(summaries)
+        self._extra_columns = list(extra)
+        self._cells = cells
+        self._cell_attrs = attrs
+        self.model.set_abyssal_cells(cells, attrs)
         self._apply_rows(rows)
         self._update_state_row(len(rows))
         if not self._sized_once:
             self._size_columns(rows)
             self._sized_once = True
-        if self._inspected_row is not None:
-            # Keep the open inspector honest against the fresh rows: same
-            # item re-rendered, a vanished item closes the panel rather than
-            # showing numbers the table no longer contains.
-            item_id = self._inspected_row["item_id"]
+        for host in (self._panel_host, self._window_host):
+            if host.row is None:
+                continue
+            # Keep each open inspector honest against the fresh rows: same
+            # item re-rendered, a vanished item closes that host rather than
+            # showing numbers the table no longer contains. Per host, so a
+            # filter that drops the window's item leaves the panel alone.
+            item_id = host.row["item_id"]
             match = next((r for r in rows if r["item_id"] == item_id), None)
             if match is None:
-                self._close_inspector()
+                self._close_inspector(host)
             else:
-                self._inspected_row = match
-                self.inspector.show_row(match)
+                self._show_inspected(host, match)
 
     _SIZING_SAMPLE = 200
 
-    def _size_columns(self, rows: list) -> None:
+    def _size_columns(self, rows: list, only_keys: set[str] | None = None) -> None:
         """Initial column widths from the headers plus a bounded row sample.
 
         resizeColumnToContents measures every cell -- 1.6 seconds at 25k
         rows, all of it spent on the tab's first paint, the one moment the
         deferred-load design exists to keep fast. Two hundred rows pin the
         typical width just as well, and the columns stay Interactive so any
-        outlier is one drag from readable."""
+        outlier is one drag from readable. only_keys restricts the pass to
+        columns that have just appeared (the roll columns), leaving the
+        widths the user has since dragged alone."""
         metrics = self.tree.fontMetrics()
         header = self.tree.header()
-        for column, (key, title) in enumerate(queries.ASSET_COLUMNS):
+        for column, (key, title) in enumerate(self.model.columns()):
+            if only_keys is not None and key not in only_keys:
+                continue
             width = metrics.horizontalAdvance(title) + 24
+            roll = is_roll_key(key)
             for row in rows[: self._SIZING_SAMPLE]:
-                value = row[key]
+                # Roll cells are measured as painted: cell_value is the raw
+                # float for the export, whose repr is several times wider
+                # than the "26 tf" the cell shows.
+                value = self.model.roll_cell_text(row, key) if roll else self.model.cell_value(row, key)
                 if value is not None:
                     width = max(width, metrics.horizontalAdvance(str(value)) + 24)
             header.resizeSection(column, min(width, 420))
 
+    def _apply_delegates(self) -> None:
+        """Re-point the badge delegate at the value columns wherever they now
+        sit. Delegates are per column index, and the roll columns shift the
+        value columns right when they appear and back when they vanish."""
+        for column, (key, _header) in enumerate(self.model.columns()):
+            delegate = self._badge_delegate if key in _BADGE_KEYS else self._plain_delegate
+            self.tree.setItemDelegateForColumn(column, delegate)
+
     def _apply_rows(self, rows: list) -> None:
         level = self._current_group_key()
+        # Section widths are per index too, so a column set change would
+        # hand Qty's width to the first roll column and so on down the row.
+        # Remember widths by key, put them back by key, and size only the
+        # columns that are genuinely new.
+        header = self.tree.header()
+        widths: dict[str, int] = {}
+        if self._sized_once:
+            widths = {
+                key: header.sectionSize(i) for i, (key, _h) in enumerate(self.model.columns())
+            }
         # Which groups were open before the model reset wipes the view state
         # -- only meaningful while the grouping key is unchanged, so a
         # debounced keystroke refines the table without re-expanding (or
@@ -500,7 +736,17 @@ class AssetsView(QWidget):
                 if self.tree.isExpanded(self.model.index(i, 0, root))
             }
         self._last_group_key = level
-        self.model.set_rows(rows, _GROUP_ROW_KEY[level] if level else None)
+        self.model.set_rows(rows, _GROUP_ROW_KEY[level] if level else None, self._extra_columns)
+        self._apply_delegates()
+        if widths:
+            fresh: set[str] = set()
+            for i, (key, _h) in enumerate(self.model.columns()):
+                if key in widths:
+                    header.resizeSection(i, widths[key])
+                else:
+                    fresh.add(key)
+            if fresh:
+                self._size_columns(rows, fresh)
         self.tree.setRootIsDecorated(level is not None)
         if level is not None:
             # A header's whole "label · stacks · m³ · ISK" line lives in
@@ -537,7 +783,7 @@ class AssetsView(QWidget):
                 # ("scanning 40 locations becomes 40 summary lines"), and
                 # expanding the one you care about is a click.
                 self.tree.expandAll()
-        if self.sorter.column >= 0:
+        if self.sorter.key is not None:
             self.sorter.reapply()
         self._update_footer()
 
@@ -739,8 +985,8 @@ class AssetsView(QWidget):
         )
 
     def _escape_from_table(self) -> None:
-        if self.side.currentWidget() is self.inspector:
-            self._close_inspector()
+        if self._panel_host.is_open():
+            self._close_inspector(self._panel_host)
             return
         spec = self.omnibox.spec()
         if spec.chips:
@@ -802,11 +1048,11 @@ class AssetsView(QWidget):
     def _filter_current_cell(self, *, negated: bool) -> None:
         index = self.tree.currentIndex()
         row = self.model.row_for_index(index)
-        if row is None:
+        key = self.model.key_at(index.column())
+        if row is None or key is None:
             return
-        key = queries.ASSET_COLUMNS[index.column()][0]
         kind = _COLUMN_CHIP_KIND.get(key)
-        value = row[key]
+        value = self.model.cell_value(row, key)
         if kind is None or value in (None, ""):
             return
         self.omnibox.add_chip(kind, str(value), negated=negated)
@@ -833,15 +1079,30 @@ class AssetsView(QWidget):
 
     # ---------------------------------------------------------- context menu
     def _show_context_menu(self, pos) -> None:
-        index = self.tree.indexAt(pos)
+        menu = self._build_context_menu(self.tree.indexAt(pos))
+        if menu is not None:
+            menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def _build_context_menu(self, index) -> QMenu | None:
+        """The row menu for one cell, or None off the rows. Built apart from
+        exec so tests can read the actions without a modal loop."""
         row = self.model.row_for_index(index)
         if row is None:  # empty space, or a group header
-            return
-        key, header = queries.ASSET_COLUMNS[index.column()]
-        value = row[key]
+            return None
+        key, header = self.model.columns()[index.column()]
+        # A roll cell's value is the rendered text ("-63%", "27 tf"), which
+        # is what "Copy cell" should put on the clipboard; a row column's is
+        # the raw value, as before.
+        value = index.data(Qt.DisplayRole) if is_roll_key(key) else row[key]
         kind = _COLUMN_CHIP_KIND.get(key)
 
         menu = QMenu(self)
+        # Named for where it opens: a click already put this row in the
+        # panel, so a bare "Inspect" here would read as a no-op.
+        menu.addAction(
+            "Inspect in window", lambda: self._open_inspector(self._window_host, row)
+        )
+        menu.addSeparator()
         if kind is not None and value not in (None, ""):
             menu.addAction(
                 f"Filter: {header} = {value}",
@@ -867,7 +1128,7 @@ class AssetsView(QWidget):
         if (row["category"] or "") in _FIT_VIEWABLE_CATEGORIES or _is_corpse(row):
             menu.addSeparator()
             menu.addAction("View fit…", lambda: self._open_fit_dialog(row))
-        menu.exec(self.tree.viewport().mapToGlobal(pos))
+        return menu
 
     def _open_fit_dialog(self, row: sqlite3.Row) -> None:
         if _is_corpse(row):
@@ -879,27 +1140,242 @@ class AssetsView(QWidget):
         dialog = FitDialog(row["item_id"], name, ship_type_id=row["type_id"], parent=self)
         dialog.exec()
 
+    # ----------------------------------------------------------- abyssal card
+    def _open_card(self, chip: omni.Chip, anchor: QWidget) -> None:
+        """The abyssal chip's glyph, or the omnibox's deferred request after
+        the chip was typed: seed the card from the current chips, start its
+        data fetch, and show it under the chip."""
+        card = self._card
+        if card is None:
+            card = self._card = AbyssalCard(self)
+            card.selection_changed.connect(self._on_card_selection)
+            card.filter_changed.connect(self._card_count.trigger)
+            card.fetch_requested.connect(self._on_card_fetch)
+            card.done.connect(self._on_card_done)
+            # A count still on the clock when the card goes away would run
+            # for nobody.
+            card.cancelled.connect(self._card_count.stop)
+        if card.isVisible():
+            card.hide()  # reads as Cancel; the seed below starts afresh
+        card.seed(self.omnibox.spec().chips)
+        self._fetch_card_data(card.seeded_types(), with_types=True, anchor=anchor)
+        card.adjustSize()
+        self._place_card(anchor)
+        card.show()
+        # Once more after the event loop has laid the card out: the size it
+        # has before its first show is a guess, and the anchor itself may
+        # have moved if the omnibox re-flowed (the draft chip's lesson).
+        QTimer.singleShot(0, lambda: self._place_card(anchor))
+
+    def _place_card(self, anchor: QWidget) -> None:
+        card = self._card
+        if card is None:
+            return
+        try:
+            anchored = anchor.isVisible()
+            below = anchor.mapToGlobal(QPoint(0, anchor.height()))
+            above = anchor.mapToGlobal(QPoint(0, 0))
+        except RuntimeError:
+            # The chip widget was removed (the cross, a set_spec) between
+            # the click and this deferred placement; fall back to the field.
+            anchored = False
+        if not anchored:
+            below = self.omnibox.mapToGlobal(QPoint(0, self.omnibox.height()))
+            above = self.omnibox.mapToGlobal(QPoint(0, 0))
+        screen = QGuiApplication.screenAt(below) or QGuiApplication.primaryScreen()
+        area = screen.availableGeometry() if screen is not None else None
+        x, y = below.x(), below.y() + 2
+        if area is not None:
+            x = max(area.left(), min(x, area.right() - card.width() + 1))
+            if y + card.height() > area.bottom() and above.y() - card.height() >= area.top():
+                y = above.y() - card.height() - 2
+        card.move(x, y)
+
+    def _fetch_card_data(
+        self, selected: list[str], *, with_types: bool, anchor: QWidget | None = None
+    ) -> None:
+        """One pool-thread trip for everything the card shows: the type
+        counts faceted by every filter except the card's own kinds, the
+        not-fetched count for the picked type, and -- with one picked rather
+        than none -- its rolled attributes and value bounds.
+
+        The facet drops every abyssal, stat: and roll: chip: the card
+        rewrites the first two on Done, and roll: names an attribute only
+        some types roll, so faceting by any of them would hide exactly the
+        types the user might switch to (with ``abyssal:"Abyssal Stasis
+        Webifier" stat:web<=-60`` in force no BCS has a web strength).
+        Negated card chips go too, which the card cannot represent and Done
+        keeps; their counts are therefore slightly overstated -- the price
+        of one rule for both polarities."""
+        card = self._card
+        if card is None:
+            return
+        spec = self.omnibox.spec()
+        where, params = spec.where(exclude_kinds=(*CARD_KINDS, omni.ROLL_KIND))
+        single = selected[0] if len(selected) == 1 else None
+        names = list(selected)
+
+        def fetch(conn: sqlite3.Connection) -> dict:
+            payload: dict = {
+                "types": queries.abyssal_type_counts(conn, where, params) if with_types else None,
+                "pending": queries.abyssal_pending_count(conn, names or None),
+                "attrs": [],
+                "bounds": {},
+            }
+            if single is not None:
+                payload["attrs"], payload["bounds"] = queries.abyssal_type_columns(conn, single)
+            return payload
+
+        def deliver(payload: dict) -> None:
+            if payload["types"] is not None:
+                self._card_types = {
+                    str(r["name"]): int(r["type_id"]) for r in payload["types"]
+                }
+                card.set_types(payload["types"], names)
+            card.set_attributes(payload["attrs"], payload["bounds"])
+            card.set_pending(payload["pending"])
+            card.adjustSize()
+            if anchor is not None and card.isVisible():
+                self._place_card(anchor)
+
+        self._card_query.run(fetch, deliver, self._on_query_failed)
+
+    def _on_card_selection(self, names: list) -> None:
+        self._fetch_card_data(list(names), with_types=False)
+
+    def _spec_with_card(self, chips: list) -> omni.FilterSpec:
+        """The omnibox's filter with the card's chips in place of every
+        positive abyssal/stat chip and everything else -- other kinds, a
+        typed roll: chip, bare text, and negated chips of the card's kinds,
+        which it cannot represent and must not silently discard -- exactly
+        as it was. What Done writes, and what the live count counts, so the
+        two can never disagree."""
+        spec = self.omnibox.spec()
+        kept = [c for c in spec.chips if c.kind not in CARD_KINDS or c.negated]
+        return omni.FilterSpec(text=spec.text, chips=kept + list(chips))
+
+    def _fetch_card_count(self) -> None:
+        """The card's footer: how many items its chips would leave, out of
+        the picked type's items under the same filter -- the abyssal chip
+        alone, so the denominator is the dropdown's own count for the type
+        (plus whatever a kept roll: or negated chip takes off both). Both
+        counts in one trip; a stale answer is dropped by the generation
+        guard, and the card shows "…" until the fresh one lands."""
+        card = self._card
+        if card is None or not card.isVisible():
+            return
+        chips = card.chips()
+        matched_where, matched_params = self._spec_with_card(chips).where()
+        total_where, total_params = self._spec_with_card(chips[:1]).where()
+
+        def fetch(conn: sqlite3.Connection) -> tuple[int, int]:
+            return (
+                queries.count_assets(conn, matched_where, matched_params),
+                queries.count_assets(conn, total_where, total_params),
+            )
+
+        def deliver(counts: tuple[int, int]) -> None:
+            card.set_match_count(*counts)
+
+        self._card_count_query.run(fetch, deliver, self._on_query_failed)
+
+    def _on_card_done(self, chips: list) -> None:
+        """Done: one set_spec, one reload (see _spec_with_card)."""
+        self._card_count.stop()
+        self.omnibox.set_spec(self._spec_with_card(chips))
+
+    def _on_card_fetch(self, names: list) -> None:
+        """The banner's Fetch: resolve the picked type (none = every type)
+        to the item_ids still pending and hand them to the main window's job
+        path. abyssal.pending is one indexed pass over the assets table,
+        cheap enough for the GUI thread that owns self.conn."""
+        wanted = {self._card_types[n] for n in names if n in self._card_types}
+        pending = abyssal.pending(self.conn)
+        item_ids = [item for item, type_id in pending if not names or type_id in wanted]
+        if not item_ids:
+            self.footer.setText("Nothing left to fetch for those types.")
+            if self._card is not None:
+                self._card.set_pending(0)
+            return
+        self.abyssal_fetch_requested.emit(item_ids)
+
     # -------------------------------------------------------------- inspector
+    def _wire_inspector(self, host: _InspectorHost) -> None:
+        """Every action an Inspector emits, bound to the host it lives in, so
+        one set of slots serves the panel and the window alike."""
+        inspector = host.inspector
+        inspector.close_clicked.connect(lambda: self._close_inspector(host))
+        inspector.where_else_clicked.connect(lambda: self._where_else_inspected(host))
+        inspector.refresh_price_clicked.connect(lambda: self._refresh_inspected_price(host))
+        inspector.pin_price_clicked.connect(lambda: self._pin_inspected_price(host))
+        inspector.fetch_abyssal_clicked.connect(lambda: self._fetch_inspected_rolls(host))
+
     def _open_inspector_current(self) -> None:
-        row = self.model.row_for_index(self.tree.currentIndex())
-        if row is None:
+        self._open_panel_at(self.tree.currentIndex())
+
+    def _open_panel_at(self, index) -> None:
+        row = self.model.row_for_index(index)
+        if row is not None:  # a group header has nothing to inspect
+            self._open_inspector(self._panel_host, row)
+
+    def _open_inspector(self, host: _InspectorHost, row: sqlite3.Row) -> None:
+        self._show_inspected(host, row)
+        host.show()
+
+    def _raise_window(self) -> None:
+        # show() rather than exec(): Where else? and the filter actions
+        # change the table behind the window, which a modal loop would
+        # block. raise_/activateWindow cover the re-open case, where the
+        # window is already up but behind the main one.
+        self.inspector_window.show()
+        self.inspector_window.raise_()
+        self.inspector_window.activateWindow()
+
+    def _show_inspected(self, host: _InspectorHost, row: sqlite3.Row) -> None:
+        """Render a row in one host and, for a mutated module, start the
+        rolls lookup that fills its stats section."""
+        host.row = row
+        host.render(row)
+        if _row_get(row, "is_dynamic_type"):
+            self._load_rolls(host, row["item_id"])
+        else:
+            # An in-flight lookup for the previous (abyssal) row must not
+            # paint its rolls under this one; the item guard in _load_rolls
+            # would drop it anyway, but there is no point letting it land.
+            host.rolls_query.cancel()
+
+    def _load_rolls(self, host: _InspectorHost, item_id: int) -> None:
+        def fetch(conn: sqlite3.Connection) -> dict:
+            return queries.fetch_abyssal_rolls(conn, item_id)
+
+        def deliver(payload: dict) -> None:
+            # AsyncQuery's generation guard drops results a newer lookup
+            # superseded; this guard covers the other race -- the host
+            # closed, or moved to a row that started no lookup, between the
+            # query being latest and its result arriving. It reads this
+            # host's own row, so the window's rolls cannot land in the panel.
+            current = host.row
+            if current is not None and current["item_id"] == item_id:
+                host.inspector.show_rolls(payload)
+
+        host.rolls_query.run(fetch, deliver, self._on_query_failed)
+
+    def _close_inspector(self, host: _InspectorHost) -> None:
+        # The row goes before anything is hidden, so a rolls result landing
+        # mid-close finds no row to paint under. The window's hide is
+        # hide(), not reject(): reject emits finished, which leads back here.
+        host.row = None
+        host.rolls_query.cancel()
+        host.hide()
+
+    def _where_else_inspected(self, host: _InspectorHost) -> None:
+        if host.row is not None:
+            self._where_else(host.row)
+
+    def _refresh_inspected_price(self, host: _InspectorHost) -> None:
+        if host.row is None:
             return
-        self._inspected_row = row
-        self.inspector.show_row(row)
-        self.side.setCurrentWidget(self.inspector)
-
-    def _close_inspector(self) -> None:
-        self._inspected_row = None
-        self.side.setCurrentWidget(self.rail)
-
-    def _where_else_inspected(self) -> None:
-        if self._inspected_row is not None:
-            self._where_else(self._inspected_row)
-
-    def _refresh_inspected_price(self) -> None:
-        if self._inspected_row is None:
-            return
-        job = _PriceRefreshJob(self._inspected_row["type_id"])
+        job = _PriceRefreshJob(host.row["type_id"])
         self._price_jobs.add(job)  # must outlive this call -- see async_query.py
         job.signals.finished.connect(lambda _result, j=job: self._on_price_job_done(j))
         job.signals.failed.connect(
@@ -915,8 +1391,38 @@ class AssetsView(QWidget):
         self._price_jobs.discard(job)
         self.footer.setText(f"Price refresh failed: {message}")
 
-    def _pin_inspected_price(self) -> None:
-        row = self._inspected_row
+    def _fetch_inspected_rolls(self, host: _InspectorHost) -> None:
+        if host.row is None:
+            return
+        job = _AbyssalFetchJob(host.row["item_id"])
+        self._abyssal_jobs.add(job)  # must outlive this call -- see async_query.py
+        job.signals.finished.connect(lambda _result, j=job: self._on_abyssal_job_done(j))
+        job.signals.failed.connect(
+            lambda message, j=job: self._on_abyssal_job_failed(j, host, message)
+        )
+        host.inspector.set_rolls_fetching()
+        QThreadPool.globalInstance().start(job)
+
+    def _on_abyssal_job_done(self, job: _AbyssalFetchJob) -> None:
+        self._abyssal_jobs.discard(job)
+        # A full refresh rather than just re-running the rolls lookup: the
+        # badge tooltip summaries ride the row reload, and a stale "Rolls
+        # not fetched" over a freshly fetched item would contradict the
+        # inspector showing its rolls. The reload re-renders both hosts, so
+        # the same item open in the other one picks the rolls up as well.
+        self.refresh_all()
+
+    def _on_abyssal_job_failed(
+        self, job: _AbyssalFetchJob, host: _InspectorHost, message: str
+    ) -> None:
+        self._abyssal_jobs.discard(job)
+        self.footer.setText(f"Abyssal stats fetch failed: {message}")
+        if host.row is not None and _row_get(host.row, "is_dynamic_type"):
+            # Re-arm the button from the stored state, whatever it is now.
+            self._load_rolls(host, host.row["item_id"])
+
+    def _pin_inspected_price(self, host: _InspectorHost) -> None:
+        row = host.row
         if row is None:
             return
         if (row["price_source"] or "") == pricing.MANUAL:
@@ -1072,15 +1578,16 @@ class AssetsView(QWidget):
         )
         if not path:
             return
-        keys = [k for k, _ in queries.ASSET_COLUMNS]
-        headers = [h for _, h in queries.ASSET_COLUMNS]
+        columns = self.model.columns()
+        keys = [k for k, _ in columns]
+        headers = [h for _, h in columns]
         rows = self.model.rows()
         try:
             with open(path, "w", newline="", encoding="utf-8") as fh:
                 writer = csv.writer(fh)
                 writer.writerow(headers)
                 for r in rows:
-                    writer.writerow([r[k] for k in keys])
+                    writer.writerow([self.model.cell_value(r, k) for k in keys])
         except OSError as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
             return

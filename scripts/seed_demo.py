@@ -9,6 +9,10 @@ not break a view you were not thinking about.
 
 The SDE is downloaded on first run and cached, so this is only slow once.
 Real type ids and station ids throughout, so the joins exercise real data.
+The abyssal modules come from tests/data/abyssal_corpus.json, an anonymised
+corpus of 520 fetched rolls, split between the two pilots' hangars and the
+corporation's, so the inspector, the roll columns and the search card have
+an estate-sized population to work with.
 """
 
 from __future__ import annotations
@@ -17,12 +21,16 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "tests"))
+
+import abyssal_corpus  # noqa: E402
 
 from evasset import db, networth, sde  # noqa: E402
-from evasset.config import (
-    DB_PATH,  # noqa: E402
-    Settings,  # noqa: E402
+from evasset.config import (  # noqa: E402
+    DB_PATH,
+    Settings,
 )
 
 CHARON, DOMINIX, TRITANIUM, PLEX = 20185, 645, 34, 44992
@@ -39,6 +47,7 @@ def seed(conn) -> None:
         DELETE FROM wallets;      DELETE FROM prices;       DELETE FROM market_orders;
         DELETE FROM wallet_journal; DELETE FROM wallet_transactions; DELETE FROM names;
         DELETE FROM networth_snapshots;
+        DELETE FROM abyssal_attributes; DELETE FROM abyssal_items;
     """)
     conn.executescript(f"""
         INSERT INTO characters (character_id, name, corporation_id, corporation_name,
@@ -151,6 +160,16 @@ def seed(conn) -> None:
         taken = (base - timedelta(days=(5 - week) * 7)).isoformat(timespec="seconds")
         networth.take_snapshot(conn, taken)
     conn.commit()
+
+    def place(n: int, item: dict) -> abyssal_corpus.Placement:
+        if n % 4 == 2:
+            return ("character", ALT, AMARR_VIII, "Hangar", AMARR_SYS, DOMAIN)
+        if n % 4 == 3:
+            return ("corporation", CORP, JITA_4_4, "CorpSAG1", JITA_SYS, THE_FORGE)
+        return ("character", PILOT, JITA_4_4, "Hangar", JITA_SYS, THE_FORGE)
+
+    abyssal_corpus.install_assets(conn, place)
+    abyssal_corpus.store_all(conn)
 
 
 def main() -> int:

@@ -97,6 +97,14 @@ CHIP_KIND_TINTS = {
     "item":     ("#E4E8EC", "#2A3138"),   # slate
     "is":       ("#F6DFEC", "#43213B"),   # pink
     "val":      ("#F2EFC8", "#3A3712"),   # yellow
+    "stat":     ("#D8F3E6", "#143B2C"),   # mint -- rolled abyssal attributes
+    # Plum for the abyssal chip: the crimson family the game paints abyssal
+    # gear in (META_ABYSSAL), pulled toward magenta so it never reads as the
+    # negation red -- 30 / 44 channel units from CHIP_NEGATED and 33 / 25
+    # from is:'s pink, its nearest neighbours in hue (floors held in
+    # tests/test_contrast.py).
+    "abyssal":  ("#EDD0E3", "#52183C"),
+    "roll":     ("#E4F1CD", "#2A3B14"),   # lime -- roll quality, a step off val's yellow
 }
 
 
@@ -202,6 +210,39 @@ def heat_tint(fraction: float, palette: QPalette | None = None) -> str | None:
     return _heat_hex(fraction, is_dark(palette))
 
 
+# The roll-quality tint for the abyssal table columns: diverging rather than
+# the heat scale's one hue, because a roll has a middle. Below 50% the cell
+# leans toward the CRITICAL red, above it toward the POSITIVE green, and the
+# band around the middle stays plain so a table of ordinary rolls does not
+# turn into a pastel checkerboard -- only the ones worth a second look carry
+# colour. Strength reuses the heat band (8%..26%): the same text sits on top,
+# so the same ceiling applies.
+_QUALITY_PLAIN_BAND = 0.05
+
+
+def _quality_hex(quality: float, dark: bool) -> str | None:
+    """Theme-explicit half of quality_tint, split out so the contrast tests
+    measure both variants without a QApplication. None inside the plain band
+    around 0.5 so the common middling roll paints nothing at all."""
+    distance = quality - 0.5
+    # A hair of tolerance so the band is closed in practice: 0.55 - 0.5 is
+    # 0.050000000000000044 in binary floating point and must still be plain.
+    if abs(distance) <= _QUALITY_PLAIN_BAND + 1e-9:
+        return None
+    strength = _HEAT_MIN + (_HEAT_MAX - _HEAT_MIN) * min(abs(distance) * 2, 1.0)
+    which = 1 if dark else 0
+    accent = POSITIVE[which] if distance > 0 else _STATUS[CRITICAL][which]
+    return _blend(_HEAT_BASE[which], accent, strength)
+
+
+def quality_tint(quality: float | None, palette: QPalette | None = None) -> str | None:
+    """Background hex for a roll cell's quality (0..1), or None for no tint --
+    unranked rolls and the plain middle band both paint nothing."""
+    if quality is None:
+        return None
+    return _quality_hex(quality, is_dark(palette))
+
+
 def normalised(base: QPalette) -> QPalette:
     """A copy of the palette with the roles this app's text depends on made
     readable.
@@ -238,6 +279,31 @@ def is_dark(palette: QPalette | None = None) -> bool:
     so following the OS theme keeps working without anything to configure."""
     palette = palette or QApplication.palette()
     return palette.color(QPalette.Base).lightness() < 128
+
+
+def toward_text(palette: QPalette, fraction: float) -> QColor:
+    """The window colour nudged a fraction of the way to the text colour.
+
+    Derived from the two roles guaranteed to contrast in every theme rather
+    than from QPalette.Dark or Mid, which the Windows 11 dark palette paints
+    within a few levels of the window itself (measured 2026-09-02 on the
+    inspector's range bars, which vanished). A small fraction is a surface a
+    step above the window -- the search card's footer -- and a larger one
+    is a line or an empty track.
+    """
+    base, ink = palette.color(QPalette.Window), palette.color(QPalette.WindowText)
+    return QColor(
+        round(base.red() + (ink.red() - base.red()) * fraction),
+        round(base.green() + (ink.green() - base.green()) * fraction),
+        round(base.blue() + (ink.blue() - base.blue()) * fraction),
+    )
+
+
+def track_colour(palette: QPalette) -> QColor:
+    """The empty segmented track under a roll meter or a range selection:
+    toward_text at a fifth, the strength at which it reads as a track on
+    both themes without competing with the fill."""
+    return toward_text(palette, 0.22)
 
 
 def status_hex(level: int, palette: QPalette | None = None) -> str | None:
