@@ -184,7 +184,7 @@ class TaskBar(QWidget):
             task = active[0]
             detail = task.message or "Starting…"
             self.summary.setText(detail)
-            self.summary.setToolTip(f"{task.label} — click for detail")
+            self.summary.setToolTip(f"{task.label} - click for detail")
             self.summary.setAccessibleName(f"Running: {task.label}. {detail}")
         else:
             running = sum(1 for t in active if t.state == RUNNING)

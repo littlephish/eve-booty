@@ -196,7 +196,7 @@ class StockpileDialog(QDialog):
         self.multiplier.setDecimals(2)
         self.multiplier.setSingleStep(1.0)
         self.multiplier.setValue(pile.multiplier if pile else 1.0)
-        self.multiplier.setToolTip("Scales every target — 3 for three fleets' worth")
+        self.multiplier.setToolTip("Scales every target - 3 for three fleets' worth")
         form.addRow("Multiplier", self.multiplier)
 
         self.orders = QCheckBox("Sell orders on the market")
@@ -412,8 +412,8 @@ class StockpileView(QWidget):
 
         self.empty = QLabel(
             "No stockpiles yet.\n\n"
-            "A stockpile is a list of what you want to keep on hand — doctrine "
-            "spares, production inputs, a Jita buffer — and it tells you what is "
+            "A stockpile is a list of what you want to keep on hand - doctrine "
+            "spares, production inputs, a Jita buffer - and it tells you what is "
             "missing and what it would cost to top up.\n\n"
             "Press New… to make one."
         )
@@ -485,7 +485,7 @@ class StockpileView(QWidget):
     def _render(self, rows: list[dict]) -> None:
         self.model.set_rows(rows)
         if not rows:
-            self.footer.setText("Nothing tracked yet — press Add item…")
+            self.footer.setText("Nothing tracked yet - press Add item…")
             return
         summary = stockpile.totals(rows)
         text = (
@@ -532,7 +532,7 @@ class StockpileView(QWidget):
         confirm = QMessageBox.question(
             self, "Delete stockpile",
             f"Delete “{name}” and everything tracked in it?\n\n"
-            "Your assets are not touched — only the list of what you wanted.",
+            "Your assets are not touched - only the list of what you wanted.",
         )
         if confirm != QMessageBox.Yes:
             return
@@ -580,7 +580,7 @@ class StockpileView(QWidget):
     def copy_shopping_list(self) -> None:
         text = stockpile.shopping_list(self.model.rows())
         if not text:
-            self.footer.setText("Nothing short — no shopping list to copy.")
+            self.footer.setText("Nothing short - no shopping list to copy.")
             return
         QGuiApplication.clipboard().setText(text)
         lines = len(text.splitlines())

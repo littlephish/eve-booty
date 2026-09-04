@@ -56,7 +56,7 @@ def _is_unknown_label(label: str) -> bool:
 
 
 # Sort keys as rail_rollups() spells them, with the segment-button captions.
-_SORT_LABELS = [("value", "ISK"), ("name", "A–Z"), ("volume", "m³")]
+_SORT_LABELS = [("value", "ISK"), ("name", "A-Z"), ("volume", "m³")]
 _SORT_DISPLAY = dict(_SORT_LABELS)
 
 _UNKNOWN_TOOLTIP = (

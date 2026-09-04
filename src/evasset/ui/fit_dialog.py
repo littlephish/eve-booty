@@ -95,7 +95,7 @@ class FitDialog(QDialog):
         # and rows are built, read when the fetch job reports back.
         self._icon_labels: dict[int, list[tuple[QLabel, int]]] = {}
         self._icon_job: _IconFetchJob | None = None
-        self.setWindowTitle(f"Fit — {ship_name}")
+        self.setWindowTitle(f"Fit - {ship_name}")
         self.resize(460, 600)
 
         layout = QVBoxLayout(self)

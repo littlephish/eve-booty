@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -138,9 +138,6 @@ class MainWindow(QMainWindow):
         self._build_statusbar()
         self._refresh_status()
         self._ensure_tab_loaded(self.tabs.currentIndex())  # load just the visible tab
-
-        if not settings.client_id:
-            QTimer.singleShot(400, self._first_run_hint)
 
     # ---------------------------------------------------------------- chrome
     def _build_actions(self) -> None:
@@ -432,7 +429,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------- callbacks
     def _on_task_failed(self, label: str, message: str) -> None:
-        self.log.add(f"FAILED: {label} — {message}")
+        self.log.add(f"FAILED: {label} - {message}")
         self._refresh_status()
         QMessageBox.critical(self, "Something went wrong", f"{label}\n\n{message}")
 
@@ -489,7 +486,7 @@ class MainWindow(QMainWindow):
             return True
         QMessageBox.information(
             self, "No characters",
-            "Add a character first — File → Characters… → Add character.",
+            "Add a character first - File → Characters… → Add character.",
         )
         return False
 

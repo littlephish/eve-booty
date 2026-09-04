@@ -72,7 +72,7 @@ class _StatCell(QWidget):
 
         row = QHBoxLayout()
         row.setSpacing(4)
-        self.value = QLabel("—")
+        self.value = QLabel("-")
         font = self.value.font()
         font.setPointSizeF(font.pointSizeF() + 2.5)
         self.value.setFont(font)

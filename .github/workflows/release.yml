@@ -214,6 +214,34 @@ jobs:
           # it printed "OK" and then failed the release anyway.
           exit 0
 
+      # After the smoke test on purpose: an installer is a slower way to hand
+      # somebody the same broken exe.
+      #
+      # Published alongside the zip, not instead of it. The portable folder is
+      # what the in-app updater swaps, and pick_asset matches "*win*.zip", so
+      # the setup exe is never mistaken for the update archive -- there is a
+      # test pinning exactly that.
+      - name: Build the installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            # Do not assume where choco put it.
+            $iscc = (Get-ChildItem "${env:ProgramFiles(x86)}", $env:ProgramFiles, `
+                       "$env:LOCALAPPDATA\Programs" `
+                       -Filter ISCC.exe -Recurse -ErrorAction SilentlyContinue |
+                     Select-Object -First 1).FullName
+          }
+          if (-not $iscc) { throw "Inno Setup compiler (ISCC.exe) not found" }
+          & $iscc /DAppVersion=${{ steps.ver.outputs.version }} `
+                  /DFileVersion=${{ steps.ver.outputs.file_version }} `
+            dist_assets\win\eve-booty.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with $LASTEXITCODE" }
+          $setup = "dist\EVEBooty-${{ steps.ver.outputs.version }}-setup.exe"
+          if (-not (Test-Path $setup)) { throw "ISCC produced no installer at $setup" }
+          Write-Host "installer: $((Get-Item $setup).Length) bytes"
+
       # The updater looks for an asset matching *win*.zip, so keep "win" in the
       # name (src/evasset/updater.py:pick_asset).
       - name: Zip the portable build
@@ -245,3 +273,4 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/EVEBooty-*-win64.zip
+            dist/EVEBooty-*-setup.exe

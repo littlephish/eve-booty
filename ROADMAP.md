@@ -11,7 +11,7 @@
 | Rollup rail | Per-label stacks / m³ / ISK with value bars at six grouping levels; click-to-filter, star pins, "where is it" flip when hunting an item |
 | Estate strip | Whole-estate net worth, assets, liquid ISK, volume, unpriced count and a value map of top locations, above the Assets table |
 | Row inspector | Both price bases, source and quote age, where-else, single-type price refresh, manual price pinning |
-| Saved views & pins | `Ctrl+1–9` saves filter + grouping + rail level to the database; rail pins persist per level |
+| Saved views & pins | `Ctrl+1-9` saves filter + grouping + rail level to the database; rail pins persist per level |
 | Manual prices | Pin a price per type; the repricer never overwrites a pin |
 | Net worth tracker | Per character and corp, snapshot per sync, six-way split, charted at both Jita buy and Jita sell |
 | Pricing | Jita 4-4 buy and sell; capitals from public contract average where the book is thin |
@@ -33,30 +33,30 @@ Roughly in the order I'd add them.
 
 **Next up**
 
-- **Tree view** — assets as an expandable location → container → item tree instead
+- **Tree view** - assets as an expandable location → container → item tree instead
   of a flat table. The data model already carries the parent links.
-- **Item database** — browse and search every published type in the SDE, not just
+- **Item database** - browse and search every published type in the SDE, not just
   what you own. Everything needed is already imported.
-- ~~**Stockpile**~~ — done. Target quantities per item, scoped to an owner and a
+- ~~**Stockpile**~~ - done. Target quantities per item, scoped to an owner and a
   station/system/region, with held / target / shortfall, the shortfall costed in
   ISK and m3, and a doctrine multiplier. Narrower than jEveAssets' arbitrary
   filter tree by choice; see the module docstring for why.
-- ~~**Values / summary tab**~~ — done, as the estate strip on the Assets tab
+- ~~**Values / summary tab**~~ - done, as the estate strip on the Assets tab
   (net worth, assets, liquid ISK, volume, unpriced count, value map).
-- **Realised profit per item** — the Transactions tab shows cash in against cash
+- **Realised profit per item** - the Transactions tab shows cash in against cash
   out, which is not profit. Matching a sale back to the lot it came from needs
   FIFO inventory accounting over the transaction history.
 
 **Later**
 
-- **Reprocessing** — value items by their refined output instead of the item.
+- **Reprocessing** - value items by their refined output instead of the item.
   Needs `typeMaterials.jsonl` from the SDE, which is not imported yet.
-- **Materials** — flatten blueprint material requirements.
-- **Slots** — how many manufacturing, research, order and contract slots are in
+- **Materials** - flatten blueprint material requirements.
+- **Slots** - how many manufacturing, research, order and contract slots are in
   use against the character's skill-derived maximum.
-- **Mining ledger** — `/characters/{id}/mining` and the corp observers.
-- **Routing** — jump planner between the systems holding your stuff.
-- **Skills, standings, loyalty points, agents** — straightforward ESI pulls,
+- **Mining ledger** - `/characters/{id}/mining` and the corp observers.
+- **Routing** - jump planner between the systems holding your stuff.
+- **Skills, standings, loyalty points, agents** - straightforward ESI pulls,
   low priority for an asset tool.
 
 **Not planned**
@@ -75,7 +75,7 @@ Roughly in the order I'd add them.
   Excluded jobs would make the chart dip every time you start a build, which is
   worse.
 - Assets in a corp hangar are attributed to the corp, not to any character. If two
-  of your characters are in the same corp, don't tick Corp data on both — you'll
+  of your characters are in the same corp, don't tick Corp data on both - you'll
   pull the same assets twice under one owner and the second pull just overwrites
   the first, which is harmless but wasteful.
 - No incremental sync for assets, orders, contracts and jobs. Every run replaces

@@ -14,7 +14,9 @@ goes stale every patch day.
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -48,6 +50,82 @@ def numeric(version_text: str) -> str:
     return ".".join(parts + ["0"] * (4 - len(parts)))
 
 
+
+ISS = ROOT / "dist_assets" / "win" / "eve-booty.iss"
+
+
+def find_iscc() -> Path | None:
+    r"""The Inno Setup compiler, wherever the installer put it.
+
+    winget installs it per-user under %LOCALAPPDATA%\Programs, choco and the
+    normal installer put it under Program Files. Looking in only one of those
+    is how you get "not installed" on a machine where it plainly is.
+    """
+    roots = [
+        os.environ.get("ProgramFiles(x86)", ""),
+        os.environ.get("ProgramFiles", ""),
+        str(Path(os.environ.get("LOCALAPPDATA", "")) / "Programs"),
+    ]
+    for root in filter(None, roots):
+        candidate = Path(root) / "Inno Setup 6" / "ISCC.exe"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def build_installer(output: Path, app_version: str, file_version: str) -> int:
+    r"""Stage the program folder where the .iss expects it, then compile.
+
+    The script reads dist\EVEBooty, while Nuitka writes <output>/EVEBooty.dist,
+    so the folder is copied rather than the script taught about both -- CI
+    stages to the same path, and one layout is easier to reason about than a
+    conditional one. update.exe is copied in too when it has been built,
+    because the installed app needs it to update itself later.
+    """
+    if sys.platform != "win32":
+        print("the installer is Windows-only; skipping", file=sys.stderr)
+        return 0
+    iscc = find_iscc()
+    if iscc is None:
+        print(
+            "ISCC.exe not found. Install it with:\n"
+            "  winget install --id JRSoftware.InnoSetup -e",
+            file=sys.stderr,
+        )
+        return 1
+
+    built = ROOT / output / "EVEBooty.dist"
+    if not built.is_dir():
+        print(f"no program folder at {built}", file=sys.stderr)
+        return 1
+
+    staged = ROOT / "dist" / "EVEBooty"
+    if staged.exists():
+        shutil.rmtree(staged)
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(built, staged)
+
+    helper = ROOT / "updater" / "target" / "release" / "update.exe"
+    if helper.exists():
+        shutil.copy2(helper, staged / "update.exe")
+    else:
+        print(
+            "warning: updater/target/release/update.exe is missing, so the "
+            "installed app will not be able to update itself. Build it with:\n"
+            "  cargo build --release --manifest-path updater/Cargo.toml",
+            file=sys.stderr,
+        )
+
+    cmd = [
+        str(iscc),
+        f"/DAppVersion={app_version}",
+        f"/DFileVersion={file_version}",
+        str(ISS),
+    ]
+    print(" ".join(cmd), flush=True)
+    return subprocess.call(cmd, cwd=ROOT)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--onefile", action="store_true", help="produce a single exe")
@@ -56,6 +134,10 @@ def main() -> int:
     parser.add_argument(
         "--show-bloat", action="store_true",
         help="report what anti-bloat stripped, to check nothing needed was",
+    )
+    parser.add_argument(
+        "--installer", action="store_true",
+        help="also build the Inno Setup installer (needs ISCC.exe)",
     )
     args = parser.parse_args()
 
@@ -107,7 +189,10 @@ def main() -> int:
     cmd.append(str(ENTRY))
 
     print(" ".join(cmd), flush=True)
-    return subprocess.call(cmd, cwd=ROOT)
+    code = subprocess.call(cmd, cwd=ROOT)
+    if code or not args.installer:
+        return code
+    return build_installer(Path(args.output), app_version, file_version)
 
 
 if __name__ == "__main__":

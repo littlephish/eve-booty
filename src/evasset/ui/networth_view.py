@@ -211,7 +211,7 @@ class NetWorthView(QWidget):
         self.chart_view.setChart(self.chart)
 
         if not rows:
-            self.chart.setTitle("No snapshots yet — run a sync to record the first one.")
+            self.chart.setTitle("No snapshots yet - run a sync to record the first one.")
             self.headline.setText("")
             self.table.setRowCount(0)
             return
@@ -260,14 +260,14 @@ class NetWorthView(QWidget):
             first, last = self._compare_ends(rows, headline_key)
             other = self._compare_ends(rows, other_key)[1]
             self.chart.setTitle(
-                f"{len(plots)} owners — {len(rows)} snapshot(s)"
+                f"{len(plots)} owners - {len(rows)} snapshot(s)"
             )
         else:
             first = float(rows[0][headline_key] or 0)
             last = float(rows[-1][headline_key] or 0)
             other = float(rows[-1][other_key] or 0)
             self.chart.setTitle(
-                f"{self.owner_box.currentText()} — {len(rows)} snapshot(s)"
+                f"{self.owner_box.currentText()} - {len(rows)} snapshot(s)"
             )
         delta = last - first
         sign = "+" if delta >= 0 else "−"

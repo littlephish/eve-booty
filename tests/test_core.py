@@ -359,7 +359,7 @@ def test_group_fit_pairs_a_loaded_charge_with_its_module(conn):
     rows = queries.fetch_fit(conn, 2)
     groups = dict(fitting.group_fit(rows))
     assert [line.text for line in groups["High slots"]] == [
-        "125mm Gatling AutoCannon II  —  loaded: 50 x EMP S"
+        "125mm Gatling AutoCannon II  -  loaded: 50 x EMP S"
     ]
 
 

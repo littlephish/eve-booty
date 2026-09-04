@@ -104,8 +104,8 @@ _KEY_MAP = [
     ("Enter", "Open the inspector"),
     ("g", "Cycle group-by"),
     ("Esc", "Close the inspector, else remove the last filter"),
-    ("1–9", "Recall saved view"),
-    ("Ctrl+1–9", "Save current view"),
+    ("1-9", "Recall saved view"),
+    ("Ctrl+1-9", "Save current view"),
     ("?", "This list"),
 ]
 
@@ -928,7 +928,7 @@ class AssetsView(QWidget):
             return
         QGuiApplication.clipboard().setText(text)
         QDesktopServices.openUrl(QUrl("https://janice.e-351.com/"))
-        self.footer.setText("Copied — paste into Janice.")
+        self.footer.setText("Copied - paste into Janice.")
 
     # ----------------------------------------------------------------- export
     def export_csv(self) -> None:

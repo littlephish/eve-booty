@@ -1,6 +1,6 @@
 # EVE Booty
 
-Desktop asset manager for EVE Online — all your plunder in one place. Point it at
+Desktop asset manager for EVE Online - all your plunder in one place. Point it at
 your characters, hit sync, and get one searchable table of everything you own
 across every hangar, ship, can and corp division, plus a chart of what each
 character is worth over time.
@@ -10,36 +10,44 @@ as a portable program folder built with Nuitka.
 
 ## Download
 
-Grab the latest `EVEBooty-<version>-win64.zip` from
-[Releases](https://github.com/littlephish/eve-booty/releases/latest), unzip it
-anywhere you can write to, and run `evebooty.exe`.
+Two ways, both on the
+[Releases](https://github.com/littlephish/eve-booty/releases/latest) page.
 
-It is portable: no installer, nothing written outside the folder you unzipped
-and your own app data directory. To uninstall, delete the folder. Updates are
-handled in-app from Help → Check for updates, so unzip it somewhere you would
-be happy for it to update itself — `Program Files` needs admin rights and is
-the one place this cannot update in place.
+**Installer** (`EVEBooty-<version>-setup.exe`). Run it. Installs per user under
+`%LOCALAPPDATA%\Programs\EVEBooty`, with Start menu and optional desktop
+shortcuts, and an entry in Apps & features to uninstall from. No admin rights
+and no UAC prompt.
 
-Unzip the whole folder and keep it together. `evebooty.exe` needs the DLLs and
-the `evasset\` folder sitting beside it, so running the exe out of the zip, or
+**Portable zip** (`EVEBooty-<version>-win64.zip`). Unzip anywhere you can write
+to and run `evebooty.exe`. Nothing is written outside the folder and your own
+app data directory; to uninstall, delete the folder.
+
+Either way, updates are handled in-app from Help → Check for updates. Both
+layouts are the same program folder, so put the portable copy somewhere you
+would be happy for it to update itself: `Program Files` needs admin rights and
+is the one place it cannot update in place. That is also why the installer
+defaults to a per-user location rather than `Program Files`.
+
+If you take the zip, keep the folder together. `evebooty.exe` needs the DLLs
+and the `evasset\` folder beside it, so running the exe from inside the zip, or
 copying just the exe somewhere else, will not work.
 
-**Windows will warn you the first time.** The build is not code-signed — a
-certificate is a few hundred dollars a year, which this does not have — so
+Your assets, wallet history and settings live in `%APPDATA%\eve-booty` and are
+untouched by either uninstalling or switching between the two.
+
+**Windows will warn you the first time.** The build is not code-signed - a
+certificate is a few hundred dollars a year, which this does not have - so
 SmartScreen shows "Windows protected your PC". Click **More info → Run anyway**.
 If you would rather not take that on faith, the zip is built entirely by
 [GitHub Actions from a tagged commit](.github/workflows/release.yml), on public
-runners, with no local uploads, so you can read exactly what produced it — or
+runners, with no local uploads, so you can read exactly what produced it - or
 run from source instead.
-
-You will also need your own ESI application before you can add a character; see
-[Setup](#setup) below. It takes about a minute.
 
 ## What it does
 
 - One asset table across all your characters and their corps, filtered through a
   single omnibox with a typed grammar (see below) and groupable by location,
-  system, region, owner, category or group — collapsible headers carry live
+  system, region, owner, category or group - collapsible headers carry live
   stacks / m³ / ISK rollups for whatever the filter leaves
 - Container trees flattened, so a module in a can in a ship in a station still
   reports the station
@@ -56,7 +64,7 @@ You will also need your own ESI application before you can add a character; see
   category, group) with its stacks, volume, value and a proportional value bar.
   One click adds the label as a filter chip; stars pin favourites to the top,
   and unresolved "Unknown location" entries fold into one row. When you search
-  for an item by name the rail flips to "where is it" — per-location quantities
+  for an item by name the rail flips to "where is it" - per-location quantities
   of the matched items
 - A Treemap tab showing the same rollups as area, so "most of my ISK is in
   implants" is a glance rather than a read. Group by item group, system,
@@ -65,20 +73,20 @@ You will also need your own ESI application before you can add a character; see
 - A Stockpile tab: target quantities per item, scoped to an owner and to a
   station, system or region, with held / target / shortfall recomputed on every
   sync and the shortfall costed in ISK and m³. What counts as "held" is opt-in
-  per stockpile — assets always, plus sell orders, contracts and in-progress
+  per stockpile - assets always, plus sell orders, contracts and in-progress
   manufacturing if you want them, because "still mine" and "can undock with it
   now" are different questions. A doctrine multiplier scales every target at
   once, and Copy shortfall gives you EVE multibuy text
 - A Structures tab covering the citadels you and your corp can see: fuel
   expiry, reinforcement timers and moon drills, in UTC because that is what CCP
   states timers in. Unanchored ones drop out of it: ESI never announces an
-  unanchor — the structure just stops being reported — so sync marks what went
+  unanchor - the structure just stops being reported - so sync marks what went
   missing rather than deleting it, because assets still recorded there need its
   name to resolve. Their frozen state and fuel clocks are blanked rather than
   counted down to a date nothing will refresh, and an Unanchored tick box brings
   them back when you want to look
-- An estate strip above the table — net worth, assets, liquid ISK, volume,
-  unpriced count and a one-row value map of your top locations — always
+- An estate strip above the table - net worth, assets, liquid ISK, volume,
+  unpriced count and a one-row value map of your top locations - always
   whole-estate, never faceted by the filters below it
 - A row inspector (`Enter`): both price bases, price source and quote age,
   volume, location and slot, plus Where else? / Refresh price / Pin price…
@@ -121,8 +129,8 @@ text) and Appraise (copies the same text and opens
 
 Keyboard: `/` omnibox · `Ctrl+F` build a filter chip · `j`/`k` rows ·
 `space` select · `f` filter to the focused cell · `x` exclude it · `w` where
-else is this item · `Enter` inspector · `g` cycle group-by · `1`–`9` recall
-a saved view, `Ctrl+1`–`9` save one (filter, grouping and rail level
+else is this item · `Enter` inspector · `g` cycle group-by · `1`-`9` recall
+a saved view, `Ctrl+1`-`9` save one (filter, grouping and rail level
 together) · `?` the full key map.
 
 Pins and saved views persist in the database next to the assets they
@@ -134,9 +142,9 @@ Every item carries two prices, both from
 [Fuzzwork's](https://market.fuzzwork.co.uk/api/) Jita 4-4 aggregates in a single
 request:
 
-- **Jita buy** — the highest bid. What you get dumping the lot into standing
+- **Jita buy** - the highest bid. What you get dumping the lot into standing
   orders right now.
-- **Jita sell** — the lowest ask. What you get if you list it and wait.
+- **Jita sell** - the lowest ask. What you get if you list it and wait.
 
 Net worth is tracked on both, so the gap between the two lines on the chart is
 what being in a hurry costs you. Wallet balance, sell orders and buy escrow are
@@ -155,7 +163,7 @@ bid and an ask, so it fills both columns.
 One thing worth knowing, because it is the difference between a correct number
 and a catastrophically wrong one. Sampled on 2026-08-06, 42 of the 60 capital
 hulls had a **one-sided** Jita book, and every titan sat on a lowball bid with no
-asks at all — an Avatar bid at 1,324,000 ISK against a contract average near 170
+asks at all - an Avatar bid at 1,324,000 ISK against a contract average near 170
 billion. Mirroring that bid across to the sell side, which is the sensible thing
 to do for a thin T2 module, would price a titan like a shuttle. So for
 contract-priced groups a one-sided book is discarded outright: contracts decide,
@@ -172,7 +180,7 @@ Those two tables are the only ones the app appends to rather than replaces, so a
 few months in, the local copy holds history CCP will no longer give you. Nothing
 is ever deleted on sync, and re-syncing the same rows is a no-op.
 
-The transactions endpoint has no page parameter — you rewind through it with
+The transactions endpoint has no page parameter - you rewind through it with
 `from_id`. A routine sync stops after one call, because everything in the first
 batch is already stored.
 
@@ -184,9 +192,9 @@ The full list lives in `SCOPES` in `src/evasset/config.py`. What each one buys:
 | --- | --- |
 | `publicData` | Character and corp public info (names, tickers) |
 | `esi-assets.read_assets.v1` | Character assets, plus container names |
-| `esi-assets.read_corporation_assets.v1` | Corp hangars — needs Director in-game |
+| `esi-assets.read_corporation_assets.v1` | Corp hangars - needs Director in-game |
 | `esi-wallet.read_character_wallet.v1` | Balance, journal and transactions |
-| `esi-wallet.read_corporation_wallets.v1` | Corp wallet divisions — needs Accountant or Director |
+| `esi-wallet.read_corporation_wallets.v1` | Corp wallet divisions - needs Accountant or Director |
 | `esi-markets.read_character_orders.v1` | Sell order value and buy escrow |
 | `esi-markets.read_corporation_orders.v1` | The same for the corp |
 | `esi-contracts.read_character_contracts.v1` | Items tied up in your contracts |
@@ -194,8 +202,8 @@ The full list lives in `SCOPES` in `src/evasset/config.py`. What each one buys:
 | `esi-industry.read_character_jobs.v1` | In-production output value |
 | `esi-industry.read_corporation_jobs.v1` | The same for the corp |
 | `esi-characters.read_blueprints.v1` | Blueprint ME/TE/runs |
-| ~~`esi-corporations.read_blueprints.v1`~~ | Not requested — CCP rejects it, see below |
-| ~~`esi-corporations.read_divisions.v1`~~ | Not requested — CCP rejects it, see below |
+| ~~`esi-corporations.read_blueprints.v1`~~ | Not requested - CCP rejects it, see below |
+| ~~`esi-corporations.read_divisions.v1`~~ | Not requested - CCP rejects it, see below |
 | `esi-corporations.read_structures.v1` | Names of structures your corp owns |
 | `esi-universe.read_structures.v1` | Names of player structures you can dock at |
 | `esi-clones.read_clones.v1`, `esi-clones.read_implants.v1` | Reserved for jump clones and implants; requested but not used yet |
@@ -215,7 +223,7 @@ declares any more. The one you want is `esi-wallet.read_corporation_wallets.v1`
 `esi-corporations.read_blueprints.v1` and `esi-corporations.read_divisions.v1`
 are declared valid by ESI's own OpenAPI spec, map to real endpoints, generate
 into every third-party SDK built from that spec, and can be checked in CCP's
-application registration UI — but EVE SSO's `/v2/oauth/authorize` rejects both
+application registration UI - but EVE SSO's `/v2/oauth/authorize` rejects both
 with `invalid_scope` regardless. Confirmed against a live application on
 2026-08-06 and 2026-08-07. This app does not request either by default; both
 are commented out of `SCOPES` in `src/evasset/config.py` with the confirmation
@@ -226,29 +234,29 @@ stacking together:
 
 1. OAuth2 fails the *entire* authorization request over a single bad scope
    ([RFC 6749 §4.1.2.1](https://www.rfc-editor.org/rfc/rfc6749#section-4.1.2.1))
-   — a bad scope does not get silently dropped, it blocks every other scope in
+   - a bad scope does not get silently dropped, it blocks every other scope in
    the same request.
 2. `invalid_scope` is a pre-redirect rejection, so EVE SSO shows its own inline
    error page instead of ever calling back to this app's loopback listener.
-   That means the failure is invisible to us — the login just hangs until our
+   That means the failure is invisible to us - the login just hangs until our
    own timeout, which now explains this possibility in its error message.
 
 Two for two on corp-specific scopes so far is a pattern worth taking seriously,
 not a pair of coincidences. If you hit `invalid_scope` on a corp-scoped entry
-not listed above, that is a new data point, not a surprise — please remove it
+not listed above, that is a new data point, not a surprise - please remove it
 from your application and let it be known so `SCOPES` and this list can be
 updated.
 
 Cost of leaving these two out: corp-owned blueprints (ME/TE/runs on BPOs sitting
 in the corp hangar) are never synced, and wallet journal division numbers show
-as `1`, `2` etc. rather than their in-game names — neither is currently rendered
+as `1`, `2` etc. rather than their in-game names - neither is currently rendered
 by the UI regardless, so there is no visible loss today. Corp assets, wallet
 balance, orders, contracts, jobs and structures do not depend on either scope.
 
 The same thing happened to `esi-universe.read_structures.v1` for a while (see
 [esi-issues #1030](https://github.com/esi/esi-issues/issues/1030) and
 [#1302](https://github.com/esi/esi-issues/issues/1302), both eventually fixed
-after being reported) — worth filing the same way if you want these two fixed
+after being reported) - worth filing the same way if you want these two fixed
 for good.
 
 Everything degrades gracefully. A scope you did not grant, or a corp role you do
@@ -257,34 +265,44 @@ in the Characters dialog instead of failing the sync.
 
 ## Setup
 
-You need your own ESI application. Nobody's client ID is shared here, and CCP
-would rather you didn't.
+Nothing to configure. The app ships with an ESI application already registered,
+so you can add a character straight away.
 
-1. Go to https://developers.eveonline.com/applications, create an application,
-   pick Authentication & API Access, and select the scopes listed in
-   [docs/esi-application.md](docs/esi-application.md), which also records what
-   the shared application is registered with and which two scopes CCP rejects.
-2. Set the callback URL to `http://localhost:8629/callback`. If 8629 is taken on
-   your machine, change the port in Settings and update it on CCP's side to match.
-   8629 was picked to stay clear of other EVE tools that bind a loopback
-   callback: jEveAssets uses 2221, littlephish/eve-strait uses 8635. If the port
-   is busy at login time the app says so by name rather than throwing.
-3. Copy the client ID. You do not need the secret; the app uses PKCE by default.
-
-Then start the app — `evebooty.exe` from the
-[downloaded zip](#download), or from a source checkout:
+Start it - `evebooty.exe` from the [download](#download), or from a source
+checkout:
 
 ```bash
 uv sync
 uv run evebooty
 ```
 
-First launch asks for the client ID, then downloads and imports the Static Data
-Export (about 95 MB, roughly 3 seconds to import). Open Characters…, add a
-character, and hit Sync all.
+First launch downloads and imports the Static Data Export (about 95 MB, roughly
+3 seconds to import). Open Characters…, add a character, and hit Sync all.
+
+### Using your own ESI application (optional)
+
+Recommended if you would rather your API traffic was not pooled with everyone
+else's, or if something on your machine already uses port 8629. Everything
+works without it.
+
+1. Go to https://developers.eveonline.com/applications, create an application,
+   pick Authentication & API Access, and select the scopes listed in
+   [docs/esi-application.md](docs/esi-application.md), which also records what
+   the shared application is registered with and which two scopes CCP rejects.
+2. Set the callback URL to `http://localhost:8629/callback`. If 8629 is taken on
+   your machine, use another port and set the same one in Settings. 8629 was
+   picked to stay clear of other EVE tools that bind a loopback callback:
+   jEveAssets uses 2221, littlephish/eve-strait uses 8635. If the port is busy
+   at login time the app says so by name rather than throwing.
+3. Paste the client ID into Settings → ESI application. Leave the secret blank;
+   the app uses PKCE. Clearing the field puts the bundled one back.
+
+Characters authorised under one client ID do not carry over to another, so
+switching means re-adding them in Characters…. The app tells you which ones
+need it rather than failing the whole sync.
 
 To pull a character's corp hangars and wallets, tick Corp data next to them in the
-Characters dialog. That needs the matching in-game role — Director, or Accountant
+Characters dialog. That needs the matching in-game role - Director, or Accountant
 for the wallet. Without it those calls come back 403 and the dialog says so in the
 Last result column rather than failing the whole sync.
 
@@ -296,7 +314,7 @@ uv run python build.py --onefile  # one file, slower cold start
 ```
 
 A local build stamps itself with whatever `src/evasset/_version.py` says, which
-in a checkout is `0.0.0.dev0` — a source build is not a release and says so.
+in a checkout is `0.0.0.dev0` - a source build is not a release and says so.
 Real version numbers only ever come from a tag; see below.
 
 The SDE is not bundled. The app checks CCP's build number on demand and only
@@ -317,7 +335,7 @@ git push origin v1.0.0
 runs `scripts/set_version.py` with the tag, which rewrites
 `src/evasset/_version.py`. That one file is what `pyproject.toml` reads for the
 package version, what Help → About shows, what goes in the ESI User-Agent, and
-what the Windows exe resource is stamped with — so there is no constant to bump
+what the Windows exe resource is stamped with - so there is no constant to bump
 by hand and no way for the app's idea of its version to drift from the tag on
 the commit that built it. After the build, the workflow reads the version back
 out of the finished exe and fails the release if it does not match the tag.
@@ -327,7 +345,7 @@ than falling back to `0.0.0`. That fallback was worth removing: `0.0.0` compares
 older than every real release, so every installed copy would have been offered a
 "newer" build forever.
 
-Tags with a suffix — `v1.2.3-rc1` — build and publish exactly like a real
+Tags with a suffix - `v1.2.3-rc1` - build and publish exactly like a real
 release but are marked as a GitHub prerelease. The updater asks for
 `/releases/latest`, and that endpoint skips prereleases, so an rc is a full
 dress rehearsal of the pipeline that no existing install will ever be offered.
@@ -340,7 +358,7 @@ dropper behaviour, and the folder layout is what makes an in-place update
 possible at all.
 
 Help → Check for updates asks GitHub for the newest release, downloads the zip
-and hands the swap to `updater/` — a small statically-linked Rust binary. A
+and hands the swap to `updater/` - a small statically-linked Rust binary. A
 running process cannot overwrite its own directory on Windows, so the app
 copies `update.exe` to a temp folder and runs it from there; that is what lets
 the new build replace the whole install, including the installed `update.exe`.
@@ -394,7 +412,7 @@ still work.
 Data lives in your platform's app data directory: `evasset.sqlite` for everything,
 `settings.json` for config. Refresh tokens go to the OS credential store (Windows
 Credential Manager, macOS Keychain, Secret Service on Linux). If there's no
-credential store — a headless Linux box, usually — they fall back to a 0600
+credential store - a headless Linux box, usually - they fall back to a 0600
 `tokens.json` and the app warns you. Treat that file like a password.
 
 ## Versioning against ESI
@@ -429,7 +447,7 @@ EVEBOOTY_DATA_DIR=/tmp/demo uv run evebooty
 
 ## Relationship to jEveAssets
 
-This was written because jEveAssets was believed to be gone. It isn't — the
+This was written because jEveAssets was believed to be gone. It isn't - the
 [repo](https://github.com/GoldenGnu/jeveassets) had commits as recently as
 2026-07-31 and is not archived. If you want the mature tool with fifteen years of
 features, use that one. This exists for people who want a small Python codebase

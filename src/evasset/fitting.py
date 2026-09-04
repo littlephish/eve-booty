@@ -132,7 +132,7 @@ def _render_slots(items: list[sqlite3.Row]) -> list[FitLine]:
             line = "(charge with no module?)"
         if charges:
             loaded = ", ".join(f"{c['quantity']:,} x {_name(c)}" for c in charges)
-            line += f"  —  loaded: {loaded}"
+            line += f"  -  loaded: {loaded}"
         lines.append(FitLine(text=line, type_id=type_id, meta_group_id=meta_group_id))
     return lines
 

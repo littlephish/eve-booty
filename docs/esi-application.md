@@ -2,7 +2,7 @@
 
 What to put in the form at <https://developers.eveonline.com/applications>,
 and the record of what the shared **EVE Booty** application is registered
-with. Registering your own works the same way — see the end.
+with. Registering your own works the same way - see the end.
 
 ## The form
 
@@ -10,7 +10,7 @@ with. Registering your own works the same way — see the end.
 | --- | --- |
 | **Name** | `EVE Booty` |
 | **Connection Type** | Authentication & API Access |
-| **Callback URL** | `http://localhost:8629/callback` — [read this first](#callback-url) |
+| **Callback URL** | `http://localhost:8629/callback` - [read this first](#callback-url) |
 | **Permissions** | [the 16 scopes](#scopes-to-tick) |
 | **Description** | [suggested text](#description) |
 
@@ -78,7 +78,7 @@ esi-corporations.read_divisions.v1
 ```
 
 The form offers both. ESI's own OpenAPI spec declares both. EVE SSO rejects
-both with `invalid_scope` anyway — confirmed against a live application on
+both with `invalid_scope` anyway - confirmed against a live application on
 2026-08-06 and 2026-08-07.
 
 Ticking either breaks every login, because two behaviours compound. OAuth2
@@ -93,7 +93,7 @@ login with it.
 
 ## Callback URL
 
-SSO redirects only to the exact URL registered here — no wildcards, no
+SSO redirects only to the exact URL registered here - no wildcards, no
 flexibility on port or path. It cannot be changed afterwards without
 invalidating every login that depends on it, so both of the following are
 worth settling before a release exists.
@@ -109,7 +109,7 @@ http.server.HTTPServer(("127.0.0.1", settings.callback_port), _CallbackHandler)
 
 On Windows, `localhost` resolves to both `::1` and `127.0.0.1`, and IPv6 wins.
 A browser that tries `[::1]:8629` finds nothing listening there. It works today
-only because browsers fall back to IPv4 — that is grace, not design.
+only because browsers fall back to IPv4 - that is grace, not design.
 [RFC 8252 §7.3](https://www.rfc-editor.org/rfc/rfc8252#section-7.3) recommends
 the IP literal for native apps for exactly this reason.
 
@@ -139,7 +139,7 @@ both the port and the client id in Settings. The app detects a busy port at
 login and names the likely culprit instead of throwing.
 
 If the form accepts more than one callback URL, register a couple of
-alternates — 8630 and 8631 — so the app can try a second port before sending
+alternates - 8630 and 8631 - so the app can try a second port before sending
 anyone off to make their own application. CCP's public documentation does not
 say whether multiple are allowed, so check the form.
 
@@ -161,6 +161,6 @@ was not pooled with everyone else's, or simply if you prefer your own id.
 2. Set Connection Type to **Authentication & API Access**.
 3. Tick the sixteen scopes above, and neither of the two rejected ones.
 4. Set the callback to `http://localhost:8629/callback`, or another port if
-   8629 is busy — then set the matching port in Settings.
+   8629 is busy - then set the matching port in Settings.
 5. Paste the client id into **Settings → ESI application**. Leave the secret
    blank; the app uses PKCE.

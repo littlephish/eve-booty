@@ -81,7 +81,7 @@ class CharactersDialog(QDialog):
         if using_fallback_store():
             text += (
                 "  No OS credential store was found on this machine, so refresh "
-                "tokens are kept in a local file — treat it as a password."
+                "tokens are kept in a local file - treat it as a password."
             )
         blurb = QLabel(text)
         blurb.setWordWrap(True)

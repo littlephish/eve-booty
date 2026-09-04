@@ -18,8 +18,6 @@ def app():
 @pytest.fixture
 def window(app):
     settings = Settings.load()
-    # Non-empty so __init__ does not arm the first-run hint, which is a modal
-    # box on a 400ms timer and would sit there waiting for a click.
     settings.client_id = "test-client-id"
     win = MainWindow(settings)
     yield win
