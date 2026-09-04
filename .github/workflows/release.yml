@@ -111,6 +111,7 @@ jobs:
             --copyright="EVE Booty" `
             --output-dir=build `
             --output-filename=evebooty.exe `
+            --output-folder-name=EVEBooty `
             src/evasset/__main__.py
 
       # The exe is the thing users actually run and the thing updater.py reads
@@ -122,8 +123,8 @@ jobs:
       - name: Verify the exe carries the tag's version
         shell: pwsh
         run: |
-          $dist = Get-ChildItem build -Directory -Filter *.dist | Select-Object -First 1
-          $exe = Join-Path $dist.FullName "evebooty.exe"
+          $exe = "build\EVEBooty.dist\evebooty.exe"
+          if (-not (Test-Path $exe)) { throw "Nuitka produced no program folder at build\EVEBooty.dist" }
           $stamped = (Get-Item $exe).VersionInfo.FileVersion
           $expected = "${{ steps.ver.outputs.file_version }}"
           Write-Host "tag=${{ github.ref_name }} expected=$expected exe=$stamped"
@@ -146,10 +147,12 @@ jobs:
       - name: Stage the program folder
         shell: pwsh
         run: |
-          $dist = Get-ChildItem build -Directory -Filter *.dist | Select-Object -First 1
-          if (-not $dist) { throw "Nuitka produced no program folder" }
+          # A known path rather than the first *.dist that turns up:
+          # --output-folder-name fixes the name, so a glob here could only ever
+          # pick up something unexpected.
+          if (-not (Test-Path build\EVEBooty.dist)) { throw "Nuitka produced no program folder" }
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item $dist.FullName dist\EVEBooty -Recurse
+          Copy-Item build\EVEBooty.dist dist\EVEBooty -Recurse
           Copy-Item updater\target\release\update.exe dist\EVEBooty\update.exe
           # Assert the shape the updater relies on, here, where the error is
           # readable -- not on a user's machine mid-swap.

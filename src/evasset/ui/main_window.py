@@ -34,6 +34,32 @@ from .treemap_view import TreemapView
 from .wallet_view import WalletView
 from .workers import RepriceJob, SdeUpdateJob, SnapshotJob, SyncJob, UpdateCheckJob
 
+# Who to credit in About, linked to their public character page. These are
+# in-game character names given deliberately as attribution -- the one place
+# AGENTS.md's "never commit a real character name" rule does not apply, because
+# nothing here is anybody's account data. Verified against ESI
+# /characters/{id}/ rather than typed from memory: a misspelled name next to a
+# working link is worse than no credit.
+AUTHORS = (
+    ("LittlePhish", 972237621),
+    ("Ulatlar Brimfire", 94872713),
+)
+EVEWHO = "https://evewho.com/character/{id}"
+
+
+def _author_links() -> str:
+    """The credit line, each name linking to its public character page.
+
+    QMessageBox's label already has openExternalLinks set and
+    LinksAccessibleByMouse in its interaction flags, so these open in a real
+    browser without any extra wiring -- checked rather than assumed, because a
+    credit that renders as blue text and does nothing when clicked is worse
+    than plain text.
+    """
+    return ", ".join(
+        f'<a href="{EVEWHO.format(id=cid)}">{name}</a>' for name, cid in AUTHORS
+    )
+
 
 class MainWindow(QMainWindow):
     def __init__(self, settings: Settings):
@@ -397,7 +423,8 @@ class MainWindow(QMainWindow):
             f"<p>Version: {updater.version_string()}<br>"
             f"Database: <code>{DB_PATH}</code><br>"
             f"SDE build: {queries.sde_build(self.conn)}</p>"
-            f'<p><a href="{PROJECT_URL}">{PROJECT_URL}</a></p>'
+            f"<p>Built by {_author_links()}<br>"
+            f'<a href="{PROJECT_URL}">{PROJECT_URL}</a></p>'
             "<p>Item and market data from CCP's ESI and Static Data Export. "
             "Jita aggregates from Fuzzwork.<br>"
             "EVE Online and all related material are property of CCP hf.</p>",

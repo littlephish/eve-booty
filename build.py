@@ -84,6 +84,11 @@ def main() -> int:
         "--nofollow-import-to=tkinter",
         f"--output-dir={args.output}",
         "--output-filename=evebooty",
+        # Without this the program folder is named after the entry point
+        # *file*, so it comes out as "__main__.dist" -- which says nothing
+        # about what it contains and is not something to hand anyone.
+        # --output-filename only names the exe inside it.
+        "--output-folder-name=EVEBooty",
         "--company-name=LittlePhish",
         "--product-name=EVE Booty",
         f"--product-version={file_version}",

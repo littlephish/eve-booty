@@ -87,6 +87,19 @@ synthetic the first time.
 If you need realistic-looking data, take it from `scripts/seed_demo.py` or
 invent it. Never paste from a running instance.
 
+### The one exception: author credit
+
+`AUTHORS` in `ui/main_window.py` holds the maintainers' own character names and
+ids, shown in Help → About and linked to their public character pages. That is
+attribution the authors chose to publish about themselves, not account data
+about a user, so it is not covered by the rule above and should not be
+"cleaned up".
+
+The distinction is what the name is next to. A character name beside a net
+worth figure and a list of stations says where somebody keeps their things. A
+character name in a credit line says who wrote the software. Only the first is
+the problem this section exists to prevent.
+
 ---
 
 ## 3. Never commit credentials or the local database

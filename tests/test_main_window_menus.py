@@ -164,3 +164,37 @@ def test_the_update_dialog_handles_a_release_with_no_notes(app):
     dialog = _UpdateDialog(Release(version="v2", url="u", current="1"))
     assert "No release notes" in dialog.findChild(QTextBrowser).toPlainText()
     dialog.deleteLater()
+
+
+def test_about_credits_both_authors_with_working_links(window, monkeypatch):
+    """Names verified against ESI /characters/{id}/, not typed from memory --
+    a misspelled name beside a working link is worse than no credit."""
+    from PySide6.QtWidgets import QMessageBox
+
+    from evasset.ui.main_window import AUTHORS
+
+    shown: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "about", staticmethod(lambda parent, title, text: shown.append(text))
+    )
+    window.about()
+
+    body = shown[0]
+    assert "Built by" in body
+    for name, character_id in AUTHORS:
+        assert name in body
+        assert f"https://evewho.com/character/{character_id}" in body
+
+
+def test_the_author_ids_are_plausible_character_ids():
+    """A typo'd id links to somebody else's character, which is the failure
+    nobody would notice."""
+    from evasset.ui.main_window import AUTHORS
+
+    assert len(AUTHORS) == 2
+    for name, character_id in AUTHORS:
+        assert name.strip() == name and name
+        # EVE character ids are >= 90000000; anything smaller is a corp,
+        # an alliance or a mistake.
+        assert isinstance(character_id, int)
+        assert character_id > 90_000_000
