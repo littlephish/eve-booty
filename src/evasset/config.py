@@ -23,7 +23,7 @@ USER_AGENT_CONTACT = os.environ.get("EVASSET_CONTACT", "")
 # Where this tool lives, as sent to ESI in the User-Agent and shown in About.
 # Kept in step with updater.UPDATE_REPO, which pulls releases from the same
 # repository; a test asserts they do not drift apart.
-PROJECT_REPO = "littlephish/eve-assets"
+PROJECT_REPO = "littlephish/eve-booty"
 PROJECT_URL = f"https://github.com/{PROJECT_REPO}"
 
 _dirs = PlatformDirs(APP_NAME, APP_AUTHOR, roaming=True)

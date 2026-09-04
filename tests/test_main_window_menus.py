@@ -125,4 +125,4 @@ def test_about_reports_the_version(window, monkeypatch):
     assert len(shown) == 1
     body = shown[0]
     assert evasset.__version__ in body
-    assert "github.com/littlephish/eve-assets" in body
+    assert "github.com/littlephish/eve-booty" in body

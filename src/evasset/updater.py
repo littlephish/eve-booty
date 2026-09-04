@@ -45,7 +45,7 @@ from .config import USER_AGENT_CONTACT
 # Where releases come from, and what the release workflow names things. The
 # workflow builds "EVEBooty-<version>-win64.zip"; the "win" in that name is
 # load-bearing here, and a comment says so at both ends.
-UPDATE_REPO = os.environ.get("EVEBOOTY_UPDATE_REPO", "littlephish/eve-assets")
+UPDATE_REPO = os.environ.get("EVEBOOTY_UPDATE_REPO", "littlephish/eve-booty")
 EXE_NAME = "evebooty.exe"
 HELPER_NAME = "update.exe"
 

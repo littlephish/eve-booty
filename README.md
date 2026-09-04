@@ -11,7 +11,7 @@ as a portable program folder built with Nuitka.
 ## Download
 
 Grab the latest `EVEBooty-<version>-win64.zip` from
-[Releases](https://github.com/littlephish/eve-assets/releases/latest), unzip it
+[Releases](https://github.com/littlephish/eve-booty/releases/latest), unzip it
 anywhere you can write to, and run `evebooty.exe`.
 
 It is portable: no installer, nothing written outside the folder you unzipped
