@@ -90,15 +90,31 @@ invent it. Never paste from a running instance.
 ### The one exception: author credit
 
 `AUTHORS` in `ui/main_window.py` holds the maintainers' own character names and
-ids, shown in Help → About and linked to their public character pages. That is
-attribution the authors chose to publish about themselves, not account data
-about a user, so it is not covered by the rule above and should not be
-"cleaned up".
+ids, shown in Help → About and linked to their public character pages. This is
+**not** covered by the rule above and must not be "cleaned up".
 
-The distinction is what the name is next to. A character name beside a net
-worth figure and a list of stations says where somebody keeps their things. A
-character name in a credit line says who wrote the software. Only the first is
-the problem this section exists to prevent.
+The rule protects a *user's* account data. It was never about the maintainer's
+identity, which this project publishes on purpose in half a dozen places
+already:
+
+| Where | What |
+| --- | --- |
+| `LICENSE` | `Copyright (c) 2026 LittlePhish` |
+| `config.PROJECT_REPO` / `PROJECT_URL` | `littlephish/eve-booty` |
+| `updater.UPDATE_REPO` | where releases are fetched from |
+| `build.py`, `release.yml` | `--company-name=LittlePhish`, baked into the exe |
+| `README.md` | the Releases download link |
+| The ESI User-Agent | `EVEBooty/x.y.z (+https://github.com/littlephish/eve-booty)`, sent to CCP on every single request |
+
+The repository URL *is* the maintainer's handle. Treating the same name as a
+secret in the About box, while it ships inside the binary and goes to CCP with
+every API call, would not protect anything -- it would just make the rule look
+arbitrary and get it ignored where it matters.
+
+The distinction is what the name sits next to. Beside a net worth figure and a
+list of stations, a character name says where somebody keeps their things.
+In a credit line it says who wrote the software. Only the first is the problem
+this section exists to prevent.
 
 ---
 
