@@ -127,7 +127,8 @@ def test_adding_a_chip_narrows_the_table_and_counts_the_filter(view):
     view.omnibox.add_chip("owner", "Alt")
 
     assert items(view) == ["Damage Control II"]
-    assert view.state_label.text() == "1 filter · 1 of 4 stacks"
+    # Filter count trails the stacks so it sits beside the Clear all pill.
+    assert view.state_label.text() == "1 of 4 stacks · 1 filter"
     assert not view.clear_all_btn.isHidden()
 
     view.clear_all_btn.click()
@@ -484,3 +485,24 @@ def test_a_reload_preserves_which_groups_the_user_collapsed(view):
     }
     assert labels[collapsed_label] is False, "the collapsed group must stay collapsed"
     assert any(state for state in labels.values()), "the open group must stay open"
+
+
+def test_ctrl_f_opens_the_builder_from_inside_the_omnibox(view, app):
+    """Reported defect: the omnibox and the view each bound Ctrl+F with a
+    child-covering context, so with the focus in the line edit both matched
+    and Qt fired neither -- the builder refused to open from the very field
+    people type in. Exactly one binding may exist, and a real keypress from
+    the edit must open the card."""
+    from PySide6.QtGui import QKeySequence, QShortcut
+    from PySide6.QtTest import QTest
+
+    bound = [s for s in view.findChildren(QShortcut) if s.key() == QKeySequence("Ctrl+F")]
+    assert len(bound) == 1, f"Ctrl+F is bound {len(bound)} times; two is an ambiguous no-op"
+
+    view.show()
+    app.processEvents()
+    view.omnibox.edit.setFocus()
+    app.processEvents()
+    QTest.keyClick(view.omnibox.edit, Qt.Key_F, Qt.ControlModifier)
+    app.processEvents()
+    assert view.omnibox._draft is not None, "Ctrl+F from the omnibox must open the builder"

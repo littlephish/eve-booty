@@ -233,7 +233,7 @@ class _ValueMap(QWidget):
 
 class EstateStrip(QWidget):
     """Six cells in a row: net worth, assets, liquid ISK, volume, unpriced
-    count with a "show" badge, and the value map."""
+    count with a "SHOW" badge, and the value map."""
 
     unpriced_clicked = Signal()
     location_clicked = Signal(str)  # value-map segment label
@@ -269,7 +269,16 @@ class EstateStrip(QWidget):
         unpriced_cell = _StatCell("Unpriced")
         self._unpriced = unpriced_cell
         self.unpriced_btn = QToolButton()
-        self.unpriced_btn.setText("show")
+        self.unpriced_btn.setText("SHOW")
+        # Text only, explicitly: the default icon-only mode reserves no space
+        # for an icon here but still lays the label out as an icon button,
+        # which is what left the word sitting off-centre in its pill.
+        self.unpriced_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        # One point smaller than the body text: all-caps at full size shouts
+        # louder than the count it sits beside.
+        font = self.unpriced_btn.font()
+        font.setPointSizeF(max(font.pointSizeF() - 1.0, 6.0))
+        self.unpriced_btn.setFont(font)
         self.unpriced_btn.setCursor(Qt.PointingHandCursor)
         self.unpriced_btn.setToolTip("Filter the table to unpriced stacks")
         self.unpriced_btn.setVisible(False)  # nothing to show until set_data says so

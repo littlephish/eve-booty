@@ -429,3 +429,62 @@ def test_item_tokens_complete_in_the_main_field(app):
 
     assert lookups, "an item: token must trigger a value lookup"
     b.deleteLater()
+
+
+# ---------------------------------------------------------------- wrapping
+_STATIONS = [
+    "Amarr VIII (Oris) - Emperor Family Academy",
+    "Rens VI - Moon 8 - Brutor Tribe Treasury",
+    "Jita IV - Moon 4 - Caldari Navy Assembly Plant",
+    "Hek VIII - Moon 12 - Boundless Creation Factory",
+    "Dodixie IX - Moon 20 - Federation Navy Assembly Plant",
+    "Sobaseki VII - Moon 1 - Caldari Navy Assembly Plant",
+]
+
+
+def test_many_chips_wrap_instead_of_widening_the_field(box):
+    """Six station chips once demanded a row wider than a full-screen window
+    and shoved the rail and export button off the right edge. The field's
+    minimum width must stay independent of how many chips it holds, and at a
+    realistic width the chips must occupy several lines."""
+    box.add_chip("location", _STATIONS[0])
+    one_line = box.heightForWidth(1400)
+
+    for station in _STATIONS[1:]:
+        box.add_chip("location", station)
+
+    chip_widths = [widget.minimumSizeHint().width() for _chip, widget in box._chips]
+    margins = box._row.contentsMargins()
+    # Bounded by the widest single chip plus the field's own margins, never
+    # by the chips' sum. The bound is tight: the layout reads exactly these
+    # minimum sizes, so equality is the expected outcome.
+    assert box.minimumSizeHint().width() <= max(chip_widths) + margins.left() + margins.right()
+    assert box.minimumSizeHint().width() < sum(chip_widths)
+    assert box.heightForWidth(1400) > one_line
+    # 6000 px is wider than six station chips laid end to end even in the
+    # offscreen platform's wide fallback glyphs.
+    assert box.heightForWidth(1400) > box.heightForWidth(6000) == one_line
+
+
+def test_the_edit_keeps_a_typable_width_and_the_hint_stays_beside_it(app, box):
+    """After wrapping, the line edit must still be wide enough to type in and
+    the keyboard hint must sit on the edit's own line, at its right -- an
+    edit squeezed to a few pixels at the end of a chip line would be the same
+    bug in a smaller frame."""
+    for station in _STATIONS:
+        box.add_chip("location", station)
+    box.resize(1400, box.heightForWidth(1400))
+    box.show()
+    app.processEvents()
+
+    chip_widgets = [widget for _chip, widget in box._chips]
+    assert box.edit.width() >= box._row._fill_min_width
+    assert box.edit.geometry().top() > chip_widgets[0].geometry().top()
+    # Same line, allowing for the layout centring two widgets of different
+    # heights on it.
+    assert box.hint.geometry().top() == pytest.approx(box.edit.geometry().top(), abs=6)
+    assert box.hint.geometry().left() > box.edit.geometry().right()
+    # Every chip stays inside the field's own frame.
+    for widget in chip_widgets:
+        assert widget.geometry().right() <= box.width()
+    box.hide()

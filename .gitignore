@@ -19,3 +19,7 @@ uv.lock
 
 # Rust updater build output
 updater/target/
+
+# Local-only agent guidance and worktrees; never part of the repository.
+CLAUDE.md
+.claude/

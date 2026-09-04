@@ -178,7 +178,7 @@ def test_every_chip_kind_has_its_own_wash_and_none_collide():
 
 
 def test_the_unpriced_badge_text_inverts_readably_against_its_warning_fill():
-    """The estate strip's "show" pill fills with the WARN colour and inverts
+    """The estate strip's "SHOW" pill fills with the WARN colour and inverts
     its text: white on the light theme's dark amber, black on the dark
     theme's bright amber. Both directions must clear AA or the one figure
     flagged as untrustworthy becomes the one figure you cannot read."""
@@ -198,6 +198,54 @@ def test_chip_tint_prefers_negation_and_survives_unknown_kinds():
     assert pal.chip_tint("owner", negated=True) in pal.CHIP_NEGATED
     assert pal.chip_tint("owner") in pal.CHIP_KIND_TINTS["owner"]
     assert pal.chip_tint("from-the-future") in pal.CHIP_ACCENT
+
+
+def test_the_neutral_pill_keeps_default_text_readable_in_both_themes():
+    """The state row's "Clear all" sits default theme text on the pill fill,
+    in every state -- the deepened hover and pressed fills included, since a
+    button is read while it is being pressed."""
+    from PySide6.QtGui import QColor, QPalette
+
+    for dark, text in ((False, "#000000"), (True, "#FFFFFF")):
+        theme = QPalette()
+        theme.setColor(QPalette.Base, QColor("#1E1E1E" if dark else "#FFFFFF"))
+        for fill in pal.pill_fills(theme):
+            assert contrast(text, fill) >= AA_NORMAL, (
+                f"{text} on {fill} is {contrast(text, fill):.2f}:1"
+            )
+
+
+def test_the_neutral_pill_is_a_visible_step_off_the_window_and_deepens_on_hover():
+    """The whole point of the pill is to stop blending in: its rest fill must
+    be a measurable step off both theme backgrounds, and hover and press must
+    each move it further from the background, not closer -- a hover fill that
+    drifted back toward the window would make the button fade under the
+    pointer, the exact moment it should look most solid.
+
+    1.4:1 is not a WCAG figure; WCAG has no floor for a fill against its own
+    background. It is the floor the first candidate light grey failed:
+    #D0D5DB measured 1.35:1 on the light alternate base and still read as
+    part of the window, so the light grey was darkened until it cleared 1.4
+    (2026-09-01). The dark grey cleared it from the start."""
+    from PySide6.QtGui import QColor, QPalette
+
+    for backgrounds in (LIGHT_BACKGROUNDS, DARK_BACKGROUNDS):
+        theme = QPalette()
+        theme.setColor(QPalette.Base, QColor(backgrounds[0]))
+        rest, hover, pressed = pal.pill_fills(theme)
+        for background in backgrounds:
+            at_rest = contrast(rest, background)
+            assert at_rest >= 1.4, f"{rest} on {background} is only {at_rest:.2f}:1"
+            assert contrast(hover, background) > at_rest
+            assert contrast(pressed, background) > contrast(hover, background)
+
+
+def test_the_pill_stylesheet_carries_every_state_it_promises():
+    sheet = pal.pill_stylesheet("QPushButton")
+    for state in ("QPushButton {", "QPushButton:hover", "QPushButton:pressed",
+                  "QPushButton:focus"):
+        assert state in sheet
+    assert "rgba" not in sheet, "fills are precomputed solids, see _blend"
 
 
 # WCAG 2.1 section 1.4.11: graphical objects need 3:1, not the 4.5:1 text
