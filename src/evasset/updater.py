@@ -127,6 +127,24 @@ def current_version() -> str | None:
         return None
 
 
+def version_string() -> str:
+    """The version to show a user, and the one to quote in a bug report.
+
+    Normally just __version__, which scripts/set_version.py stamped from the
+    release tag before Nuitka compiled it. The exe's own version resource is
+    consulted only to catch the case that actually matters: the two
+    disagreeing, which means the stamping step did not run and the build is
+    misreporting itself. Surfacing that in About beats discovering it from a
+    user who says they are on a version that was never released.
+    """
+    from . import __version__
+
+    stamped = current_version()
+    if stamped and parse_version(stamped) != parse_version(__version__):
+        return f"{__version__} (exe resource {stamped})"
+    return __version__
+
+
 def can_update() -> bool:
     """Every condition that has to hold before we even ask GitHub."""
     return (

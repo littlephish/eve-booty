@@ -105,3 +105,24 @@ def test_starting_the_same_kind_twice_only_runs_once(window, monkeypatch):
     assert window._submit("prices", "Update prices", object()) is not None
     assert window._submit("prices", "Update prices", object()) is None
     assert started == ["prices"]
+
+
+def test_about_reports_the_version(window, monkeypatch):
+    """A user filing a bug has to be able to say which build they are on.
+    About used to show the database path and the SDE build and no app version
+    at all, while __version__ sat in __init__.py referenced by nothing.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    import evasset
+
+    shown: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "about", staticmethod(lambda parent, title, text: shown.append(text))
+    )
+    window.about()
+
+    assert len(shown) == 1
+    body = shown[0]
+    assert evasset.__version__ in body
+    assert "github.com/littlephish/eve-assets" in body

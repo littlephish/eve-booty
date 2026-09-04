@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import db, queries, updater
-from ..config import DB_PATH, Settings
+from ..config import DB_PATH, PROJECT_URL, Settings
 from ..esi import TokenCache
 from .assets_view import AssetsView
 from .async_query import AsyncQuery
@@ -396,8 +396,10 @@ class MainWindow(QMainWindow):
             "<h3>EVE Booty</h3>"
             "<p>Everything you own in New Eden, counted and valued: "
             "cross-character asset inventory and net worth tracking.</p>"
-            f"<p>Database: <code>{DB_PATH}</code><br>"
+            f"<p>Version: {updater.version_string()}<br>"
+            f"Database: <code>{DB_PATH}</code><br>"
             f"SDE build: {queries.sde_build(self.conn)}</p>"
+            f'<p><a href="{PROJECT_URL}">{PROJECT_URL}</a></p>'
             "<p>Item and market data from CCP's ESI and Static Data Export. "
             "Jita aggregates from Fuzzwork.<br>"
             "EVE Online and all related material are property of CCP hf.</p>",

@@ -14,6 +14,7 @@ goes stale every patch day.
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -22,12 +23,40 @@ ROOT = Path(__file__).parent
 ENTRY = ROOT / "src" / "evasset" / "__main__.py"
 
 
+def version() -> str:
+    """Whatever src/evasset/_version.py says, read without importing the
+    package (which would drag in PySide6 just to learn a string).
+
+    A local build therefore stamps the .dev version a checkout carries, not a
+    release number -- releases are built by CI, which rewrites that file from
+    the tag first. Nothing here should ever hardcode a version: this used to
+    say 0.1.0 and stayed saying it.
+    """
+    text = (ROOT / "src" / "evasset" / "_version.py").read_text(encoding="utf-8")
+    match = re.search(r"""__version__\s*=\s*["'](?P<v>[^"']+)["']""", text)
+    if match is None:
+        raise SystemExit("could not read __version__ from src/evasset/_version.py")
+    return match.group("v")
+
+
+def numeric(version_text: str) -> str:
+    """Windows version resources are four integers and reject "0.0.0.dev0",
+    so the numeric core is padded out and any suffix dropped -- the same rule
+    scripts/set_version.py applies for CI builds."""
+    core = re.match(r"\d+(?:\.\d+){0,3}", version_text)
+    parts = (core.group(0) if core else "0").split(".")
+    return ".".join(parts + ["0"] * (4 - len(parts)))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--onefile", action="store_true", help="produce a single exe")
     parser.add_argument("--console", action="store_true", help="keep the console window")
     parser.add_argument("--output", default="dist", help="output directory")
     args = parser.parse_args()
+
+    app_version = version()
+    file_version = numeric(app_version)
 
     cmd = [
         sys.executable, "-m", "nuitka",
@@ -44,9 +73,10 @@ def main() -> int:
         "--nofollow-import-to=tkinter",
         f"--output-dir={args.output}",
         "--output-filename=evebooty",
-        "--company-name=EVE Booty",
+        "--company-name=LittlePhish",
         "--product-name=EVE Booty",
-        "--product-version=0.1.0",
+        f"--product-version={file_version}",
+        f"--file-version={file_version}",
         "--file-description=EVE Booty - EVE Online asset manager",
     ]
     if args.onefile:

@@ -20,6 +20,12 @@ APP_NAME = "evasset"
 APP_AUTHOR = "evasset"
 USER_AGENT_CONTACT = os.environ.get("EVASSET_CONTACT", "")
 
+# Where this tool lives, as sent to ESI in the User-Agent and shown in About.
+# Kept in step with updater.UPDATE_REPO, which pulls releases from the same
+# repository; a test asserts they do not drift apart.
+PROJECT_REPO = "littlephish/eve-assets"
+PROJECT_URL = f"https://github.com/{PROJECT_REPO}"
+
 _dirs = PlatformDirs(APP_NAME, APP_AUTHOR, roaming=True)
 
 DATA_DIR = Path(os.environ.get("EVASSET_DATA_DIR") or _dirs.user_data_dir)
@@ -199,7 +205,17 @@ class Settings:
 
 
 def user_agent(settings: Settings | None = None) -> str:
-    """ESI asks every client to identify itself and give a contact address."""
+    """ESI asks every client to identify itself and give a contact address.
+
+    The version comes from the package (stamped from the release tag by
+    scripts/set_version.py) rather than a literal, so a build cannot report a
+    version it is not. The URL has to be somewhere CCP can actually reach a
+    human: this is the header they use to work out who to contact before they
+    rate-limit or block a misbehaving third-party tool, so a placeholder is
+    worse than useless.
+    """
+    from . import __version__
+
     contact = (settings.contact_email if settings else "") or USER_AGENT_CONTACT
-    base = "evasset/0.1.0 (+https://github.com/local/evasset)"
+    base = f"EVEBooty/{__version__} (+{PROJECT_URL})"
     return f"{base} contact:{contact}" if contact else base

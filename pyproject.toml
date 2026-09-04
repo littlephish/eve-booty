@@ -1,6 +1,8 @@
 [project]
 name = "eve-booty"
-version = "0.1.0"
+# Read from src/evasset/_version.py, which scripts/set_version.py rewrites
+# from the release tag. One source of truth, stamped by CI, never bumped here.
+dynamic = ["version"]
 description = "EVE Booty - cross-character EVE Online asset inventory and net worth tracker"
 requires-python = ">=3.10"
 dependencies = [
@@ -17,6 +19,9 @@ evebooty = "evasset.__main__:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/evasset/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/evasset"]
