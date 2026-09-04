@@ -330,6 +330,24 @@ it - `updater.pick_asset()` matches on that.
 **Do not commit or push unless asked to.** Do not force-push to `main` without
 explicit instruction.
 
+**Never push a release tag without asking first.** A tag is not an ordinary
+push: it starts a build that publishes to the world, becomes what
+`/releases/latest` serves, and is what every installed copy is offered by the
+in-app updater. Two tags have already had to be abandoned for shipping
+something they should not have.
+
+Before tagging, show the human:
+
+- the version you propose and the commit it points at
+- **draft release notes**: what changed since the previous tag, in plain terms,
+  grouped as fixes / changes / internal. `generate_release_notes` fills the
+  body from commit subjects, which is a changelog rather than something a user
+  can read, so offer wording they can paste over it
+- anything in the diff a user would notice, especially behaviour that changes
+  under them
+
+Then wait. Tag only when they say so.
+
 ---
 
 ## 8. Where the sensitive paths are
