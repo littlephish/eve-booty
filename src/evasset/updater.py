@@ -106,10 +106,35 @@ def can_write_install_dir() -> bool:
 
 
 def current_version() -> str | None:
-    """The version the release build stamped into the exe, or None from
-    source. None is what disables the whole feature outside a real install."""
+    """What this build is, or None if that genuinely cannot be established.
+
+    __version__ first, because scripts/set_version.py writes it from the
+    release tag before Nuitka compiles anything -- it is the tag, exactly, and
+    reading it needs no Windows API, no ctypes and no frozen detection.
+
+    The exe's version resource is the fallback, and it used to be the only
+    source. That was the bug behind "v0.1.2 is available. You have 0.": the
+    resource read returned None on the real build, check() substituted "0",
+    and "0" parses to (0,) which compares older than every release -- so a
+    fully up-to-date install was offered the version it was already running,
+    downloaded 45 MB, swapped itself for an identical copy, and offered it
+    again on the next check.
+    """
     if not (is_frozen() and sys.platform == "win32"):
         return None
+
+    from . import __version__
+
+    # A stamped release version. "0.0.0.dev0" is what a source checkout
+    # carries, and that is not an answer -- fall through to the resource.
+    if __version__ and not __version__.startswith("0.0.0.dev"):
+        return __version__
+
+    return _version_from_exe()
+
+
+def _version_from_exe() -> str | None:
+    """The version resource Nuitka stamped into the binary, best effort."""
     try:
         import ctypes
 
@@ -183,7 +208,14 @@ def pick_asset(assets: list[dict]) -> dict | None:
 
 def check(timeout: float = 15.0) -> Release | None:
     """Ask GitHub for the newest release. None means "nothing newer"."""
-    current = current_version() or "0"
+    current = current_version()
+    if is_frozen() and not current:
+        # Refusing to answer beats answering "0". An unknown current version
+        # used to mean every release looked newer, which is an update loop
+        # rather than an update. If a build cannot say what it is, it has no
+        # business deciding it is out of date.
+        return None
+    current = current or "0"
     url = _API.format(repo=UPDATE_REPO)
     headers = {"User-Agent": _user_agent(), "Accept": "application/vnd.github+json"}
     with httpx.Client(timeout=timeout, follow_redirects=True) as client:
