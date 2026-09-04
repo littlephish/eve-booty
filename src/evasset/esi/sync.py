@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from .. import db
 from ..config import ASSET_SAFETY_LOCATION_ID, Settings
+from .auth import AuthError
 from .client import ESIClient, ESIError
 
 Progress = Callable[[str, int], None]
@@ -27,6 +28,24 @@ def _now() -> str:
 
 def _has(scopes: list[str], scope: str) -> bool:
     return scope in scopes
+
+
+def _auth_failure_reason(exc: Exception) -> str:
+    """One line a user can act on, out of an SSO token failure.
+
+    invalid_grant is the common one and it has a specific cause worth naming:
+    a refresh token is bound to the ESI application that issued it, so
+    changing the client id invalidates every login stored under the old one.
+    Nothing in Settings looks wrong, which is exactly why it needs saying.
+    """
+    text = str(exc)
+    if "invalid_grant" in text:
+        return (
+            "sign-in has expired -- re-add this character in Characters… "
+            "(a saved login stops working when the ESI client ID changes, "
+            "because the refresh token belongs to the application that issued it)"
+        )
+    return f"sign-in failed -- re-add this character in Characters… ({text.splitlines()[0]})"
 
 
 class SyncError(RuntimeError):
@@ -72,6 +91,38 @@ class Syncer:
 
     # ------------------------------------------------------------------ main
     def sync_character(
+        self,
+        row: sqlite3.Row,
+        progress: Progress | None = None,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> list[str]:
+        """Sync one character. Never raises for that character alone.
+
+        A refresh token SSO will not exchange is a fact about this character,
+        not about the endpoint that happened to notice. It used to escape as
+        an AuthError -- which is a RuntimeError, so the per-step `except
+        ESIError` below never saw it -- and killed the entire run from
+        whichever character came first alphabetically. Every character after
+        it was skipped without being mentioned, which is a bad way to find out
+        that one login of twenty had lapsed.
+
+        Now it is recorded against the character and the run carries on. The
+        remaining nineteen are worth syncing, and the one that failed is named
+        rather than left to be deduced from a traceback.
+        """
+        try:
+            return self._sync_character(row, progress, should_stop)
+        except AuthError as exc:
+            message = f"{row['name']}: {_auth_failure_reason(exc)}"
+            self.conn.execute(
+                "UPDATE characters SET last_sync_at=?, last_error=? WHERE character_id=?",
+                (_now(), message, row["character_id"]),
+            )
+            if progress:
+                progress(f"{row['name']}: sign-in expired", 100)
+            return [message]
+
+    def _sync_character(
         self,
         row: sqlite3.Row,
         progress: Progress | None = None,
