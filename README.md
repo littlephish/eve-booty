@@ -7,6 +7,10 @@ character is worth over time.
 
 ![Filtering the Assets tab down to one ship and opening its fit](docs/omnibox-to-fit.gif)
 
+**Abyssal item search**
+
+![Filtering to abyssal modules, inspecting one, then narrowing Heat Sinks by three rolled stats](docs/abyssal-search.gif)
+
 Python 3.10+, PySide6, SQLite. Runs from source with `uv`, and ships for Windows
 as a portable program folder built with Nuitka.
 
