@@ -53,10 +53,12 @@ run from source instead.
   stacks / m³ / ISK rollups for whatever the filter leaves
 - Container trees flattened, so a module in a can in a ship in a station still
   reports the station
-- Items sitting in Asset Safety show up labelled as such rather than as an
-  unresolvable location -- ESI's asset endpoint gives Asset Safety a fixed
-  location id (2004) that is not a real station, system or structure, so it
-  needs its own case rather than an ESI lookup that would just 404
+- `is:safety` finds everything in asset safety, including inside the wraps.
+  Delivered safety arrives as an "Asset Safety Wrap" parked in an ordinary NPC
+  station, so "at this station" cannot be the test, and the contents nest two
+  deep because a ship in a wrap keeps its modules inside the ship. Items still
+  in transit carry ESI's fixed location id (2004) instead, which is not a real
+  station, system or structure, and both cases are matched
 - Right-click a ship and View fit to see everything on it: fitted modules and
   loaded charges (paired up even though ESI reports both under the same slot),
   drones, fighters, cargo, fleet hangar and every specialized hold
