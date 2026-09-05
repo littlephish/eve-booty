@@ -334,7 +334,56 @@ def _quote_value(value: str) -> str:
     return f'"{escaped}"'
 
 
-def parse(raw: str) -> FilterSpec:
+def _vocabulary(known) -> dict[str, dict[str, str]]:
+    """kind -> {lowered value: as stored}, for resolving unquoted values.
+
+    Lowered because chip comparisons fold case (COLLATE NOCASE), so the parser
+    has to agree with the SQL about what counts as the same value.
+    """
+    if not known:
+        return {}
+    return {
+        kind: {str(v).lower(): str(v) for v in values if v}
+        for kind, values in known.items()
+    }
+
+
+def _extend_value(vocab: dict[str, str], tokens: list[str], start: int, first: str):
+    """Longest run of following words that is a real value, or None.
+
+    This is what lets `owner:Test Pilot` work without quotes. The naive rule --
+    swallow words until the next prefix -- cannot be used, because it would
+    turn `owner:Main tritanium` into a search for an owner of that name and
+    silently drop the text search. Matching against the values that actually
+    exist resolves it: "Main tritanium" is not an owner, "Main" is, so the
+    remainder stays a search word.
+
+    Longest first, so `owner:Main` still wins outright when there is no longer
+    match, and a genuine "Main Fleet" beats the "Main" prefix of it.
+    """
+    limit = len(tokens)
+    # Only bare words may be absorbed. A quoted token was deliberately
+    # delimited, and one carrying its own prefix starts the next chip.
+    end = start + 1
+    while end < limit:
+        nxt = tokens[end]
+        if nxt.startswith('"'):
+            break
+        body = nxt[1:] if nxt.startswith("-") and len(nxt) > 1 else nxt
+        prefix, sep, _ = body.partition(":")
+        if sep and (prefix.lower() in _PREFIX_TO_KIND or prefix.lower() in ("is", "val")):
+            break
+        end += 1
+
+    for stop in range(end, start, -1):
+        parts = ([first] if first else []) + tokens[start + 1:stop]
+        candidate = " ".join(parts).strip()
+        if candidate and candidate.lower() in vocab:
+            return vocab[candidate.lower()], stop
+    return None
+
+
+def parse(raw: str, known=None) -> FilterSpec:
     """Parse omnibox text into a FilterSpec.
 
     Forgiving by design: anything that does not parse as a chip -- an unknown
@@ -342,10 +391,21 @@ def parse(raw: str) -> FilterSpec:
     comparison -- degrades to a bare search word rather than raising. The
     omnibox re-parses on every keystroke, so half-typed tokens are the normal
     case, not an error.
+
+    `known` maps a chip kind to the values that actually exist, and is what
+    lets an unquoted `owner:Test Pilot` work. Optional: without it, values with
+    spaces must be quoted, which is the behaviour every existing caller and
+    saved view already relies on. Passing it can only make more things parse,
+    never fewer.
     """
+    vocab = _vocabulary(known)
     words: list[str] = []
     chips: list[Chip] = []
-    for token in _tokenize(raw or ""):
+    tokens = _tokenize(raw or "")
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
         body = token
         negated = False
         if body.startswith("-") and len(body) > 1:
@@ -359,8 +419,21 @@ def parse(raw: str) -> FilterSpec:
         # and to_text() serialises empty-value chips exactly that way, so the
         # two halves agree; an unquoted empty value (`loc:`) is the normal
         # half-typed state and stays bare text.
-        if sep and (value or '"' in raw_value):
-            kind = _PREFIX_TO_KIND.get(prefix.lower())
+        quoted = '"' in raw_value
+        kind = _PREFIX_TO_KIND.get(prefix.lower()) if sep else None
+
+        # An unquoted value may run on into the following words. Tried before
+        # the checks below so that `owner:` alone, which is otherwise the
+        # half-typed state and stays bare text, can still start a real value.
+        if kind is not None and not quoted and vocab.get(kind):
+            extended = _extend_value(vocab[kind], tokens, index - 1, value)
+            if extended is not None:
+                resolved, stop = extended
+                chips.append(Chip(kind=kind, value=resolved, negated=negated))
+                index = stop
+                continue
+
+        if sep and (value or quoted):
             if kind is not None:
                 chip = Chip(kind=kind, value=value, negated=negated)
             elif prefix.lower() == "is" and value.lower() in IS_FLAGS:

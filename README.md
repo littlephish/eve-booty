@@ -119,7 +119,11 @@ val:>10m   val:<1b
 ```
 
 Filters ignore case, so `cat:ship` and `cat:Ship` are the same thing, as are
-bare words. Values containing spaces need quoting: `owner:"Test Pilot"`.
+bare words. Values with spaces do not need quoting either: `owner:Test Pilot`
+and `region: The Forge cat:Ship` both work, because a value is matched against
+the names that actually exist. That is also why `owner:Main tritanium` still
+means owner Main and a search for tritanium -- "Main tritanium" is not an
+owner, so the rest stays a search. Quote a value to force it: `owner:"Main"`.
 
 Typed tokens become deletable chips as you commit them, each washed in its
 kind's own colour (negations always in red); rail rows, value-map segments

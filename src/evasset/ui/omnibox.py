@@ -667,8 +667,17 @@ class Omnibox(QWidget):
         self._hide_completions()
         self._emit_changed_now()
 
+    def set_vocabulary(self, vocabulary: dict) -> None:
+        """The values that actually exist, per chip kind.
+
+        Only used to resolve unquoted multi-word values while typing, so it is
+        allowed to be stale or absent: without it those values simply need
+        quoting, which is what they needed before.
+        """
+        self._vocabulary = vocabulary or {}
+
     def _migrate_tokens(self) -> bool:
-        spec = omni.parse(self.edit.text())
+        spec = omni.parse(self.edit.text(), getattr(self, "_vocabulary", None))
         if not spec.chips:
             return False
         for chip in spec.chips:

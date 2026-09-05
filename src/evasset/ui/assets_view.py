@@ -370,6 +370,7 @@ class AssetsView(QWidget):
         # async_query.py: a price job must outlive its starting call.
         self._price_jobs: set[_PriceRefreshJob] = set()
         self._appraise_jobs: set = set()
+        self._vocab_query = AsyncQuery(self)
 
         # Distinct AsyncQuery instances per query stream, same reason the old
         # view held three: reload() starts the row fetch and the rail fetch
@@ -430,7 +431,32 @@ class AssetsView(QWidget):
         only re-queries here and on first load.
         """
         self.refresh_strip()
+        self.refresh_vocabulary()
         self.reload()
+
+    def refresh_vocabulary(self) -> None:
+        """Tell the omnibox which filter values actually exist.
+
+        Only used to resolve unquoted multi-word values as they are typed, so
+        it runs off the GUI thread and nothing waits on it: until it arrives,
+        those values need quoting, exactly as they always did.
+
+        Unfaceted on purpose. The value pickers list what the current filter
+        still leaves, because picking from them should never lead to an empty
+        table; this is the opposite job. Somebody typing owner:Test Pilot
+        should get a chip whether or not the filters already on screen happen
+        to leave that owner any rows -- otherwise a filter would refuse to
+        parse because of a filter.
+        """
+        def fetch(conn):
+            # ROLLUP_LEVELS is (label, key) pairs; the key is what
+            # omni.parse indexes its vocabulary by.
+            return {
+                kind: queries.group_names(conn, kind)
+                for _label, kind in queries.ROLLUP_LEVELS
+            }
+
+        self._vocab_query.run(fetch, self.omnibox.set_vocabulary)
 
     # ----------------------------------------------------------------- reload
     def reload(self) -> None:

@@ -489,3 +489,106 @@ def test_a_chip_kind_from_nowhere_cannot_choose_a_column():
 
     assert "sqlite_master" not in where
     assert params == ()
+
+
+# ------------------------------------------------- unquoted multi-word values
+# Most filter values have spaces in them: on a real account 469 of 472
+# locations and 308 of 376 group names do. Requiring quotes for those made the
+# common case the awkward one.
+#
+# The naive rule -- swallow words until the next prefix -- cannot be used: it
+# would turn `owner:Main tritanium` into a search for an owner of that name
+# and silently drop the text search. Resolving against the values that
+# actually exist is what makes both readings possible.
+VOCAB = {
+    "owner": ["Test Pilot", "Main", "Main Fleet", "Jita Trader"],
+    "system": ["Jita", "Amarr"],
+    "region": ["The Forge"],
+    "location": ["Jita IV - Moon 4 - Caldari Navy Assembly Plant"],
+    "category": ["Ship", "Module"],
+}
+
+
+def _chips(query: str):
+    return [(c.kind, c.value, c.negated) for c in parse(query, VOCAB).chips]
+
+
+def test_an_unquoted_multi_word_value_is_matched():
+    assert _chips("owner:Test Pilot") == [("owner", "Test Pilot", False)]
+    assert parse("owner:Test Pilot", VOCAB).text == ""
+
+
+def test_a_space_after_the_colon_is_allowed():
+    spec = parse("owner: Test Pilot sys:Jita", VOCAB)
+    assert [(c.kind, c.value) for c in spec.chips] == [
+        ("owner", "Test Pilot"), ("system", "Jita")
+    ]
+    assert spec.text == ""
+
+
+def test_a_following_chip_ends_the_value():
+    """Otherwise one long value would swallow the rest of the query."""
+    spec = parse("loc:Jita IV - Moon 4 - Caldari Navy Assembly Plant cat:Ship", VOCAB)
+    assert [c.kind for c in spec.chips] == ["location", "category"]
+
+
+def test_words_that_are_not_part_of_a_value_stay_a_search():
+    """The case that rules out swallowing words until the next prefix."""
+    spec = parse("owner:Main tritanium", VOCAB)
+    assert [(c.kind, c.value) for c in spec.chips] == [("owner", "Main")]
+    assert spec.text == "tritanium"
+
+
+def test_the_longest_real_value_wins():
+    """"Main" is a value and so is "Main Fleet"; typing the longer one must
+    not be read as the shorter one plus a stray word."""
+    assert _chips("owner:Main Fleet") == [("owner", "Main Fleet", False)]
+    assert _chips("owner:Main") == [("owner", "Main", False)]
+
+
+def test_matching_ignores_case_and_returns_the_stored_spelling():
+    """The chip has to carry the value as stored: it is displayed, saved into
+    views, and round-tripped through to_text()."""
+    assert _chips("owner:test pilot") == [("owner", "Test Pilot", False)]
+    assert _chips("REGION:the forge") == [("region", "The Forge", False)]
+
+
+def test_negation_still_works_unquoted():
+    assert _chips("-owner:Test Pilot") == [("owner", "Test Pilot", True)]
+
+
+def test_an_unknown_value_behaves_as_it_always_did():
+    """No vocabulary entry means no run-on. The first word becomes the value,
+    matching nothing, and the rest stays a search -- which is what an
+    unrecognised value did before any of this."""
+    spec = parse("owner:Nobody Here tritanium", VOCAB)
+    assert [(c.kind, c.value) for c in spec.chips] == [("owner", "Nobody")]
+    assert spec.text == "Here tritanium"
+
+
+def test_quoting_still_works_and_still_delimits():
+    spec = parse('owner:"Test Pilot" tritanium', VOCAB)
+    assert [(c.kind, c.value) for c in spec.chips] == [("owner", "Test Pilot")]
+    assert spec.text == "tritanium"
+
+
+def test_a_bare_prefix_is_still_the_half_typed_state():
+    """`owner:` on its own is what the box holds mid-keystroke. It must stay
+    bare text rather than becoming a chip matching everything or nothing."""
+    spec = parse("owner:", VOCAB)
+    assert spec.chips == []
+    assert spec.text == "owner:"
+
+
+def test_without_a_vocabulary_nothing_changes():
+    """Every existing caller, and every saved view, parses without one."""
+    spec = parse("owner:Test Pilot")
+    assert [(c.kind, c.value) for c in spec.chips] == [("owner", "Test")]
+    assert spec.text == "Pilot"
+
+
+def test_a_quoted_word_is_never_absorbed_into_a_value():
+    """Quotes are a deliberate delimiter in both directions."""
+    spec = parse('owner:Main "Fleet"', VOCAB)
+    assert [(c.kind, c.value) for c in spec.chips] == [("owner", "Main")]
+    assert spec.text == "Fleet"
