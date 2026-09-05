@@ -52,7 +52,11 @@ run from source instead.
   system, region, owner, category or group - collapsible headers carry live
   stacks / m³ / ISK rollups for whatever the filter leaves
 - Container trees flattened, so a module in a can in a ship in a station still
-  reports the station
+  reports the station, with a Container column naming what it is actually
+  inside: `Asset Safety Wrap > L2 HMS Dragoon`. The Slot column covers the
+  cases where the compartment belongs to the row itself, like a corp hangar
+  division or a fitting slot; this covers the ones where it belongs to an
+  ancestor
 - `is:safety` finds everything in asset safety, including inside the wraps.
   Delivered safety arrives as an "Asset Safety Wrap" parked in an ordinary NPC
   station, so "at this station" cannot be the test, and the contents nest two
