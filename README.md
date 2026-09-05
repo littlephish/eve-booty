@@ -126,8 +126,10 @@ the lot.
 
 Selection maths live in the footer (units · m³ · ISK for the selection, or the
 whole filtered set when nothing is selected), with Copy list (EVE multibuy
-text) and Appraise (copies the same text and opens
-[Janice](https://janice.e-351.com/)).
+text) and Appraise, which sends the list to
+[Janice](https://janice.e-351.com/) and opens the finished appraisal. The text
+goes to the clipboard either way, so if Janice cannot be reached you still
+have the list to paste in yourself.
 
 Keyboard: `/` omnibox · `Ctrl+F` build a filter chip · `j`/`k` rows ·
 `space` select · `f` filter to the focused cell · `x` exclude it · `w` where

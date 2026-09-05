@@ -7,11 +7,12 @@ import traceback
 
 from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
-from .. import db, networth, pricing, sde, updater
+from .. import db, janice, networth, pricing, sde, updater
 from ..config import Settings
 from ..esi import ESIClient, TokenCache
 from ..esi.auth import login as sso_login
 from ..esi.sync import Syncer
+from ..logsetup import LOGGER
 
 
 class WorkerSignals(QObject):
@@ -57,6 +58,34 @@ class Job(QRunnable):
             traceback.print_exc()
         else:
             self.signals.finished.emit(result)
+
+
+class AppraiseJob(Job):
+    """Create a Janice appraisal from a multibuy list.
+
+    A network call, so it belongs off the GUI thread like every other one. It
+    is also allowed to fail without that being an error the user has to
+    acknowledge: the caller falls back to the clipboard, which is what the
+    button did before there was an API to call.
+    """
+
+    def __init__(self, text: str, settings: Settings):
+        super().__init__()
+        self.text = text
+        self.settings = settings
+
+    def run_job(self):
+        self._progress("Appraising", 30)
+        try:
+            appraisal = janice.create(self.text, self.settings)
+        except janice.JaniceError as exc:
+            LOGGER.warning("appraisal failed: %s", exc)
+            return {"error": str(exc)}
+        LOGGER.info(
+            "appraisal %s: %d priced, %d unrecognised", appraisal.code,
+            appraisal.priced, appraisal.failed,
+        )
+        return {"appraisal": appraisal}
 
 
 class UpdateCheckJob(Job):

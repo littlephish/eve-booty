@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
 
 from .. import db, omni, pricing, queries
 from ..config import Settings
-from . import palette
+from . import chest_reveal, palette
 from .async_query import AsyncQuery
 from .fit_dialog import FitDialog
 from .grouped_model import GROUP_LABEL_ROLE, PRICE_BADGE_ROLE, GroupedAssetsModel
@@ -62,12 +62,21 @@ from .models import fmt_isk, fmt_short_isk
 from .omnibox import Omnibox
 from .rail import Rail
 from .strip import EstateStrip
-from .workers import Job
+from .workers import AppraiseJob, Job
 
 # "View fit" is offered for rows in this SDE category. Scoped to just Ship --
 # what a player structure's category is named in the SDE was not checked, so
 # it is not being guessed at here.
 _FIT_VIEWABLE_CATEGORIES = {"Ship"}
+
+# Corpses. SDE group 14, "Biomass", category "Celestial", and it holds exactly
+# two types: Corpse Male (25) and Corpse Female (29148). Matched on the group
+# rather than those ids because the group is the thing that means "a dead
+# capsuleer", and CCP adding a third would still be one.
+#
+# Not to be confused with the "Corpse" types under Commodities -- Gallente
+# Admiral's Corpse and friends are mission loot, not people.
+_CORPSE_GROUP = "Biomass"
 
 # Table column key -> omnibox chip kind, for the context menu and the f/x
 # keys. The item column is deliberately absent: filtering to one exact item
@@ -108,6 +117,11 @@ _KEY_MAP = [
     ("Ctrl+1-9", "Save current view"),
     ("?", "This list"),
 ]
+
+
+def _is_corpse(row) -> bool:
+    """A dead capsuleer, rather than a mission-loot body."""
+    return (row["grp"] or "") == _CORPSE_GROUP
 
 
 class _SortProxy(QSortFilterProxyModel):
@@ -355,6 +369,7 @@ class AssetsView(QWidget):
         # Strong references per the QRunnable lifetime rules in
         # async_query.py: a price job must outlive its starting call.
         self._price_jobs: set[_PriceRefreshJob] = set()
+        self._appraise_jobs: set = set()
 
         # Distinct AsyncQuery instances per query stream, same reason the old
         # view held three: reload() starts the row fetch and the rail fetch
@@ -849,12 +864,17 @@ class AssetsView(QWidget):
             "Copy item name",
             lambda: QGuiApplication.clipboard().setText(row["item"] or ""),
         )
-        if (row["category"] or "") in _FIT_VIEWABLE_CATEGORIES:
+        if (row["category"] or "") in _FIT_VIEWABLE_CATEGORIES or _is_corpse(row):
             menu.addSeparator()
             menu.addAction("View fit…", lambda: self._open_fit_dialog(row))
         menu.exec(self.tree.viewport().mapToGlobal(pos))
 
     def _open_fit_dialog(self, row: sqlite3.Row) -> None:
+        if _is_corpse(row):
+            # A corpse has no fitting slots, so there is nothing for FitDialog
+            # to read. Show what it is carrying instead.
+            chest_reveal.play(self)
+            return
         name = row["custom_name"] or row["item"]
         dialog = FitDialog(row["item_id"], name, ship_type_id=row["type_id"], parent=self)
         dialog.exec()
@@ -984,13 +1004,66 @@ class AssetsView(QWidget):
         )
 
     def appraise(self) -> None:
+        """Send the list to Janice and open the finished appraisal.
+
+        This used to copy the text and open janice.e-351.com, leaving the user
+        to paste it. Janice will take the list over its API and hand back a
+        saved appraisal, so the paste step can go.
+
+        The clipboard is still filled, every time, before anything is sent.
+        That is the fallback if the call fails, and it costs nothing to do
+        unconditionally -- somebody who wanted the text still has it.
+        """
         text = self._multibuy_text()
         if not text:
             self.footer.setText("Nothing to appraise.")
             return
+
         QGuiApplication.clipboard().setText(text)
+        self.footer.setText("Appraising…")
+
+        # Settings.load() here rather than a constructor argument: no
+        # caller passes settings to AssetsView, and _PriceRefreshJob
+        # already loads its own for the same reason.
+        job = AppraiseJob(text, Settings.load())
+        # Held for the same reason _price_jobs exists: a QRunnable with no
+        # Python reference can be collected mid-flight, and its signals go
+        # with it. See async_query.py.
+        self._appraise_jobs.add(job)
+        job.signals.finished.connect(lambda r, j=job: self._on_appraised(r, j))
+        job.signals.failed.connect(lambda m, j=job: self._on_appraise_failed(m, j))
+        QThreadPool.globalInstance().start(job)
+
+    def _on_appraised(self, result, job=None) -> None:
+        self._appraise_jobs.discard(job)
+        if not result or "error" in (result or {}):
+            self._on_appraise_failed((result or {}).get("error", "unknown error"))
+            return
+        appraisal = result["appraisal"]
+        QDesktopServices.openUrl(QUrl(appraisal.url))
+
+        note = f"Appraised {appraisal.priced} item(s): {fmt_short_isk(appraisal.total_sell)} sell"
+        if appraisal.failed:
+            # Named rather than counted. "3 lines were not recognised" sends
+            # somebody hunting; the lines themselves are usually enough to see
+            # why at a glance.
+            sample = ", ".join(
+                line.split("	")[0] for line in appraisal.failed_lines[:3]
+            )
+            more = "…" if appraisal.failed > 3 else ""
+            note += f" · {appraisal.failed} not recognised ({sample}{more})"
+        self.footer.setText(note)
+
+    def _on_appraise_failed(self, message: str, job=None) -> None:
+        self._appraise_jobs.discard(job)
+        """Fall back to what the button did before.
+
+        An appraisal is a convenience. Losing it should not lose the list, and
+        the text is already on the clipboard, so this degrades to exactly the
+        old behaviour rather than to nothing.
+        """
         QDesktopServices.openUrl(QUrl("https://janice.e-351.com/"))
-        self.footer.setText("Copied - paste into Janice.")
+        self.footer.setText(f"Janice unavailable ({message}). Copied - paste it in.")
 
     # ----------------------------------------------------------------- export
     def export_csv(self) -> None:
