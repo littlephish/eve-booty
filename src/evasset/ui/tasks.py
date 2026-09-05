@@ -38,6 +38,8 @@ from dataclasses import dataclass, field
 
 from PySide6.QtCore import QObject, QThreadPool, Signal
 
+from ..logsetup import LOGGER
+
 QUEUED = "queued"
 RUNNING = "running"
 
@@ -108,12 +110,18 @@ class TaskManager(QObject):
         "Update prices" twice should not start two repricings.
         """
         if self.is_active(kind):
+            LOGGER.info("task %r refused: already running", kind)
             return None
 
         task = Task(
             id=next(self._ids), kind=kind, label=label, job=job, done=done, after=tuple(after)
         )
         self._tasks[task.id] = task
+        # The log recorded what happened (every ESI call) but never what asked
+        # for it, so a sync and a game data update were indistinguishable
+        # after the fact -- and an operation that made no ESI calls at all,
+        # like the SDE, left no trace whatsoever.
+        LOGGER.info("task %r started: %s", kind, label)
         self._pump()
         self.changed.emit()
         return task
@@ -153,11 +161,15 @@ class TaskManager(QObject):
         self.changed.emit()
 
     def _on_failed(self, task: Task, message: str) -> None:
+        LOGGER.error("task %r failed: %s", task.kind, message)
         self._retire(task)
         if not task.cancelling:
             self.failed.emit(task.label, message)
 
     def _on_finished(self, task: Task, result) -> None:
+        LOGGER.info(
+            "task %r finished%s", task.kind, " (cancelled)" if task.cancelling else ""
+        )
         self._retire(task)
         if task.cancelling:
             return

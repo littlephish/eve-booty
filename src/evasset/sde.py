@@ -23,6 +23,7 @@ import httpx
 
 from . import db
 from .config import CACHE_DIR, SDE_BUILD_URL, SDE_LATEST_URL, Settings, user_agent
+from .logsetup import LOGGER
 
 Progress = Callable[[str, int], None]  # (message, percent 0-100)
 
@@ -51,6 +52,7 @@ def _en(record: dict, key: str = "name") -> str:
 
 
 def latest_build(settings: Settings | None = None, timeout: float = 30.0) -> int:
+    LOGGER.debug("SDE: asking CCP for the current build (timeout %.1fs)", timeout)
     r = httpx.get(
         SDE_LATEST_URL, headers={"User-Agent": user_agent(settings)}, timeout=timeout
     )
@@ -60,7 +62,9 @@ def latest_build(settings: Settings | None = None, timeout: float = 30.0) -> int
             continue
         rec = json.loads(line)
         if rec.get("_key") == "sde":
-            return int(rec["buildNumber"])
+            build = int(rec["buildNumber"])
+            LOGGER.info("SDE: CCP reports build %s", build)
+            return build
     raise RuntimeError("no 'sde' record in latest.jsonl")
 
 
@@ -71,6 +75,7 @@ def installed_build(conn: sqlite3.Connection) -> int | None:
 
 def download(build: int, settings: Settings | None = None, progress: Progress | None = None) -> Path:
     dest = CACHE_DIR / f"sde-{build}.zip"
+    LOGGER.info("SDE: download build %s -> %s", build, dest)
     if dest.exists() and dest.stat().st_size > 1_000_000:
         return dest
     tmp = dest.with_suffix(".part")
@@ -122,6 +127,7 @@ def import_zip(
                 progress(f"Importing {label}", int(i * 100 / len(steps)))
             fn(conn, zf)
         db.set_meta(conn, "sde_build", str(build))
+        LOGGER.info("SDE: build %s imported", build)
     conn.execute("ANALYZE")
     if progress:
         progress(f"SDE {build} imported", 100)
@@ -344,14 +350,18 @@ def check(
     """
     installed = installed_build(conn)
     if installed is None:
+        LOGGER.info("SDE: nothing imported; no version check needed")
         return SdeStatus(installed=None, latest=None)
 
     try:
         latest = latest_build(settings, timeout=timeout)
-    except (httpx.HTTPError, ValueError, RuntimeError):
+    except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+        LOGGER.warning("SDE: version check failed (%s); will retry later", exc)
         return SdeStatus(installed=installed, latest=None)
 
     db.set_meta(conn, META_CHECKED_AT, datetime.now(timezone.utc).isoformat())
+    LOGGER.info("SDE: installed %s, latest %s -> %s",
+                installed, latest, "update available" if installed < latest else "current")
     return SdeStatus(installed=installed, latest=latest)
 
 
@@ -374,6 +384,8 @@ def ensure_current(
     if progress:
         progress("Checking for SDE updates", 0)
     build = latest_build(settings)
+    LOGGER.info("SDE: ensure_current -- installed %s, latest %s",
+                installed_build(conn), build)
     if installed_build(conn) == build:
         if progress:
             progress(f"SDE {build} already current", 100)
