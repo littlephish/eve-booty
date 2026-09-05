@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .config import DB_PATH
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -53,10 +53,87 @@ CREATE TABLE IF NOT EXISTS sde_types (
     capacity        REAL,
     portion_size    INTEGER,
     base_price      REAL,
-    published       INTEGER NOT NULL DEFAULT 1
+    published       INTEGER NOT NULL DEFAULT 1,
+    -- types.isDynamicType: true on exactly the 89 mutated ("Abyssal ...")
+    -- module and drone types, and the only safe gate for asking ESI's
+    -- dynamic-item route about an asset. meta_group_id = 15 looks like the
+    -- same thing but is not: it also covers 170 mutaplasmids and a
+    -- blueprint, and every one of those would 404 and burn error budget.
+    is_dynamic_type INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_types_name  ON sde_types(name);
 CREATE INDEX IF NOT EXISTS idx_types_group ON sde_types(group_id);
+
+-- ------------------------------------------------------------- dogma (SDE)
+-- Only what rendering an abyssal item's rolls needs. Attribute names and
+-- units come from dogmaAttributes/dogmaUnits; the un-mutated base values
+-- from typeDogma, restricted at import to the source and abyssal types a
+-- mutaplasmid can touch (a few hundred types, not the whole 26k); the roll
+-- ranges from dynamicItemAttributes, keyed by the mutaplasmid because
+-- several mutaplasmids with different ranges produce the same abyssal type.
+CREATE TABLE IF NOT EXISTS sde_dogma_attributes (
+    attribute_id  INTEGER PRIMARY KEY,
+    name          TEXT NOT NULL,
+    display_name  TEXT,
+    unit_id       INTEGER,
+    high_is_good  INTEGER,
+    default_value REAL,
+    published     INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_dogma_attr_display ON sde_dogma_attributes(display_name);
+
+CREATE TABLE IF NOT EXISTS sde_dogma_units (
+    unit_id      INTEGER PRIMARY KEY,
+    name         TEXT NOT NULL,
+    display_name TEXT
+);
+
+CREATE TABLE IF NOT EXISTS sde_type_dogma (
+    type_id      INTEGER NOT NULL,
+    attribute_id INTEGER NOT NULL,
+    value        REAL NOT NULL,
+    PRIMARY KEY (type_id, attribute_id)
+);
+
+-- high_is_good is the per-mutaplasmid polarity override CCP added in build
+-- 3030547; NULL means "use the attribute's own highIsGood". It is what makes
+-- a webifier's speedFactor read as low-is-good while an afterburner's reads
+-- high-is-good, so it must stay nullable rather than defaulting.
+CREATE TABLE IF NOT EXISTS sde_mutator_ranges (
+    mutator_type_id   INTEGER NOT NULL,
+    attribute_id      INTEGER NOT NULL,
+    min_mult          REAL NOT NULL,
+    max_mult          REAL NOT NULL,
+    high_is_good      INTEGER,
+    resulting_type_id INTEGER,
+    PRIMARY KEY (mutator_type_id, attribute_id)
+);
+
+-- ------------------------------------------------------------ abyssal rolls
+-- One row per mutated item ever asked about, keyed by item_id alone: rolls
+-- are permanent (CCP patch notes, 2018-05-25) and an item keeps its id when
+-- it changes hands, so the row is not owner-scoped and never expires.
+-- status 'missing' records a 404 so the item is not re-asked on every run --
+-- each 4xx costs one unit of the 100-per-minute error budget.
+CREATE TABLE IF NOT EXISTS abyssal_items (
+    item_id         INTEGER PRIMARY KEY,
+    type_id         INTEGER NOT NULL,
+    source_type_id  INTEGER,
+    mutator_type_id INTEGER,
+    created_by      INTEGER,
+    status          TEXT NOT NULL,      -- 'ok' | 'missing'
+    fetched_at      TEXT NOT NULL
+);
+
+-- The item's FULL dogma_attributes list as ESI returns it. Which of them
+-- were rolled is decided at query time from the mutator's range table, so
+-- a future SDE with a new mutable attribute needs no re-fetch.
+CREATE TABLE IF NOT EXISTS abyssal_attributes (
+    item_id      INTEGER NOT NULL REFERENCES abyssal_items(item_id) ON DELETE CASCADE,
+    attribute_id INTEGER NOT NULL,
+    value        REAL NOT NULL,
+    PRIMARY KEY (item_id, attribute_id)
+);
 
 CREATE TABLE IF NOT EXISTS sde_regions (
     region_id INTEGER PRIMARY KEY,
@@ -650,6 +727,47 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
     if _table_exists(conn, "structures") and "gone_at" not in columns(conn, "structures"):
         conn.execute("ALTER TABLE structures ADD COLUMN gone_at TEXT")
         done.append("structures: added gone_at")
+
+    # v4 -> v5: sde_types gained is_dynamic_type for the abyssal-stats gate.
+    #
+    # This one triggers on the new column being absent, which is the opposite
+    # of the rule the rebuild migrations above were burned by -- deliberately.
+    # Those triggered on a legacy column because an intermediate state (both
+    # old and new columns present) had shipped and had to be repaired; here
+    # nothing is removed, so there is no legacy column to key on and no
+    # half-migrated shape to distinguish. The rebuild rather than ADD COLUMN
+    # keeps the table byte-for-byte in SCHEMA's shape, including NOT NULL
+    # DEFAULT 0, and existing rows honestly read 0 until the next SDE import
+    # (which sde.tables_stale forces at startup) fills the flag in.
+    if _table_exists(conn, "sde_types") and "is_dynamic_type" not in columns(conn, "sde_types"):
+        _rebuild_table(
+            conn,
+            "sde_types",
+            """CREATE TABLE sde_types (
+                   type_id         INTEGER PRIMARY KEY,
+                   name            TEXT NOT NULL,
+                   group_id        INTEGER,
+                   market_group_id INTEGER,
+                   meta_group_id   INTEGER,
+                   volume          REAL,
+                   capacity        REAL,
+                   portion_size    INTEGER,
+                   base_price      REAL,
+                   published       INTEGER NOT NULL DEFAULT 1,
+                   is_dynamic_type INTEGER NOT NULL DEFAULT 0
+               )""",
+            """INSERT INTO sde_types
+                   (type_id, name, group_id, market_group_id, meta_group_id, volume,
+                    capacity, portion_size, base_price, published)
+               SELECT type_id, name, group_id, market_group_id, meta_group_id, volume,
+                      capacity, portion_size, base_price, published
+               FROM {old}""",
+        )
+        # The indexes followed the renamed table into the DROP; recreate them
+        # or every name lookup is a full scan until the next init().
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_types_name  ON sde_types(name)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_types_group ON sde_types(group_id)")
+        done.append("sde_types: added is_dynamic_type (table rebuilt)")
 
     if done:
         set_meta(conn, "migrated_at", str(SCHEMA_VERSION))

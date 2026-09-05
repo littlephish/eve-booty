@@ -123,6 +123,8 @@ recorded next to the item so nobody rediscovers it.
 | Rollup rail | Per-label stacks / m³ / ISK with value bars at six grouping levels; click-to-filter, star pins, "where is it" flip when hunting an item |
 | Estate strip | Whole-estate net worth, assets, liquid ISK, volume, unpriced count and a value map of top locations, above the Assets table |
 | Row inspector | Both price bases, source and quote age, where-else, single-type price refresh, manual price pinning |
+| Abyssal module stats | Rolled attributes per mutated item from ESI's public dynamic-item route, shown as position in the mutaplasmid's range with a better/worse verdict; `stat:` filters in display units; fetched on demand (Update -> Abyssal stats, the inspector button, or an opt-in sync-time switch); items stay unpriced |
+| Abyssal complex search | An `abyssal` chip (all mutated modules, or named types OR'd) with a `▾` card (opened by typing the chip, reopened from the glyph): a type dropdown with counts, per-stat rows with a two-handled slider in the stat's display units bounded by the estate, Done writes the chips, a banner fetches the unfetched; `roll:` quality filters and `..` ranges for `roll:` and `stat:`; with one type selected the table grows a column per rolled attribute plus a mean Roll column, washed by quality and sortable |
 | Saved views & pins | `Ctrl+1-9` saves filter + grouping + rail level to the database; rail pins persist per level |
 | Manual prices | Pin a price per type; the repricer never overwrites a pin |
 | Net worth tracker | Per character and corp, snapshot per sync, six-way split, charted at both Jita buy and Jita sell |

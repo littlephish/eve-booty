@@ -283,6 +283,56 @@ def test_typing_a_token_offers_counted_values_and_picking_adds_the_chip(app, con
     b.deleteLater()
 
 
+def test_stat_completion_offers_internal_names_when_a_display_name_is_shared(app, conn):
+    """Real SDE shape: signatureRadiusBonus (%) and signatureRadiusAdd (m)
+    both display "Signature Radius Modifier". Writing that display name into
+    the field would mint a chip matching either attribute, so the popup must
+    offer each internal name, annotated so the two can be told apart, while
+    an unshared attribute still completes to its display name. The `sig`
+    alias points at the percent one and must land on its internal name too,
+    once, not beside a duplicate row for the same name."""
+    conn.executescript(
+        """
+        INSERT INTO sde_dogma_attributes
+            (attribute_id,name,display_name,unit_id,high_is_good,default_value,published) VALUES
+            (50,'cpu','CPU usage',106,0,0,1),
+            (554,'signatureRadiusBonus','Signature Radius Modifier',124,0,0,1),
+            (983,'signatureRadiusAdd','Signature Radius Modifier',1,0,0,1);
+        INSERT INTO sde_dogma_units VALUES (106,'Teraflops','tf'),
+            (124,'Modifier Relative Percent','%'),(1,'Length','m');
+        INSERT INTO sde_mutator_ranges VALUES (47297,50,0.8,1.5,NULL,47408),
+            (47297,554,0.7,1.3,NULL,47408),(47297,983,0.7,1.3,NULL,47408),
+            (47741,554,0.8,1.1,NULL,47408);
+        """
+    )
+    b = Omnibox()
+    b._complete_query.run = lambda fn, on_done, on_failed=None: on_done(fn(conn))
+    model = b._completion_model
+
+    def offered():
+        return [model.item(i).data(Qt.UserRole) for i in range(model.rowCount())]
+
+    QTest.keyClicks(b.edit, "stat:Signature")
+    assert offered() == ["signatureRadiusAdd", "signatureRadiusBonus"]
+    assert model.item(0).text() == "signatureRadiusAdd  (Signature Radius Modifier, m)"
+    assert model.item(1).text() == "signatureRadiusBonus  (Signature Radius Modifier, %)"
+
+    b._completer.activated[QModelIndex].emit(model.index(1, 0))
+    assert b.edit.text() == "stat:signatureRadiusBonus"
+    assert b._chips == [], "a name is half a value; no chip until the operator and number"
+
+    b.edit.clear()
+    QTest.keyClicks(b.edit, "stat:cp")
+    assert offered() == ["CPU usage"], "an unshared name still completes to its display name"
+    assert model.item(0).text() == "CPU usage  (cpu)"
+
+    b.edit.clear()
+    QTest.keyClicks(b.edit, "stat:si")
+    assert offered() == ["signatureRadiusBonus", "signatureRadiusAdd"]
+    assert model.item(0).text() == "signatureRadiusBonus  (sig · Signature Radius Modifier, %)"
+    b.deleteLater()
+
+
 # ----------------------------------------------------------- draft builder
 def open_draft(box):
     box.open_draft()
@@ -488,3 +538,200 @@ def test_the_edit_keeps_a_typable_width_and_the_hint_stays_beside_it(app, box):
     for widget in chip_widgets:
         assert widget.geometry().right() <= box.width()
     box.hide()
+
+
+# ------------------------------------------------------------ abyssal chip
+WEBIFIER = "Abyssal Stasis Webifier"
+THREE_TYPES = f"{WEBIFIER}, Abyssal Warp Disruptor, 50MN Abyssal Microwarpdrive"
+
+
+def test_the_abyssal_chip_renders_its_three_label_shapes_with_the_prefix_hidden(box):
+    """The chip's word IS the kind, so a muted "abyssal:" in front would say
+    it twice; one type shows without its own "Abyssal" word for the same
+    reason, and several collapse to a count so three long names cannot eat
+    the whole field."""
+    box.add_chip("abyssal", "")
+    box.add_chip("abyssal", WEBIFIER)
+    box.add_chip("abyssal", THREE_TYPES)
+    widgets = [w for _c, w in box._chips]
+    assert [w.value_label.text() for w in widgets] == [
+        "Abyssal", "Abyssal · Stasis Webifier", "Abyssal · 3 types",
+    ]
+    assert all(w.prefix_label.isHidden() for w in widgets)
+
+    # A negated one keeps only the minus: the wash already went red.
+    box.add_chip("abyssal", WEBIFIER, negated=True)
+    negated = box._chips[-1][1]
+    assert negated.prefix_label.text() == "-" and not negated.prefix_label.isHidden()
+    assert negated.value_label.text() == "Abyssal · Stasis Webifier"
+
+
+def test_only_the_abyssal_chip_carries_the_card_glyph(box):
+    box.add_chip("category", "Mineral")
+    box.add_chip("stat", "cpu<30")
+    box.add_chip("abyssal", "")
+    plain, stat, abyssal_chip = (w for _c, w in box._chips)
+    assert plain.card_btn is None and stat.card_btn is None
+    assert abyssal_chip.card_btn is not None
+    assert abyssal_chip.card_btn.text() == "▾"
+    assert not plain.prefix_label.isHidden(), "ordinary chips keep their prefix"
+
+
+def test_the_glyph_asks_for_the_card_with_the_chip_and_its_anchor(box):
+    """The omnibox knows nothing about the card's contents; it hands the
+    view the chip to seed from and the widget to anchor the popover under."""
+    box.add_chip("abyssal", WEBIFIER)
+    requests = record(box.card_requested)
+    chip, widget = box._chips[0]
+
+    widget.card_btn.click()
+
+    assert len(requests) == 1
+    assert requests[0][0] == chip
+    assert requests[0][1] is widget
+
+
+def test_typed_abyssal_tokens_mint_the_chip_in_both_spellings(box):
+    """The bare word and the prefixed form must render through the same
+    label logic -- a typed abyssal: with a quoted type is what a saved view
+    replays."""
+    QTest.keyClicks(box.edit, "abyssal ")
+    assert [c for c, _w in box._chips] == [omni.Chip("abyssal", "")]
+    assert box._chips[0][1].value_label.text() == "Abyssal"
+
+    QTest.keyClicks(box.edit, f'abyssal:"{WEBIFIER}" ')
+    assert box._chips[-1][0] == omni.Chip("abyssal", WEBIFIER)
+    assert box._chips[-1][1].value_label.text() == "Abyssal · Stasis Webifier"
+
+
+def abyssal_widget(box):
+    return next(w for c, w in box._chips if c.kind == omni.ABYSSAL_KIND)
+
+
+def test_a_typed_abyssal_chip_asks_for_the_card_one_event_turn_after_enter(box, app):
+    """Typing the word and pressing Enter is the natural way in, so the card
+    request goes out without a glyph click -- but only after the event
+    turn that inserted the chip widget, since a Qt.Popup shown in that same
+    turn is closed by Qt before it is seen."""
+    requests = record(box.card_requested)
+    QTest.keyClicks(box.edit, "abyssal")
+    QTest.keyClick(box.edit, Qt.Key_Return)
+    assert [c for c, _w in box._chips] == [omni.Chip("abyssal", "")]
+    assert requests == [], "deferred, not in the turn that laid the chip out"
+
+    app.processEvents()
+
+    assert len(requests) == 1
+    assert requests[0][0] == omni.Chip("abyssal", "")
+    assert requests[0][1] is abyssal_widget(box)
+
+    # The alias and the typed type list are the same chip kind and open too.
+    box.clear()
+    QTest.keyClicks(box.edit, "is:abyssal")
+    QTest.keyClick(box.edit, Qt.Key_Return)
+    app.processEvents()
+    assert len(requests) == 2 and requests[1][0] == omni.Chip("abyssal", "")
+
+    box.clear()
+    QTest.keyClicks(box.edit, f'abyssal:"{WEBIFIER}"')
+    QTest.keyClick(box.edit, Qt.Key_Return)
+    app.processEvents()
+    assert len(requests) == 3 and requests[2][0] == omni.Chip("abyssal", WEBIFIER)
+
+
+def test_the_draft_builder_committing_an_abyssal_chip_asks_for_the_card_too(box, app):
+    requests = record(box.card_requested)
+    draft = open_draft(box)
+    QTest.keyClicks(draft.edit, "a")
+    # One Return: the kind pick mints the chip, there is no value stage.
+    QTest.keyClick(draft.edit, Qt.Key_Return)
+    assert [c for c, _w in box._chips] == [omni.Chip("abyssal", "")]
+    assert requests == []
+    app.processEvents()
+    assert len(requests) == 1 and requests[0][1] is abyssal_widget(box)
+
+
+def test_an_abyssal_chip_that_is_restored_placed_negated_or_already_present_opens_no_card(
+    box, app
+):
+    """The card is asked for only by a chip the user has just typed: a
+    saved view or the card's own Done restores one through set_spec, a rail
+    row places one through add_chip, a trailing space is mid-sentence, a
+    negated chip is one the card cannot express, and a chip already in the
+    row (the card may be open under it) is a duplicate the field drops."""
+    requests = record(box.card_requested)
+
+    box.set_spec(omni.parse(f'abyssal:"{WEBIFIER}" roll:web>=70'))
+    app.processEvents()
+    box.add_chip("abyssal", "")
+    app.processEvents()
+    assert requests == []
+
+    box.clear()
+    QTest.keyClicks(box.edit, "abyssal ")
+    assert [c for c, _w in box._chips] == [omni.Chip("abyssal", "")]
+    app.processEvents()
+    assert requests == [], "a space commits the token but the user is still typing"
+
+    QTest.keyClicks(box.edit, "abyssal")
+    QTest.keyClick(box.edit, Qt.Key_Return)
+    app.processEvents()
+    assert [c for c, _w in box._chips] == [omni.Chip("abyssal", "")]
+    assert requests == [], "the chip was already there"
+
+    box.clear()
+    QTest.keyClicks(box.edit, "-abyssal")
+    QTest.keyClick(box.edit, Qt.Key_Return)
+    app.processEvents()
+    assert [c for c, _w in box._chips] == [omni.Chip("abyssal", "", negated=True)]
+    assert requests == []
+
+
+def test_a_chip_removed_before_the_deferred_request_fires_opens_no_card(box, app):
+    """The timer outlives the chip when a set_spec or the cross lands in the
+    same turn; a card anchored to a deleted widget would be a crash."""
+    requests = record(box.card_requested)
+    QTest.keyClicks(box.edit, "abyssal")
+    QTest.keyClick(box.edit, Qt.Key_Return)
+    box.set_spec(omni.parse("cat:Module"))
+    app.processEvents()
+    assert requests == []
+    assert [c for c, _w in box._chips] == [omni.Chip("category", "Module")]
+
+
+def test_the_draft_builder_offers_abyssal_and_roll_and_mints_abyssal_without_a_value_stage(box):
+    """"a" resolves to abyssal alone, and picking it mints the whole-kind
+    chip at once: the module type is chosen in the card that opens on the
+    chip, so a value stage here would have asked the same question twice."""
+    from evasset.ui.omnibox import _ALL_KINDS
+
+    assert "abyssal" in _ALL_KINDS and "roll" in _ALL_KINDS
+    draft = open_draft(box)
+    QTest.keyClicks(draft.edit, "a")
+    QTest.keyClick(draft.edit, Qt.Key_Return)
+
+    assert box._draft is None
+    assert [c for c, _w in box._chips] == [omni.Chip("abyssal", "")]
+
+
+def test_roll_tokens_share_the_stat_completion_and_write_back_their_own_prefix(app, conn):
+    conn.executescript(
+        """
+        INSERT INTO sde_dogma_attributes
+            (attribute_id,name,display_name,unit_id,high_is_good,default_value,published)
+            VALUES (50,'cpu','CPU usage',106,0,0,1);
+        INSERT INTO sde_dogma_units VALUES (106,'Teraflops','tf');
+        INSERT INTO sde_mutator_ranges VALUES (47297,50,0.8,1.5,NULL,47408);
+        """
+    )
+    b = Omnibox()
+    b._complete_query.run = lambda fn, on_done, on_failed=None: on_done(fn(conn))
+    model = b._completion_model
+
+    QTest.keyClicks(b.edit, "roll:cp")
+    assert [model.item(i).data(Qt.UserRole) for i in range(model.rowCount())] == ["CPU usage"]
+
+    b._completer.activated[QModelIndex].emit(model.index(0, 0))
+    assert b.edit.text() == 'roll:"CPU usage"', "the write-back must keep the roll prefix"
+    assert b._chips == []
+    b.deleteLater()

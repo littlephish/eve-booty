@@ -12,6 +12,7 @@ itself, per CCP's celestial naming rules.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import zipfile
 from collections.abc import Callable, Iterator
@@ -26,6 +27,15 @@ from .config import CACHE_DIR, SDE_BUILD_URL, SDE_LATEST_URL, Settings, user_age
 from .logsetup import LOGGER
 
 Progress = Callable[[str, int], None]  # (message, percent 0-100)
+
+# Which tables import_zip fills, independent of CCP's build number. Bump it
+# whenever a step is added or an existing table gains a column the importer
+# now reads, so an install that already has the current build re-imports
+# from its cached zip instead of waiting for CCP to ship a new build. Version
+# 1 is the implicit pre-dogma state; 2 added the dogma tables and
+# sde_types.is_dynamic_type.
+SDE_TABLES_VERSION = 2
+_TABLES_VERSION_KEY = "sde_tables_version"
 
 _ROMAN = [
     (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
@@ -69,8 +79,48 @@ def latest_build(settings: Settings | None = None, timeout: float = 30.0) -> int
 
 
 def installed_build(conn: sqlite3.Connection) -> int | None:
+    """The imported SDE build, or None when the tables need (re)importing.
+
+    Reports None not only when nothing was ever imported but also when the
+    import was made by an older code version that filled fewer tables
+    (tables_stale). ensure_current compares this with CCP's latest build and
+    skips the import on a match, so a stale table set on a current build
+    would otherwise never be filled until CCP happened to publish a new
+    build. The raw build number for display lives in queries.sde_build, and
+    recorded_build below answers the same question for callers that only want
+    to know whether CCP has anything newer.
+    """
+    if tables_stale(conn):
+        return None
+    return recorded_build(conn)
+
+
+def recorded_build(conn: sqlite3.Connection) -> int | None:
+    """The build the last import wrote down, whatever state the tables are in.
+
+    installed_build deliberately reports None once this build's importer
+    reads tables an older import never filled, which is right for
+    ensure_current but wrong for the startup update check: a stale table set
+    is refreshed locally from the cached zip, so reporting it as "no game
+    data at all" would offer a 95 MB download to somebody whose SDE is
+    already current.
+    """
     val = db.get_meta(conn, "sde_build")
     return int(val) if val else None
+
+
+def tables_stale(conn: sqlite3.Connection) -> bool:
+    """True when an SDE is installed but was imported by an older importer.
+
+    A fresh database with no SDE at all is not "stale": there is nothing to
+    re-import from, and the first-run flow already handles downloading one.
+    This is the startup trigger for the automatic re-import from the cached
+    zip -- see ensure_current, which reaches the same conclusion through
+    installed_build.
+    """
+    if not db.get_meta(conn, "sde_build"):
+        return False
+    return db.get_meta(conn, _TABLES_VERSION_KEY) != str(SDE_TABLES_VERSION)
 
 
 def download(build: int, settings: Settings | None = None, progress: Progress | None = None) -> Path:
@@ -117,6 +167,10 @@ def import_zip(
         ("marketGroups", _import_market_groups),
         ("metaGroups", _import_meta_groups),
         ("types", _import_types),
+        ("dogma attributes", _import_dogma_attributes),
+        ("dogma units", _import_dogma_units),
+        ("mutator ranges", _import_mutator_ranges),
+        ("type dogma", _import_type_dogma),
         ("regions", _import_regions),
         ("systems", _import_systems),
         ("stations", _import_stations),
@@ -127,6 +181,7 @@ def import_zip(
                 progress(f"Importing {label}", int(i * 100 / len(steps)))
             fn(conn, zf)
         db.set_meta(conn, "sde_build", str(build))
+        db.set_meta(conn, _TABLES_VERSION_KEY, str(SDE_TABLES_VERSION))
         LOGGER.info("SDE: build %s imported", build)
     conn.execute("ANALYZE")
     if progress:
@@ -179,6 +234,7 @@ def _import_types(conn, zf):
     cols = [
         "type_id", "name", "group_id", "market_group_id", "meta_group_id",
         "volume", "capacity", "portion_size", "base_price", "published",
+        "is_dynamic_type",
     ]
     db.upsert_many(
         conn, "sde_types", cols,
@@ -188,10 +244,124 @@ def _import_types(conn, zf):
                 r.get("metaGroupID"), r.get("volume"), r.get("capacity"),
                 r.get("portionSize") or 1, r.get("basePrice") or 0.0,
                 int(bool(r.get("published"))),
+                # Added to types.jsonl in build 3464040 (2026-08-12); a zip
+                # older than that simply lacks the key and every type reads 0.
+                int(bool(r.get("isDynamicType"))),
             )
             for r in _records(zf, "types.jsonl")
         ),
     )
+
+
+def _import_dogma_attributes(conn, zf):
+    conn.execute("DELETE FROM sde_dogma_attributes")
+    cols = [
+        "attribute_id", "name", "display_name", "unit_id", "high_is_good",
+        "default_value", "published",
+    ]
+
+    def rows():
+        for r in _records(zf, "dogmaAttributes.jsonl"):
+            # displayName is a localisation dict on the 1,248 attributes that
+            # have one and absent on the rest; name is always a plain string.
+            display = _en(r, "displayName") or None
+            high = r.get("highIsGood")
+            yield (
+                r["_key"], r.get("name") or "", display, r.get("unitID"),
+                None if high is None else int(bool(high)),
+                r.get("defaultValue"), int(bool(r.get("published"))),
+            )
+
+    db.upsert_many(conn, "sde_dogma_attributes", cols, rows())
+
+
+def _import_dogma_units(conn, zf):
+    conn.execute("DELETE FROM sde_dogma_units")
+    db.upsert_many(
+        conn, "sde_dogma_units", ["unit_id", "name", "display_name"],
+        (
+            (r["_key"], r.get("name") or "", _en(r, "displayName") or None)
+            for r in _records(zf, "dogmaUnits.jsonl")
+        ),
+    )
+
+
+def _import_mutator_ranges(conn, zf):
+    """Flatten dynamicItemAttributes: one row per (mutaplasmid, attribute).
+
+    Every record in build 3487903 carries exactly one inputOutputMapping
+    entry, so resultingType is taken from the first; a record with none
+    (should CCP ever add a mutaplasmid with no output) stores NULL rather
+    than being skipped, because its ranges are still what the inspector
+    needs once ESI names it as an item's mutator.
+    """
+    conn.execute("DELETE FROM sde_mutator_ranges")
+    cols = [
+        "mutator_type_id", "attribute_id", "min_mult", "max_mult", "high_is_good",
+        "resulting_type_id",
+    ]
+
+    def rows():
+        for r in _records(zf, "dynamicItemAttributes.jsonl"):
+            mapping = r.get("inputOutputMapping") or []
+            resulting = mapping[0].get("resultingType") if mapping else None
+            for attr in r.get("attributeIDs") or []:
+                high = attr.get("highIsGood")
+                yield (
+                    r["_key"], attr["_key"], attr["min"], attr["max"],
+                    None if high is None else int(bool(high)), resulting,
+                )
+
+    db.upsert_many(conn, "sde_mutator_ranges", cols, rows())
+
+
+def _mutable_type_ids(zf) -> set[int]:
+    """Every type a mutaplasmid can be applied to, plus every type it makes."""
+    ids: set[int] = set()
+    for r in _records(zf, "dynamicItemAttributes.jsonl"):
+        for mapping in r.get("inputOutputMapping") or []:
+            ids.update(mapping.get("applicableTypes") or [])
+            if mapping.get("resultingType") is not None:
+                ids.add(mapping["resultingType"])
+    return ids
+
+
+_TYPE_DOGMA_KEY = re.compile(rb'^\{"_key":\s*(\d+)')
+
+
+def _import_type_dogma(conn, zf):
+    """Base attribute values, but only for types a mutaplasmid can touch.
+
+    typeDogma.jsonl covers all 26.8k types and is the largest file in the
+    zip; the rolls display only ever needs the source type's base values
+    (the abyssal type itself carries almost no dogma, verified against
+    build 3487903), so the import is restricted to applicableTypes plus
+    resultingType -- a few hundred types. The restriction set is re-read
+    from dynamicItemAttributes.jsonl (166 KB) rather than passed from the
+    previous step, so each step stays independently re-runnable.
+    """
+    wanted = _mutable_type_ids(zf)
+    conn.execute("DELETE FROM sde_type_dogma")
+
+    def rows():
+        # Parsing all 26,828 lines costs 270 ms to keep 1,110 of them; the
+        # key is the first field of every line, so a prefix match skips the
+        # parser for the rest (86 ms, build 3487903). A line in any other
+        # shape is parsed as before, so a format change costs time, not rows.
+        with zf.open("typeDogma.jsonl") as fh:
+            for line in fh:
+                match = _TYPE_DOGMA_KEY.match(line)
+                if match is not None and int(match.group(1)) not in wanted:
+                    continue
+                if not line.strip():
+                    continue
+                r = json.loads(line)
+                if r["_key"] not in wanted:
+                    continue
+                for attr in r.get("dogmaAttributes") or []:
+                    yield (r["_key"], attr["attributeID"], attr["value"])
+
+    db.upsert_many(conn, "sde_type_dogma", ["type_id", "attribute_id", "value"], rows())
 
 
 def _import_regions(conn, zf):
@@ -319,9 +489,11 @@ def due_for_check(conn: sqlite3.Connection, now: datetime | None = None) -> bool
 
     Always true when nothing is imported: that state is broken rather than
     merely out of date, and it should be raised on the very next launch
-    however recently it was checked.
+    however recently it was checked. recorded_build rather than
+    installed_build, because a stale table set is not that state: it is
+    re-imported locally at startup and needs no question asked of CCP.
     """
-    if installed_build(conn) is None:
+    if recorded_build(conn) is None:
         return True
     stamp = db.get_meta(conn, META_CHECKED_AT)
     if not stamp:
@@ -347,8 +519,12 @@ def check(
 
     A network failure is not raised. It leaves latest as None, which reads as
     "not stale as far as we know", and the check runs again next time.
+
+    "Installed" here is the recorded build, not installed_build: an install
+    whose dogma tables predate this importer still has every type name and
+    volume, so it is out of date at worst and never missing.
     """
-    installed = installed_build(conn)
+    installed = recorded_build(conn)
     if installed is None:
         LOGGER.info("SDE: nothing imported; no version check needed")
         return SdeStatus(installed=None, latest=None)

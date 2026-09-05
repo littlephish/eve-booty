@@ -164,17 +164,58 @@ def test_chip_washes_keep_white_text_readable_on_dark(pair):
     )
 
 
+def _channel_distance(a: str, b: str) -> int:
+    """Sum of per-channel RGB differences -- a blunt but honest measure of
+    how far apart two pale (or two deep) washes are to the eye."""
+    a, b = a.lstrip("#"), b.lstrip("#")
+    return sum(abs(int(a[i:i + 2], 16) - int(b[i:i + 2], 16)) for i in (0, 2, 4))
+
+
+# The floor every pair of washes clears in both themes; the closest
+# pre-existing neighbours (category/group on light, category/val on dark) sit
+# at 11 and 15.
+WASH_FLOOR = 10
+# Washes in one hue family need more room, or an including chip reads as an
+# exclusion.
+HUE_NEIGHBOUR_FLOOR = 24
+HUE_NEIGHBOURS = [("abyssal", "negated"), ("abyssal", "is")]
+
+
 def test_every_chip_kind_has_its_own_wash_and_none_collide():
     """The per-kind colours ARE the feature: every kind the grammar can mint
-    must appear in the table, and no two kinds may share a wash in either
-    theme -- two kinds converging would silently un-ship the distinction."""
+    must appear in the table, and no two washes -- the kinds, the negation
+    red and the accent -- may sit within WASH_FLOOR of each other in either
+    theme: two converging would silently un-ship the distinction, and the
+    negation red converging with a kind would dress an including chip as an
+    exclusion. location alone is allowed to equal CHIP_ACCENT: the most-used
+    kind keeps the familiar accent on purpose, and a kind from a newer build
+    falls back to it."""
     from evasset import omni
 
-    minted_kinds = {*omni.LEVEL_KINDS, "item", "is", "val"}
+    minted_kinds = {
+        *omni.LEVEL_KINDS, "item", "is", "val", omni.STAT_KIND, omni.ROLL_KIND, omni.ABYSSAL_KIND,
+    }
     assert set(pal.CHIP_KIND_TINTS) == minted_kinds
+    assert pal.CHIP_KIND_TINTS["location"] == pal.CHIP_ACCENT
+    named = dict(_ALL_CHIP_PAIRS)
+    checked = 0
     for theme in (0, 1):
-        washes = [pair[theme] for pair in pal.CHIP_KIND_TINTS.values()]
-        assert len(washes) == len(set(washes)), f"duplicate wash in theme {theme}"
+        for i, (name_a, pair_a) in enumerate(_ALL_CHIP_PAIRS):
+            for name_b, pair_b in _ALL_CHIP_PAIRS[i + 1:]:
+                if {name_a, name_b} == {"accent", "location"}:
+                    continue
+                distance = _channel_distance(pair_a[theme], pair_b[theme])
+                assert distance >= WASH_FLOOR, (
+                    f"{name_a} and {name_b} are {distance} apart in theme {theme}"
+                )
+                checked += 1
+        for name_a, name_b in HUE_NEIGHBOURS:
+            distance = _channel_distance(named[name_a][theme], named[name_b][theme])
+            assert distance >= HUE_NEIGHBOUR_FLOOR, (
+                f"{name_a} and {name_b} are {distance} apart in theme {theme}"
+            )
+    pairs = len(_ALL_CHIP_PAIRS)
+    assert checked == 2 * (pairs * (pairs - 1) // 2 - 1)
 
 
 def test_the_unpriced_badge_text_inverts_readably_against_its_warning_fill():
@@ -380,3 +421,64 @@ def test_treemap_fill_cycles_rather_than_running_out():
     assert pal.treemap_fill(0) == pal.TREEMAP_FILLS[0]
     assert pal.treemap_fill(len(pal.TREEMAP_FILLS)) == pal.TREEMAP_FILLS[0]
     assert pal.treemap_fill(len(pal.TREEMAP_FILLS) + 3) == pal.TREEMAP_FILLS[3]
+
+
+# ---------------------------------------------------------- quality wash
+# The roll columns' diverging wash: a background under default theme text,
+# like the heat wash, so the same AA requirement applies at both ends of the
+# scale in both themes. Ends and quarter points; the middle is tested apart.
+QUALITY_POINTS = [0.0, 0.25, 0.75, 1.0]
+
+
+@pytest.mark.parametrize("quality", QUALITY_POINTS)
+def test_quality_tints_keep_black_text_readable_on_light(quality):
+    background = pal._quality_hex(quality, dark=False)
+    assert background is not None
+    assert contrast("#000000", background) >= AA_NORMAL, (
+        f"black on {background} (quality {quality}) is "
+        f"{contrast('#000000', background):.2f}:1"
+    )
+
+
+@pytest.mark.parametrize("quality", QUALITY_POINTS)
+def test_quality_tints_keep_white_text_readable_on_dark(quality):
+    background = pal._quality_hex(quality, dark=True)
+    assert background is not None
+    assert contrast("#FFFFFF", background) >= AA_NORMAL, (
+        f"white on {background} (quality {quality}) is "
+        f"{contrast('#FFFFFF', background):.2f}:1"
+    )
+
+
+def test_the_middle_of_the_quality_scale_paints_nothing():
+    """A middling roll is the common case and must stay on the plain row
+    background -- a table where every cell carries a faint tint says
+    nothing. The band is 0.5 +/- 0.05, closed."""
+    for quality in (0.45, 0.5, 0.55, 0.47, 0.53):
+        assert pal._quality_hex(quality, dark=False) is None, quality
+        assert pal._quality_hex(quality, dark=True) is None, quality
+    assert pal._quality_hex(0.44, dark=False) is not None
+    assert pal._quality_hex(0.56, dark=True) is not None
+    assert pal.quality_tint(None) is None
+
+
+def test_the_quality_tint_diverges_and_deepens_toward_the_ends():
+    """Below the middle the wash must lean red (the CRITICAL family), above
+    it green (POSITIVE), and each side must get stronger further out -- a
+    wash that read the same at 25% and 0% would hide the difference the
+    column exists to show."""
+    def channels(hex_colour):
+        raw = hex_colour.lstrip("#")
+        return tuple(int(raw[i:i + 2], 16) for i in (0, 2, 4))
+
+    low_r, low_g, _b = channels(pal._quality_hex(0.0, dark=False))
+    high_r, high_g, _b = channels(pal._quality_hex(1.0, dark=False))
+    assert low_r > low_g, "a bad roll should lean red"
+    assert high_g > high_r, "a good roll should lean green"
+    for dark in (False, True):
+        faint = pal._quality_hex(0.25, dark=dark)
+        strong = pal._quality_hex(0.0, dark=dark)
+        base = "#1E1E1E" if dark else "#FFFFFF"
+        assert contrast(base, strong) > contrast(base, faint), (
+            "the wash must deepen toward the end of the scale"
+        )

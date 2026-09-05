@@ -396,3 +396,210 @@ def test_rows_without_the_price_age_column_degrade_to_no_badge(app, conn):
     cell = sell_cell(model, 1002)
     assert cell.data(gm.PRICE_AGE_ROLE) is None
     assert cell.data(gm.PRICE_BADGE_ROLE) is None
+
+
+# ------------------------------------------------------------ abyssal badge
+def abyssal_rows(conn, item_id: int) -> list[dict]:
+    """The fixture rows as dicts with one stack marked as a mutated module.
+
+    Dicts rather than a re-seeded sde_types row so this file exercises the
+    model's reading of is_dynamic_type independently of the SDE schema that
+    supplies the column in production."""
+    out = []
+    for row in fetch_rows(conn):
+        plain = {key: row[key] for key in row.keys()}
+        plain["is_dynamic_type"] = 1 if plain["item_id"] == item_id else 0
+        out.append(plain)
+    return out
+
+
+def test_a_mutated_module_badges_abyssal_but_still_counts_as_unpriced(app, conn):
+    """The badge explains why there is no quote; the row must NOT become
+    priced in the process -- is:unpriced, the strip count and the totals all
+    key on price_source, which stays 'none'."""
+    model = gm.GroupedAssetsModel()
+    model.set_rows(abyssal_rows(conn, 1004), "location")
+    cell = sell_cell(model, 1004)
+    assert cell.data(gm.PRICE_BADGE_ROLE) == "abyssal"
+    assert model.row_for_index(cell)["price_source"] == "none"
+    assert cell.data(gm.HEAT_ROLE) == 0.0
+    # Every other row is untouched by the new column being present.
+    assert sell_cell(model, 1002).data(gm.PRICE_BADGE_ROLE) == "6d"
+    assert sell_cell(model, 1001).data(gm.PRICE_BADGE_ROLE) is None
+
+
+def test_abyssal_badge_wins_regardless_of_fetch_state(app, conn):
+    """Fetched or not, the value cell reads 'abyssal': the tooltip carries
+    the fetch state, the badge only says what kind of thing this is."""
+    model = gm.GroupedAssetsModel()
+    model.set_rows(abyssal_rows(conn, 1004), "owner")
+    assert sell_cell(model, 1004).data(gm.PRICE_BADGE_ROLE) == "abyssal"
+    model.set_abyssal_summaries({1004: "Web 61% · Range 88%"})
+    assert sell_cell(model, 1004).data(gm.PRICE_BADGE_ROLE) == "abyssal"
+
+
+def test_summary_role_serves_the_cached_text_or_the_not_fetched_notice(app, conn):
+    model = gm.GroupedAssetsModel()
+    model.set_rows(abyssal_rows(conn, 1004), "location")
+    cell = sell_cell(model, 1004)
+    assert cell.data(gm.ABYSSAL_SUMMARY_ROLE) == gm.ABYSSAL_NOT_FETCHED
+    assert cell.data(Qt.ToolTipRole) == gm.ABYSSAL_NOT_FETCHED
+    model.set_abyssal_summaries({1004: "Web 61% · Range 88%"})
+    assert cell.data(gm.ABYSSAL_SUMMARY_ROLE) == "Web 61% · Range 88%"
+    assert cell.data(Qt.ToolTipRole) == "Web 61% · Range 88%"
+    # Ordinary rows and non-value columns carry no tooltip at all.
+    assert sell_cell(model, 1001).data(gm.ABYSSAL_SUMMARY_ROLE) is None
+    assert sell_cell(model, 1001).data(Qt.ToolTipRole) is None
+    gidx, idx = find_leaf(model, 1004)
+    qty_col = [k for k, _ in queries.ASSET_COLUMNS].index("quantity")
+    assert model.index(idx.row(), qty_col, gidx).data(gm.ABYSSAL_SUMMARY_ROLE) is None
+
+
+def test_summaries_survive_a_regroup_and_are_replaced_by_the_next_reload(app, conn):
+    """The group-by combo re-buckets the same rows without re-querying, so
+    set_rows must not wipe the cache; a reload hands in a fresh dict, and a
+    fetch that completed in between must show up in it -- an item missing
+    from the new dict has fallen back to unfetched, never to stale text."""
+    model = gm.GroupedAssetsModel()
+    rows = abyssal_rows(conn, 1004)
+    model.set_abyssal_summaries({1004: "Web 61%"})
+    model.set_rows(rows, "owner")
+    assert sell_cell(model, 1004).data(gm.ABYSSAL_SUMMARY_ROLE) == "Web 61%"
+    model.set_rows(rows, "location")
+    assert sell_cell(model, 1004).data(gm.ABYSSAL_SUMMARY_ROLE) == "Web 61%"
+    model.set_abyssal_summaries({})
+    assert sell_cell(model, 1004).data(gm.ABYSSAL_SUMMARY_ROLE) == gm.ABYSSAL_NOT_FETCHED
+
+
+def test_rows_without_the_dynamic_type_column_never_badge_abyssal(app, rows):
+    """ASSET_ROWS carries is_dynamic_type now, but an older saved query shape
+    or a hand-written SELECT may not; the model must read a row without the
+    column as an ordinary one, not raise. The rows are rebuilt as dicts with
+    the key removed, because the fixture's real rows do carry it."""
+    assert "is_dynamic_type" in rows[0].keys(), "the strip below must remove something"
+    stripped = [{k: r[k] for k in r.keys() if k != "is_dynamic_type"} for r in rows]
+    assert stripped and all("is_dynamic_type" not in r for r in stripped)
+    model = gm.GroupedAssetsModel()
+    model.set_rows(stripped, "location")
+    seen = 0
+    for item_id in (1001, 1002, 1004, 1005):
+        assert sell_cell(model, item_id).data(gm.PRICE_BADGE_ROLE) != "abyssal"
+        assert sell_cell(model, item_id).data(gm.ABYSSAL_SUMMARY_ROLE) is None
+        seen += 1
+    assert seen == 4
+
+
+# ------------------------------------------------------------- roll columns
+CPU, SPEED = 50, 20  # dogma attribute ids: cpu (tf), speedFactor (signed %)
+ROLL_EXTRAS = [(gm.roll_key(CPU), "CPU"), (gm.roll_key(SPEED), "Speed"), (gm.ROLL_MEAN_KEY, "Roll")]
+ROLL_ATTRS = [
+    {"attribute_id": CPU, "name": "cpu", "label": "CPU usage", "unit_id": 106, "unit": "tf"},
+    {"attribute_id": SPEED, "name": "speedFactor", "label": "Maximum Velocity Bonus",
+     "unit_id": 124, "unit": "%"},
+]
+
+
+def roll_model(conn, cells: dict, group_key=None):
+    model = gm.GroupedAssetsModel()
+    model.set_abyssal_cells(cells, ROLL_ATTRS)
+    model.set_rows(abyssal_rows(conn, 1004), group_key, ROLL_EXTRAS)
+    return model
+
+
+def flat_cell(model, item_id: int, key: str):
+    for r in range(model.rowCount()):
+        idx = model.index(r, 0)
+        if model.row_for_index(idx)["item_id"] == item_id:
+            return model.index(r, [k for k, _h in model.columns()].index(key))
+    raise AssertionError(f"item_id {item_id} not in the model")
+
+
+def test_without_extras_the_column_set_is_exactly_asset_columns(model):
+    """Every positional reader of ASSET_COLUMNS (tests included) depends on
+    the plain table serving precisely that list, in that order."""
+    assert model.columns() == list(queries.ASSET_COLUMNS)
+    assert model.columnCount() == len(queries.ASSET_COLUMNS)
+    assert model.key_at(3) == "quantity"
+    assert model.key_at(len(queries.ASSET_COLUMNS)) is None and model.key_at(-1) is None
+
+
+def test_extra_columns_slot_in_after_qty_and_leave_the_rest_in_order(app, conn):
+    model = roll_model(conn, {})
+    keys = [k for k, _h in model.columns()]
+    qty = keys.index("quantity")
+    assert keys[qty + 1:qty + 4] == [gm.roll_key(CPU), gm.roll_key(SPEED), gm.ROLL_MEAN_KEY]
+    assert keys[:qty + 1] + keys[qty + 4:] == [k for k, _h in queries.ASSET_COLUMNS]
+    # The base columns plus the three roll extras slotted in after Qty.
+    assert model.columnCount() == len(queries.ASSET_COLUMNS) + 3
+    assert model.headerData(qty + 1, Qt.Horizontal) == "CPU"
+    assert model.headerData(qty + 3, Qt.Horizontal) == "Roll"
+    assert model.key_at(qty + 3) == gm.ROLL_MEAN_KEY
+    # And the next set_rows without extras takes them away again.
+    model.set_rows(abyssal_rows(conn, 1004), None)
+    assert model.columns() == list(queries.ASSET_COLUMNS)
+
+
+def test_roll_cells_render_display_values_and_the_mean_as_a_percent(app, conn):
+    """The number the column shows is abyssal.format_value of the display
+    value -- the same text the inspector prints -- and the Roll column is the
+    item's mean quality; rows without cells are blank, never zero."""
+    model = roll_model(conn, {1004: {CPU: (27.4, 0.8), SPEED: (-63.2, 0.7)}})
+    cpu, speed, mean = (flat_cell(model, 1004, k) for k, _h in ROLL_EXTRAS)
+    assert cpu.data() == "27 tf"
+    assert speed.data() == "-63%"
+    assert mean.data() == "75%"
+    assert cpu.data(Qt.UserRole) == 27.4
+    assert cpu.data(gm.ROLL_QUALITY_ROLE) == 0.8
+    assert mean.data(gm.ROLL_QUALITY_ROLE) == pytest.approx(0.75)
+    assert cpu.data(Qt.TextAlignmentRole) == int(Qt.AlignRight | Qt.AlignVCenter)
+    other = flat_cell(model, 1001, gm.roll_key(CPU))
+    assert other.data() == "" and other.data(gm.ROLL_QUALITY_ROLE) is None
+    assert model.cell_value(model.row_for_index(cpu), gm.roll_key(CPU)) == 27.4
+    assert model.cell_value(model.row_for_index(cpu), "quantity") == 1000
+
+
+def test_roll_columns_sort_numerically_with_unranked_rows_at_the_bottom(app, conn):
+    """A webifier's speed factor is negative, so sorting missing cells as
+    zero would wedge unfetched items between bad and good rolls; they stay
+    at the bottom in both directions."""
+    cells = {1001: {CPU: (30.0, 0.9)}, 1002: {CPU: (10.0, 0.1)}, 1004: {CPU: (-20.0, 0.5)}}
+    model = roll_model(conn, cells)
+    model.sort_by(gm.roll_key(CPU), Qt.AscendingOrder)
+    assert [r["item_id"] for r in model.rows()] == [1004, 1002, 1001, 1003, 1005]
+    model.sort_by(gm.roll_key(CPU), Qt.DescendingOrder)
+    assert [r["item_id"] for r in model.rows()] == [1001, 1002, 1004, 1003, 1005]
+    # The Roll column sorts by mean quality (0.9, 0.5, 0.1), not by value.
+    model.sort_by(gm.ROLL_MEAN_KEY, Qt.DescendingOrder)
+    assert [r["item_id"] for r in model.rows()] == [1001, 1004, 1002, 1003, 1005]
+    model.reset_sort()
+    assert [r["item_id"] for r in model.rows()] == [1001, 1002, 1003, 1004, 1005]
+
+
+def test_roll_cells_wear_the_quality_tint_and_the_middle_stays_plain(app, conn):
+    from evasset.ui import palette
+
+    cells = {1001: {CPU: (30.0, 0.9)}, 1002: {CPU: (25.0, 0.5)}, 1004: {CPU: (20.0, None)}}
+    model = roll_model(conn, cells)
+    good = flat_cell(model, 1001, gm.roll_key(CPU)).data(Qt.BackgroundRole)
+    assert isinstance(good, QBrush)
+    assert good.color().name().upper() == palette.quality_tint(0.9).upper()
+    assert flat_cell(model, 1002, gm.roll_key(CPU)).data(Qt.BackgroundRole) is None
+    unranked = flat_cell(model, 1004, gm.roll_key(CPU))
+    assert unranked.data(Qt.BackgroundRole) is None
+    assert unranked.data() == "20 tf", "an unranked roll still shows its value"
+    # Value columns keep their own heat wash logic untouched.
+    assert flat_cell(model, 1001, "sell_value").data(gm.HEAT_ROLE) == pytest.approx(1.0)
+
+
+def test_roll_cells_survive_a_regroup_and_are_replaced_by_the_next_reload(app, conn):
+    """The group-by combo re-buckets the same rows without re-querying, so
+    set_rows must keep the cells; a reload hands in a fresh dict."""
+    model = roll_model(conn, {1004: {CPU: (27.4, 0.8)}}, group_key="location")
+    gidx, idx = find_leaf(model, 1004)
+    col = [k for k, _h in model.columns()].index(gm.roll_key(CPU))
+    assert model.index(idx.row(), col, gidx).data() == "27 tf"
+    model.set_rows(abyssal_rows(conn, 1004), "owner", ROLL_EXTRAS)
+    gidx, idx = find_leaf(model, 1004)
+    assert model.index(idx.row(), col, gidx).data() == "27 tf"
+    model.set_abyssal_cells({})
+    assert model.index(idx.row(), col, gidx).data() == ""

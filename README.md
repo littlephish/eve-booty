@@ -7,6 +7,10 @@ character is worth over time.
 
 ![Filtering the Assets tab down to one ship and opening its fit](docs/omnibox-to-fit.gif)
 
+**Abyssal item search**
+
+![Filtering to abyssal modules, inspecting one, then narrowing Heat Sinks by three rolled stats](docs/abyssal-search.gif)
+
 Python 3.10+, PySide6, SQLite. Runs from source with `uv`, and ships for Windows
 as a portable program folder built with Nuitka.
 
@@ -96,11 +100,19 @@ run from source instead.
 - An estate strip above the table - net worth, assets, liquid ISK, volume,
   unpriced count and a one-row value map of your top locations - always
   whole-estate, never faceted by the filters below it
-- A row inspector (`Enter`): both price bases, price source and quote age,
+- A row inspector: click a row (or `Enter`) for a panel beside the table, or
+  right-click → Inspect in window to pin one item in its own window while you
+  keep browsing; either shows both price bases, price source and quote age,
   volume, location and slot, plus Where else? / Refresh price / Pin price…
 - Honest price flagging: unpriced and manually pinned stacks are badged in the
   value cells, quotes older than 48 h carry their age, and a manual price is
   never overwritten by a reprice until you unpin it
+- Abyssal (mutated) modules show their actual rolled stats in the inspector --
+  each roll as a bar across the mutaplasmid's possible range with a
+  better/worse verdict against the un-mutated module -- and the rolls are
+  searchable: `stat:` by value, `roll:` by quality, an `abyssal` chip that
+  narrows to module types and opens a card of sliders for multi-stat
+  searches, and per-type roll columns in the table (see below)
 - Net worth per character, snapshotted on every sync and charted over time at
   both Jita buy and Jita sell, split into assets / wallet / sell orders / buy
   escrow / contracts / in-production
@@ -119,8 +131,98 @@ loc:"Jita IV - Moon 4"     sys:Jita      region:"The Forge"
 owner:Main                 cat:Ship      group:Battleship      meta:"Tech II"
 is:fitted  is:safety  is:delivery  is:unpriced  is:bpc
 val:>10m   val:<1b
+abyssal    abyssal:"Abyssal Stasis Webifier"    abyssal:"Abyssal Stasis Webifier, Abyssal Warp Disruptor"
+stat:cpu<26   stat:"Missile Damage Bonus">10   stat:web<-55   stat:duration<9   stat:cpu=18..22
+roll:web>=70   roll:cpu=60..90   roll:"Missile Damage Bonus"<50
 -owner:Alt                 (a leading - negates any token)
 ```
+
+`stat:` compares one attribute of an abyssal module -- any attribute ESI
+reports for the item, rolled by its mutaplasmid or not, so `stat:cpu<26` finds
+a module by its CPU even when the mutaplasmid never touched CPU; the inspector
+lists only the rolled ones -- in the units the inspector shows: `duration<9`
+means nine seconds even though the game stores milliseconds, and a `+10.77%`
+missile bonus is matched by `>10`, not by the stored `1.1077`. The comparison
+is against the exact display value; the inspector rounds values of ten or
+more to whole numbers, so a CPU shown as `26 tf` may really be 25.8 and fail
+`stat:cpu>=26`. The name can be the attribute's display name (`"CPU usage"`,
+quoted because of the space), its internal SDE name (`speedFactor`), or one
+of the short aliases -- `cpu`, `pg`/`power`/`grid`, `cap`, `range`/`optimal`,
+`falloff`, `rof`, `web`/`speed`, `velocity`, `damage`/`dmg`, `hp`,
+`duration`/`cycle`, `neut`, `nos`, `sig`, `shield`, `armor`/`armour`,
+`tracking`, `mass`. An internal name is matched before a display name, since
+two attributes can share one display name (the percentage and the metres
+flavour of a microwarpdrive's signature bloom both display as "Signature
+Radius Modifier"); the completer offers the internal names when that happens.
+Operators are `<`, `<=`, `>`, `>=`, and `name=lo..hi` is an inclusive range
+(`stat:cpu=18..22`); negative numbers are fine (`stat:web<-55` is a web
+stronger than 55%). Items whose rolls have not been fetched cannot match a
+`stat:` chip, and are kept by a negated one -- `-stat:cpu<26` hides only the
+modules known to be under 26 tf.
+
+`abyssal` on its own is a chip for every mutated module, fetched or not. It is
+the type flag, so a stack of mutaplasmids is not abyssal even though the game
+colours it the same; `is:abyssal` still parses to the same chip. Give it a
+value and it narrows to named module types, several joined by commas and OR'd:
+`abyssal:"Abyssal Stasis Webifier, Abyssal Warp Disruptor"`. The chip reads
+"Abyssal", "Abyssal · Stasis Webifier" or "Abyssal · 2 types".
+
+`roll:` is the other way to ask about a rolled stat: not its value but the
+roll's quality -- how far along the mutaplasmid's possible range it landed, as
+a percent with 100 always the good end. `roll:web>=70` finds webifiers whose
+velocity bonus rolled in the top 30% of what the mutaplasmid could give,
+whichever direction "good" runs for that attribute; `roll:cpu=60..90` is an
+inclusive range. Only the attributes the item's mutaplasmid rolls have a
+quality, so `roll:` never matches an un-rolled attribute where `stat:` would
+happily compare its stored value. Both take the same names and aliases, and
+both are blind to items whose rolls have not been fetched (a negated `-roll:`
+keeps them). Several `roll:`/`stat:` chips AND together; the types inside the
+abyssal chip OR.
+
+Typing `abyssal` and pressing Enter opens the complex-search card under the
+new chip, and the chip's `▾` button reopens it later (a chip a saved view or
+the rail puts in place waits for the button). The card is a dropdown of the
+abyssal module types you own, with counts faceted by your other chips, that
+you can also type into: the card opens with the type field focused, a few
+letters (of the short label or the full name, "Abyssal" prefix and all)
+narrow the list, Enter takes the highlighted or first match and leaves the
+card open, and text matching no type snaps back to the current pick. A bare
+`abyssal` chip opens the card with no type picked and the field empty; there
+is no "All" entry, since the chip already means every abyssal item until a
+type narrows it -- clearing the field (and Enter, or leaving it) is the way
+back to every item from a type. Once a type is picked (every type rolls its
+own set of attributes, so the rows need one), add a stat row per constraint:
+the attribute, a two-handled slider and two number fields in the stat's own
+units (the `tf`, `%` or `m` the inspector shows), the slider running between
+the estate's own minimum and maximum for that stat within that type. Done
+writes the chips back into the omnibox -- the abyssal chip plus one `stat:`
+chip per row, replacing the card's previous abyssal and `stat:` chips and
+leaving every other chip alone -- and the table reloads once. `roll:` stays
+a typed filter: the card neither builds nor edits a `roll:` chip, so one
+typed beside the card's own survives Done as it was. Done also settles
+spelling: a chip typed as `stat:cpu>40` comes back as `stat:CPU usage>=40`,
+since a row names its attribute the way the picker
+does and a slider handle has no position for "just above" -- the filter
+means the same rows, only written the canonical way. A chip naming several
+types (typed, or recalled from a saved view) opens with the first of them
+picked, and Done writes that one alone -- several types OR'd inside one chip
+stay a typed affair. Cancel, Esc or a click anywhere else changes nothing. A
+banner counts the items of the picked type (or of every type) whose rolls
+have not been fetched, with a Fetch button that starts the same job as
+Update → Abyssal stats for exactly those items.
+
+With the chip on a single type the table grows one column per rolled
+attribute after Qty, plus a Roll column. Each cell shows the display value the
+inspector would (`27 tf`, `-63%`) washed by its roll quality -- towards red
+below the middle, towards green above, plain around 50% -- and Roll is the
+item's mean quality over its rankable rolls. Like the `stat:` caveat above,
+the Roll column rounds (a mean of 38.6% shows as `39%`) while `roll:`
+compares the exact quality, so `roll:cpu>=39` can miss an item whose column
+reads 39%. The columns appear only once an item of the type has been fetched
+-- they are the attributes your items actually carry values for, not
+everything the mutaplasmid could roll. The columns sort by value,
+survive a reload, export to CSV with the rest, and go away when the chip
+names no type or several.
 
 Filters ignore case, so `cat:ship` and `cat:Ship` are the same thing, as are
 bare words. Values with spaces do not need quoting either: `owner:Test Pilot`
@@ -152,6 +254,47 @@ together) · `?` the full key map.
 
 Pins and saved views persist in the database next to the assets they
 describe, so a copied database carries them along.
+
+## Abyssal module stats
+
+A mutated module's stats are not a property of its type -- every item is
+rolled -- so the SDE only knows the generic "Abyssal X" and the market knows
+nothing at all. ESI has one public route that returns an item's actual
+attributes given its type and item id, both of which the assets sync already
+stores, and the SDE carries the rest: attribute names and units, the source
+module's base values, and each mutaplasmid's min..max multiplier range.
+
+Open the inspector on an abyssal row and the Rolled stats section lists the
+attributes the mutaplasmid touched (every attribute ESI reports is stored and
+searchable with `stat:`; only the rolled ones are listed, and only they
+answer `roll:`), one per line: the value in display units, how far along the
+possible range it landed (a thin bar, and `61% of range` in text), and a
+coloured `▲ +1.80 tf vs 24 tf` verdict against the un-mutated source. "Good"
+follows CCP's own polarity data -- a webifier's velocity bonus going from
+-60% to -63% is a better roll because lower is better there, so its bar
+fills towards the strong end and the tooltip says so. Below the list: the
+source module and mutaplasmid it came from.
+
+Nothing is fetched until you ask, because ESI has no batch route and an
+estate can hold hundreds of these. Three ways to ask:
+
+- **Update → Abyssal stats** walks every abyssal item not yet asked about,
+  one request each, and reports `fetched N, M not known to ESI, K failed`.
+  Items answered once are never asked again; rolls are permanent.
+- The **Fetch abyssal stats** button in the inspector, for one item now. It
+  reads **Retry** on an item ESI has already said it does not know.
+- **Settings → Behaviour → Fetch rolls for new abyssal items during sync**,
+  off by default; the first successful manual run offers to turn it on.
+
+The value cells wear an `abyssal` badge whose tooltip is the per-attribute
+roll summary (`CPU 61% · Missile dmg 57% · RoF 66%`), or "Rolls not fetched"
+until then. The badge is an explanation, not a price: abyssal items stay
+unpriced -- `is:unpriced` finds them, the strip counts them, and totals do not
+move -- because nothing first-party quotes them. The dogma tables behind all
+this are part of the SDE import; an install whose SDE predates them re-imports
+from the cached zip at the next startup, a few seconds of local work.
+Primary-source notes on the ESI route, the SDE files and the unit rules are in
+[`docs/research/abyssal-stats.md`](docs/research/abyssal-stats.md).
 
 ## Pricing
 
@@ -407,6 +550,7 @@ once first.
 | `src/evasset/esi/client.py` | ESI client: error-limit tracking, retries, pagination |
 | `src/evasset/esi/sync.py` | Character and corp pulls, container-tree flattening |
 | `src/evasset/pricing.py` | Jita sell + public-contract averaging |
+| `src/evasset/abyssal.py` | Abyssal rolls: polarity, roll position and quality, value rendering, `stat:` aliases, and the per-item ESI fetch |
 | `src/evasset/networth.py` | Snapshot maths and history |
 | `src/evasset/fitting.py` | Groups a ship's contents into slots/holds, and exports ESI-fitting JSON / EFT |
 | `src/evasset/treemap.py` | Squarified treemap layout for the Treemap tab |
@@ -414,9 +558,12 @@ once first.
 | `src/evasset/updater.py` | Release check, download and hand-off to the swap helper |
 | `src/evasset/_version.py` | The version, rewritten from the tag at release time |
 | `src/evasset/ui/` | PySide6 widgets |
+| `src/evasset/ui/abyssal_card.py` | The abyssal chip's complex-search card: type picker, stat rows, Done applies and every other exit cancels |
 | `scripts/seed_demo.py` | Fills a throwaway database with plausible data, no EVE account needed |
+| `tests/data/abyssal_corpus.json` | 520 anonymised abyssal rolls across 36 module types, with the SDE rows they reference; drives the whole-estate tests and the demo seed's abyssal hangars |
 | `scripts/make_icon.py` | Draws the app icon and packs the multi-size `.ico` |
 | `scripts/set_version.py` | Stamps `_version.py` from the release tag |
+| `docs/research/` | Cited primary-source write-ups behind a feature (currently the abyssal-stats notes) |
 
 The app stores everything under `eve-booty` in your platform's app data
 directory. Installs made before the rename kept their data under `evasset`; on
@@ -445,9 +592,14 @@ uv run pytest
 ```
 
 No network needed, and Qt runs offscreen where a widget is involved. They cover
-the value maths, the omnibox grammar and its SQL (quoting, negation, `val:`
-comparisons, saved-view round-trips), the rail rollup and facet queries, the
-grouped tree model, the Assets tab wired end to end, the treemap layout (that
+the value maths, the omnibox grammar and its SQL (quoting, negation, `val:`,
+`stat:` and `roll:` comparisons with `..` ranges, the `abyssal` chip,
+saved-view round-trips), the rail rollup and facet queries, the grouped tree
+model and its roll columns, the abyssal card and its slider, the Assets tab
+wired end to end (including the abyssal inspector, badge, fetch, chip, card,
+roll-column and export paths against the research notes' live sample,
+hand-computed), the abyssal unit table and polarity rules, the SQL roll
+quality against its Python twin, the treemap layout (that
 it tiles exactly, without overlaps, in proportion to value), the container-tree
 resolver (including a cyclic-parent case that would otherwise hang), the
 contract outlier filter and its packaged-volume floor, the `from_id` walk-back
@@ -461,6 +613,10 @@ To poke at the UI without an EVE account:
 EVEBOOTY_DATA_DIR=/tmp/demo uv run python scripts/seed_demo.py
 EVEBOOTY_DATA_DIR=/tmp/demo uv run evebooty
 ```
+
+The demo estate includes the abyssal corpus, so the inspector, the roll
+columns and the search card have a few hundred rolled modules to work with
+in Jita and Amarr.
 
 ## Relationship to jEveAssets
 

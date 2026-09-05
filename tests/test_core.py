@@ -1041,6 +1041,56 @@ def test_migration_repairs_networth_snapshots_stuck_mid_migration(tmp_path):
     assert networth.take_snapshot(conn, "2026-08-07T00:00:00+00:00") >= 0  # must not raise
 
 
+def test_migration_adds_is_dynamic_type_to_an_old_sde_types_table(tmp_path):
+    """A database from before the abyssal-stats work has an sde_types without
+    the flag. The rebuild must keep every type row (reading 0 until the next
+    SDE import), recreate the two indexes that went down with the renamed
+    table, and leave the table writable by an importer that now names the
+    column -- and by one that does not."""
+    import sqlite3 as sq
+
+    path = tmp_path / "old-types.sqlite"
+    old = sq.connect(path)
+    old.executescript("""
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE sde_types (
+            type_id INTEGER PRIMARY KEY, name TEXT NOT NULL, group_id INTEGER,
+            market_group_id INTEGER, meta_group_id INTEGER, volume REAL, capacity REAL,
+            portion_size INTEGER, base_price REAL, published INTEGER NOT NULL DEFAULT 1);
+        CREATE INDEX idx_types_name  ON sde_types(name);
+        CREATE INDEX idx_types_group ON sde_types(group_id);
+        INSERT INTO sde_types VALUES (47408,'50MN Abyssal Microwarpdrive',46,NULL,15,10,NULL,1,0,1);
+        INSERT INTO sde_types VALUES (34,'Tritanium',18,NULL,1,0.01,NULL,1,5,1);
+    """)
+    old.commit()
+    old.close()
+
+    conn = db.init(path)
+    assert "is_dynamic_type" in db.columns(conn, "sde_types")
+    rows = {r["type_id"]: r for r in conn.execute("SELECT * FROM sde_types")}
+    assert set(rows) == {47408, 34}, "no type row may be lost in the rebuild"
+    assert rows[47408]["is_dynamic_type"] == 0, "unknown until the SDE re-import fills it"
+    assert rows[47408]["meta_group_id"] == 15 and rows[34]["base_price"] == 5
+    indexes = {
+        r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='sde_types'"
+        )
+    }
+    assert {"idx_types_name", "idx_types_group"} <= indexes
+    # Both the new importer (which names the column) and an insert that does
+    # not mention it must work against the rebuilt table.
+    conn.execute(
+        "INSERT INTO sde_types (type_id,name,group_id,portion_size,published,is_dynamic_type) "
+        "VALUES (47702,'Abyssal Stasis Webifier',65,1,1,1)"
+    )
+    conn.execute(
+        "INSERT INTO sde_types (type_id,name,group_id,portion_size,published) "
+        "VALUES (645,'Dominix',27,1,1)"
+    )
+    assert conn.execute("SELECT is_dynamic_type FROM sde_types WHERE type_id=645").fetchone()[0] == 0
+    assert db.migrate(conn) == [], "a migrated table is not migrated twice"
+
+
 def test_migration_is_idempotent(tmp_path):
     path = tmp_path / "twice.sqlite"
     db.init(path)

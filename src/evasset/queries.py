@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
+from . import abyssal
 from .config import ASSET_SAFETY_LOCATION_ID
 
 # The station/structure/system a root-level item is sitting in, or the fixed
@@ -59,13 +60,19 @@ container_walk(owner_type, owner_id, item_id, parent_id, depth, path) AS (
     LEFT JOIN sde_types pt ON pt.type_id = par.type_id
     WHERE w.depth < 8
 ),
+-- The deepest row per item is the complete path; the shallower ones are its
+-- prefixes. Picked with a window function rather than a correlated
+-- MAX(depth) subselect, which EXPLAIN QUERY PLAN showed running once per
+-- asset row -- the exact shape the abyssal roll clause has a test guarding
+-- against, and for the same reason.
 container_path(owner_type, owner_id, item_id, path) AS (
-    SELECT owner_type, owner_id, item_id, path FROM container_walk w
-    WHERE path <> ''
-      AND depth = (SELECT MAX(depth) FROM container_walk d
-                   WHERE d.owner_type = w.owner_type
-                     AND d.owner_id   = w.owner_id
-                     AND d.item_id    = w.item_id)
+    SELECT owner_type, owner_id, item_id, path FROM (
+        SELECT owner_type, owner_id, item_id, path,
+               ROW_NUMBER() OVER (
+                   PARTITION BY owner_type, owner_id, item_id ORDER BY depth DESC
+               ) AS rank
+        FROM container_walk WHERE path <> ''
+    ) WHERE rank = 1
 )
 SELECT
     a.owner_type,
@@ -95,6 +102,7 @@ SELECT
     cp.path                                                                AS container,
     a.is_singleton,
     a.is_blueprint_copy,
+    t.is_dynamic_type                                                      AS is_dynamic_type,
     a.root_location_id,
     {LOCATION_EXPR}                                                        AS location,
     sys.name                                                               AS system,
@@ -199,6 +207,21 @@ HIDE_SHIP_CONTENTS_CLAUSE = """NOT EXISTS (
 def fetch_assets(conn: sqlite3.Connection, where: str = "", params: tuple = ()) -> list[sqlite3.Row]:
     sql = ASSET_ROWS + (f" WHERE {where}" if where else "")
     return list(conn.execute(sql, params))
+
+
+def count_assets(conn: sqlite3.Connection, where: str = "", params: tuple = ()) -> int:
+    """How many rows fetch_assets would return for the same WHERE.
+
+    The abyssal card's live "N of TOTAL match" asks this after every handle
+    move, so it is a COUNT over the same joins rather than a fetch whose
+    rows are thrown away: the answer is one integer, and the fetch would
+    build the owner, station and price columns of every matching row only
+    to discard them. Wrapping ASSET_ROWS whole, rather than rewriting its
+    joins, keeps the count honest against the table -- the WHERE is the
+    same one the omnibox hands fetch_assets.
+    """
+    sql = f"SELECT COUNT(*) FROM ({ASSET_ROWS}{f' WHERE {where}' if where else ''})"
+    return int(conn.execute(sql, params).fetchone()[0])
 
 
 # Everything sitting directly on a ship: fitted modules and charges, drones,
@@ -614,6 +637,564 @@ def trade_summary(conn: sqlite3.Connection, where: str = "", params: tuple = ())
 def sde_build(conn: sqlite3.Connection) -> str:
     row = conn.execute("SELECT value FROM meta WHERE key='sde_build'").fetchone()
     return row["value"] if row else "not imported"
+
+
+# ------------------------------------------------------------ abyssal rolls
+def display_value_sql(value_expr: str, unit_expr: str) -> str:
+    """The dogma value as the game displays it, for a given unit id.
+
+    One CASE shared by the inspector's roll rows and the omnibox `stat:`
+    filter, so a number the user reads off the screen is the number they
+    can type into a comparison. The rules are dogmaUnits' own descriptions
+    (build 3487903; docs/research/abyssal-stats.md section 5): 101 stores
+    milliseconds and shows seconds; 108 and 111 store a resonance where
+    0.0 means 100% and show (1 - v) * 100; 109 stores a multiplier around
+    1.0 and shows (v - 1) * 100; 127 stores a 0..1 fraction and shows
+    v * 100. Everything else, including the already-percent units 105, 121,
+    124 and 205, is shown as stored. A NULL unit falls through to ELSE.
+    Both expressions are SQL this module's callers own, never user input.
+    """
+    return f"""CASE {unit_expr}
+        WHEN 101 THEN ({value_expr}) / 1000.0
+        WHEN 108 THEN (1 - ({value_expr})) * 100
+        WHEN 111 THEN (1 - ({value_expr})) * 100
+        WHEN 109 THEN (({value_expr}) - 1) * 100
+        WHEN 127 THEN ({value_expr}) * 100
+        ELSE {value_expr}
+    END"""
+
+
+def roll_quality_sql(
+    value: str,
+    base: str,
+    min_mult: str,
+    max_mult: str,
+    attr_high: str,
+    mutator_high: str,
+    attribute_id: str = "sd.attribute_id",
+) -> str:
+    """The roll's quality as a percent 0..100, or NULL, as one SQL expression.
+
+    The SQL twin of abyssal.quality(abyssal.roll_position(...)) with the
+    polarity of abyssal.resolve_polarity, so the omnibox `roll:` filter can
+    rank every item inside the query instead of pulling every abyssal
+    attribute row into Python and filtering there. The two are pinned equal
+    over seeded rows in tests/test_abyssal.py; any change to one is a change
+    to both. Arithmetic in the same order as the Python -- lo and hi are the
+    MIN/MAX of base*min and base*max so a negative base still gives lo < hi,
+    the position is clamped to 0..1, and NULL comes out when the base is
+    unknown or the range degenerate. The one deliberate difference is the
+    `* 1.0` before the division: a bound parameter has no column affinity,
+    so two integer operands would divide as integers in SQLite where Python
+    would not, and multiplying by 1.0 first is exact.
+
+    Polarity is COALESCE(mutator, attribute, 1), the mutaplasmid's word
+    first as in resolve_polarity. abyssal.POLARITY_OVERRIDES, when it holds
+    anything, becomes a leading `CASE {attribute_id} WHEN id THEN flag ...`
+    so the SQL and the Python keep agreeing the day an override lands; the
+    ids and flags come from that module-level dict, never from user input.
+    Read at call time, not import time, so a test can monkeypatch one in.
+
+    Every argument is an SQL expression the caller owns. attribute_id is
+    only consulted for the override CASE; it defaults to the alias the
+    `roll:` filter uses.
+    """
+    lo = f"MIN(({base}) * ({min_mult}), ({base}) * ({max_mult}))"
+    hi = f"MAX(({base}) * ({min_mult}), ({base}) * ({max_mult}))"
+    pos = f"MIN(1.0, MAX(0.0, (({value}) - {lo}) * 1.0 / ({hi} - {lo})))"
+    polarity = f"COALESCE({mutator_high}, {attr_high}, 1)"
+    if abyssal.POLARITY_OVERRIDES:
+        whens = " ".join(
+            f"WHEN {int(aid)} THEN {1 if flag else 0}"
+            for aid, flag in sorted(abyssal.POLARITY_OVERRIDES.items())
+        )
+        polarity = f"CASE {attribute_id} {whens} ELSE {polarity} END"
+    return f"""CASE
+        WHEN ({base}) IS NULL OR {hi} - {lo} <= 0 THEN NULL
+        WHEN {polarity} = 1 THEN {pos} * 100
+        ELSE (1 - {pos}) * 100
+    END"""
+
+
+# One stored attribute of one abyssal item, joined to everything needed to
+# read it as a roll: name and unit, the source type's base (falling back to
+# the attribute's SDE default when the source has no dogma row for it), and
+# the mutator's range and polarity override. The source and mutator ids
+# come from the item's own abyssal_items row, so the joins are bound rather
+# than correlated. {rolled} is filled by fetch_abyssal_rolls with the rule
+# for which attributes count as rolled -- see there.
+_ABYSSAL_ROLL_ROWS = f"""
+SELECT aa.attribute_id,
+       da.name,
+       COALESCE(da.display_name, da.name)                                   AS label,
+       da.unit_id,
+       du.display_name                                                      AS unit,
+       aa.value                                                             AS raw_value,
+       {display_value_sql("aa.value", "da.unit_id")}                        AS value,
+       COALESCE(td.value, da.default_value)                                 AS raw_base,
+       {display_value_sql("COALESCE(td.value, da.default_value)", "da.unit_id")} AS base,
+       da.high_is_good                                                      AS attr_high_is_good,
+       mr.high_is_good                                                      AS mutator_high_is_good,
+       mr.min_mult,
+       mr.max_mult,
+       {display_value_sql("COALESCE(td.value, da.default_value) * mr.min_mult", "da.unit_id")}
+                                                                            AS range_at_min,
+       {display_value_sql("COALESCE(td.value, da.default_value) * mr.max_mult", "da.unit_id")}
+                                                                            AS range_at_max
+FROM abyssal_attributes aa
+JOIN      sde_dogma_attributes da ON da.attribute_id = aa.attribute_id
+LEFT JOIN sde_dogma_units      du ON du.unit_id = da.unit_id
+LEFT JOIN sde_type_dogma       td ON td.type_id = :source AND td.attribute_id = aa.attribute_id
+LEFT JOIN sde_mutator_ranges   mr ON mr.mutator_type_id = :mutator
+                                 AND mr.attribute_id = aa.attribute_id
+WHERE aa.item_id = :item AND ({{rolled}})
+ORDER BY label COLLATE NOCASE, aa.attribute_id
+"""
+
+# The mutator's attribute set is the authoritative "what was rolled". When
+# the SDE does not know the mutator (a brand-new mutaplasmid, or an SDE
+# older than the item), the fallback is every attribute whose value differs
+# from the base -- or whose base is unknown, since "unchanged" cannot then
+# be shown either way.
+_ROLLED_BY_MUTATOR = "mr.attribute_id IS NOT NULL"
+_ROLLED_BY_DIFFERENCE = (
+    "COALESCE(td.value, da.default_value) IS NULL "
+    "OR COALESCE(td.value, da.default_value) <> aa.value"
+)
+
+
+def _roll_dict(r: sqlite3.Row) -> dict:
+    high = abyssal.resolve_polarity(
+        r["attribute_id"], r["attr_high_is_good"], r["mutator_high_is_good"]
+    )
+    position = abyssal.roll_position(r["raw_value"], r["raw_base"], r["min_mult"], r["max_mult"])
+    # The range ends go through the same unit CASE as value and base, and are
+    # ordered AFTER conversion: units 108 and 111 display (1 - v) * 100, so
+    # the raw low end becomes the displayed high end. Sorting the raw pair
+    # first (as roll_position does) and converting would hand the inspector
+    # "Range: 15% to 4.60%" for the research's rate-of-fire roll. Unrankable
+    # rolls carry no range at all rather than a pair no position could be
+    # read against.
+    lo = hi = None
+    if position is not None:
+        lo, hi = sorted((r["range_at_min"], r["range_at_max"]))
+    return {
+        "attribute_id": r["attribute_id"],
+        "name": r["name"],
+        "label": r["label"],
+        "unit_id": r["unit_id"],
+        "unit": r["unit"],
+        "value": r["value"],
+        "base": r["base"],
+        "min": lo,
+        "max": hi,
+        "position": position,
+        "quality": abyssal.quality(position, high),
+        "high_is_good": high,
+        "better": abyssal.verdict(r["raw_value"], r["raw_base"], high),
+    }
+
+
+def fetch_abyssal_rolls(conn: sqlite3.Connection, item_id: int) -> dict:
+    """Everything the inspector shows about one abyssal item's rolls.
+
+    status is 'unfetched' (no abyssal_items row yet), 'missing' (ESI
+    answered 404) or 'ok'; source and mutator are type names, None when
+    unknown. rolls carries the rolled attributes only, ordered by label:
+    value, base, min and max are DISPLAY numbers (display_value_sql
+    applied, so `duration` reads 9.0 seconds, not 9000), with min <= max in
+    display terms and both None when the roll cannot be ranked; unit is the
+    display symbol, position is the raw roll's place in the mutator's range
+    and quality is that mirrored for low-is-good attributes -- quality is
+    the one to draw a bar from, position is a datum. better is the verdict
+    against the un-mutated source (None when equal, or when no base is
+    known).
+    """
+    head = conn.execute(
+        """SELECT i.status, i.source_type_id, i.mutator_type_id, i.created_by,
+                  st.name AS source, mt.name AS mutator
+           FROM abyssal_items i
+           LEFT JOIN sde_types st ON st.type_id = i.source_type_id
+           LEFT JOIN sde_types mt ON mt.type_id = i.mutator_type_id
+           WHERE i.item_id = ?""",
+        (item_id,),
+    ).fetchone()
+    if head is None:
+        return {"status": abyssal.STATUS_UNFETCHED, "source": None, "mutator": None,
+                "created_by": None, "rolls": []}
+    out = {
+        "status": head["status"],
+        "source": head["source"],
+        "mutator": head["mutator"],
+        "created_by": head["created_by"],
+        "rolls": [],
+    }
+    if head["status"] != abyssal.STATUS_OK:
+        return out
+    known_mutator = conn.execute(
+        "SELECT 1 FROM sde_mutator_ranges WHERE mutator_type_id = ? LIMIT 1",
+        (head["mutator_type_id"],),
+    ).fetchone() is not None
+    rolled = _ROLLED_BY_MUTATOR if known_mutator else _ROLLED_BY_DIFFERENCE
+    rows = conn.execute(
+        _ABYSSAL_ROLL_ROWS.format(rolled=rolled),
+        {"item": item_id, "source": head["source_type_id"], "mutator": head["mutator_type_id"]},
+    )
+    out["rolls"] = [_roll_dict(r) for r in rows]
+    return out
+
+
+# Text for a fetched item whose mutaplasmid the SDE has never heard of, for
+# one whose mutaplasmid is known but whose range still cannot be ranked (the
+# source type has no dogma rows, or ESI returned no attributes), and for one
+# ESI does not know. The first two are kept apart because they call for
+# different remedies: an SDE update fixes the first, nothing fixes the second.
+ABYSSAL_SUMMARY_UNRANKED = "Stats fetched — mutator unknown to the SDE"
+ABYSSAL_SUMMARY_UNRANKABLE = "Stats fetched — range not rankable"
+ABYSSAL_SUMMARY_MISSING = "ESI has no record of this item"
+
+
+def _abyssal_roll_rows(conn: sqlite3.Connection, item_ids: list[int]):
+    """Yield (heads, rolls) per chunk of ids: the row stream abyssal_roll_data reads.
+
+    heads is one row per abyssal_items row in the chunk (item_id, status,
+    known -- does the SDE hold any range row for its mutator); rolls is one
+    row per ROLLED attribute of every 'ok' item, with the raw inputs to
+    position and polarity, the display value, and the labels. Rolled means
+    the mutator's own attribute set, the same rule fetch_abyssal_rolls uses
+    when it knows the mutator; the difference fallback is not applied here
+    because an unranked roll has no quality to summarise or colour, and the
+    inspector still shows those rows. Chunked so a very long visible page
+    cannot exceed SQLite's bound-parameter limit (999 on older builds).
+    """
+    ids = sorted({int(i) for i in item_ids})
+    # 900 per chunk: comfortably under SQLite's variable limit, and one
+    # chunk rather than two for an estate of a few hundred abyssal items.
+    for start in range(0, len(ids), 900):
+        chunk = ids[start:start + 900]
+        marks = ",".join("?" * len(chunk))
+        heads = list(conn.execute(
+            f"""SELECT i.item_id, i.status,
+                       EXISTS (SELECT 1 FROM sde_mutator_ranges mr
+                               WHERE mr.mutator_type_id = i.mutator_type_id) AS known
+                FROM abyssal_items i WHERE i.item_id IN ({marks})""",
+            chunk,
+        ))
+        rolls = list(conn.execute(
+            f"""
+            SELECT aa.item_id,
+                   aa.attribute_id,
+                   da.name,
+                   COALESCE(da.display_name, da.name)   AS label,
+                   aa.value                             AS raw_value,
+                   {display_value_sql("aa.value", "da.unit_id")} AS value,
+                   COALESCE(td.value, da.default_value) AS raw_base,
+                   da.high_is_good                      AS attr_high_is_good,
+                   mr.high_is_good                      AS mutator_high_is_good,
+                   mr.min_mult,
+                   mr.max_mult
+            FROM abyssal_items i
+            JOIN abyssal_attributes    aa ON aa.item_id = i.item_id
+            JOIN sde_mutator_ranges    mr ON mr.mutator_type_id = i.mutator_type_id
+                                         AND mr.attribute_id = aa.attribute_id
+            JOIN sde_dogma_attributes  da ON da.attribute_id = aa.attribute_id
+            LEFT JOIN sde_type_dogma   td ON td.type_id = i.source_type_id
+                                         AND td.attribute_id = aa.attribute_id
+            WHERE i.status = '{abyssal.STATUS_OK}' AND i.item_id IN ({marks})
+            ORDER BY aa.item_id, label COLLATE NOCASE, aa.attribute_id
+            """,
+            chunk,
+        ))
+        yield heads, rolls
+
+
+def _row_quality(r: sqlite3.Row) -> float | None:
+    high = abyssal.resolve_polarity(
+        r["attribute_id"], r["attr_high_is_good"], r["mutator_high_is_good"]
+    )
+    position = abyssal.roll_position(r["raw_value"], r["raw_base"], r["min_mult"], r["max_mult"])
+    return abyssal.quality(position, high)
+
+
+def abyssal_roll_data(
+    conn: sqlite3.Connection, item_ids: list[int]
+) -> tuple[dict[int, str], dict[int, dict[int, tuple[float, float | None]]]]:
+    """The badge tooltip line and the roll cells for a page of items, in one pass.
+
+    summaries is one line per item with an abyssal_items row: "Speed 75% ·
+    Range 88%" for a ranked item, or a fixed explanatory line for a 404, a
+    mutator the SDE has never heard of, and a known mutator that still
+    yields no rankable roll -- so the tooltip never goes silent on a fetched
+    item. A missing key is the model's cue to say "rolls not fetched". The
+    known/unknown split is decided the way fetch_abyssal_rolls decides it,
+    does the SDE hold any range row for the mutator, rather than inferred
+    from whether a quality came out, which once labelled an item with a
+    perfectly well-known mutaplasmid "unknown to the SDE" because its
+    source type had no dogma rows.
+
+    cells is {item_id: {attribute_id: (display value, quality 0..1 or
+    None)}} for the columns the table grows with one type selected: the
+    mutator's rolled attributes only, of 'ok' items only; a fetched item
+    whose rolls cannot be ranked keeps its cells with quality None, so the
+    column shows the value with no tint rather than a blank. Values are
+    display numbers (display_value_sql), the same the inspector and the
+    `stat:` filter use, and the quality is the same abyssal.quality the
+    summaries round.
+
+    One query for the whole visible page rather than one per row, and both
+    halves from one row stream: the table reload needs both for the same
+    items, and reading the stream once is half the database work.
+    """
+    summaries: dict[int, str] = {}
+    cells: dict[int, dict[int, tuple[float, float | None]]] = {}
+    parts: dict[int, list[str]] = {}
+    for heads, rolls in _abyssal_roll_rows(conn, item_ids):
+        for r in heads:
+            if r["status"] != abyssal.STATUS_OK:
+                text = ABYSSAL_SUMMARY_MISSING
+            elif r["known"]:
+                text = ABYSSAL_SUMMARY_UNRANKABLE
+            else:
+                text = ABYSSAL_SUMMARY_UNRANKED
+            summaries[int(r["item_id"])] = text
+        for r in rolls:
+            item_id = int(r["item_id"])
+            q = _row_quality(r)
+            cells.setdefault(item_id, {})[int(r["attribute_id"])] = (r["value"], q)
+            if q is None:
+                continue
+            label = abyssal.short_label(r["name"], r["label"])
+            parts.setdefault(item_id, []).append(f"{label} {round(q * 100)}%")
+    for item_id, bits in parts.items():
+        summaries[item_id] = " · ".join(bits)
+    return summaries, cells
+
+
+def abyssal_type_counts(
+    conn: sqlite3.Connection, where: str = "", params: tuple = ()
+) -> list[sqlite3.Row]:
+    """Owned abyssal types with item and fetched counts, faceted by a filter.
+
+    Rows of (type_id, name, items, fetched), busiest type first, then by
+    name. The WHERE is written against ASSET_ROWS' inner aliases and
+    injected inside the subquery like group_names does. The caller drops
+    the abyssal, stat: and roll: chips (both polarities) first, so the
+    picker facets by every filter it is not about to rewrite and still
+    lists the types the current chips exclude -- the same reason the rail
+    excludes its own level. items counts asset rows (abyssal items are
+    singletons, so that is the item count); fetched counts rows with status
+    'ok'. 404'd items are neither, so items - fetched is not the pending
+    count; see abyssal_pending_count.
+    """
+    sql = f"""
+        SELECT r.type_id,
+               r.item                                              AS name,
+               COUNT(*)                                            AS items,
+               SUM(CASE WHEN i.status = '{abyssal.STATUS_OK}' THEN 1 ELSE 0 END) AS fetched
+        FROM ({ASSET_ROWS} {f"WHERE {where}" if where else ""}) r
+        LEFT JOIN abyssal_items i ON i.item_id = r.item_id
+        WHERE r.is_dynamic_type = 1
+        GROUP BY r.type_id, r.item
+        ORDER BY items DESC, name COLLATE NOCASE
+    """
+    return list(conn.execute(sql, params))
+
+
+def abyssal_type_attributes(conn: sqlite3.Connection, type_name: str) -> list[dict]:
+    """The attributes any mutaplasmid rolls on one abyssal type, for the card's pickers.
+
+    One dict per attribute (attribute_id, name, label, unit_id, unit,
+    high_is_good), ordered by label. Resolved through
+    sde_mutator_ranges.resulting_type_id rather than through the estate's
+    fetched items, so the picker offers the full set even before any item
+    of the type has been fetched. Several mutaplasmids (Decayed, Gravid,
+    Unstable, ...) produce the same type with the same attribute set, hence
+    the grouping by attribute.
+
+    high_is_good is the STORED polarity, resolved as abyssal.resolve_polarity
+    does for a roll: the mutaplasmid's own override first, then the
+    attribute's flag. The override is CCP's per-mutator sign fix and every
+    mutaplasmid of one type carries the same one (a webifier's speedFactor
+    is low-is-good on Decayed, Gravid and Unstable alike), so the MAX over
+    the type's mutators is the one value they share; MAX also skips NULLs,
+    so one mutator with an override and one without still yields it. The
+    card lays display values out worst to best, so it wants this flag
+    translated through abyssal.display_high_is_good first.
+
+    Display names are not unique: 554 signatureRadiusBonus (unit 124, a
+    percent) and 983 signatureRadiusAdd (unit 1, metres) both display
+    "Signature Radius Modifier" (build 3487903). The picker keys on
+    attribute_id, and a shared label is disambiguated with the unit symbol
+    in brackets -- "Signature Radius Modifier (%)" against "(m)" -- falling
+    back to the internal name when a unit is missing or itself shared.
+    """
+    rows = conn.execute(
+        """SELECT da.attribute_id, da.name,
+                  COALESCE(da.display_name, da.name) AS label,
+                  da.unit_id, du.display_name AS unit,
+                  da.high_is_good AS attr_high_is_good,
+                  MAX(mr.high_is_good) AS mutator_high_is_good
+           FROM sde_mutator_ranges mr
+           JOIN sde_types t ON t.type_id = mr.resulting_type_id
+           JOIN sde_dogma_attributes da ON da.attribute_id = mr.attribute_id
+           LEFT JOIN sde_dogma_units du ON du.unit_id = da.unit_id
+           WHERE t.name = ?
+           GROUP BY da.attribute_id, da.name, label, da.unit_id, du.display_name,
+                    da.high_is_good""",
+        (type_name,),
+    ).fetchall()
+    attrs = []
+    for r in rows:
+        a = dict(r)
+        a["high_is_good"] = abyssal.resolve_polarity(
+            a["attribute_id"], a.pop("attr_high_is_good"), a.pop("mutator_high_is_good")
+        )
+        attrs.append(a)
+    by_label: dict[str, list[dict]] = {}
+    for a in attrs:
+        by_label.setdefault(a["label"], []).append(a)
+    for group in by_label.values():
+        if len(group) < 2:
+            continue
+        units = [a["unit"] for a in group]
+        use_units = all(units) and len(set(units)) == len(units)
+        for a in group:
+            a["label"] = f"{a['label']} ({a['unit'] if use_units else a['name']})"
+    attrs.sort(key=lambda a: (a["label"].casefold(), a["attribute_id"]))
+    return attrs
+
+
+def abyssal_attribute_bounds(
+    conn: sqlite3.Connection, type_name: str
+) -> dict[int, tuple[float, float]]:
+    """Estate MIN and MAX of each rolled attribute's DISPLAY value for one type.
+
+    The card's sliders are scoped to what the user actually owns of that
+    type -- CPU alone can span tens of tf between two module types, so a
+    single global range would leave every slider crammed into a corner.
+    The extremes are taken AFTER display_value_sql, because units 108 and
+    111 display (1 - v) * 100 and so invert the order: the raw minimum is
+    the displayed maximum. Rolled attributes of fetched ('ok') items only;
+    a type with nothing fetched has no bounds and the card falls back to
+    its own defaults.
+    """
+    dv = display_value_sql("sa.value", "sd.unit_id")
+    rows = conn.execute(
+        f"""SELECT sa.attribute_id, MIN({dv}) AS lo, MAX({dv}) AS hi
+            FROM assets a
+            JOIN sde_types t ON t.type_id = a.type_id
+            JOIN abyssal_items i ON i.item_id = a.item_id AND i.status = '{abyssal.STATUS_OK}'
+            JOIN abyssal_attributes sa ON sa.item_id = i.item_id
+            JOIN sde_mutator_ranges mr ON mr.mutator_type_id = i.mutator_type_id
+                                      AND mr.attribute_id = sa.attribute_id
+            JOIN sde_dogma_attributes sd ON sd.attribute_id = sa.attribute_id
+            WHERE t.name = ?
+            GROUP BY sa.attribute_id""",
+        (type_name,),
+    )
+    return {int(r["attribute_id"]): (float(r["lo"]), float(r["hi"])) for r in rows}
+
+
+def abyssal_attribute_bases(conn: sqlite3.Connection, type_name: str) -> dict[int, float]:
+    """The un-mutated DISPLAY value of each rollable attribute for one type.
+
+    One abyssal type is made from several source modules -- an Abyssal
+    Stasis Webifier from a Webifier I, a II, a Fleeting or a Federation Navy
+    -- and each source has its own base, so a type has no single base the
+    way an item does. The card's track still wants one tick per attribute,
+    and the figure chosen is the base of the type's DOMINANT source: the
+    source module the most fetched items of the type were made from (ties
+    broken by the lower type id, so the answer is stable between calls). It
+    is the figure the inspector shows for most of the items the track spans,
+    which a median of per-item bases would not be for any of them. A type
+    with no fetched item has no dominant source and no bases.
+
+    Per attribute the base is the source's dogma value, falling back to the
+    attribute's SDE default when the source has no row for it -- the same
+    COALESCE the inspector's roll rows use -- put through display_value_sql
+    so it is comparable with abyssal_attribute_bounds' extremes.
+    """
+    dv = display_value_sql("COALESCE(td.value, da.default_value)", "da.unit_id")
+    rows = conn.execute(
+        f"""WITH dominant AS (
+                SELECT i.source_type_id AS type_id
+                FROM assets a
+                JOIN sde_types t ON t.type_id = a.type_id
+                JOIN abyssal_items i ON i.item_id = a.item_id
+                                    AND i.status = '{abyssal.STATUS_OK}'
+                WHERE t.name = ? AND i.source_type_id IS NOT NULL
+                GROUP BY i.source_type_id
+                ORDER BY COUNT(*) DESC, i.source_type_id
+                LIMIT 1
+            )
+            SELECT DISTINCT mr.attribute_id, {dv} AS base
+            FROM sde_mutator_ranges mr
+            JOIN sde_types t ON t.type_id = mr.resulting_type_id
+            JOIN sde_dogma_attributes da ON da.attribute_id = mr.attribute_id
+            JOIN dominant d
+            LEFT JOIN sde_type_dogma td ON td.type_id = d.type_id
+                                       AND td.attribute_id = mr.attribute_id
+            WHERE t.name = ?""",
+        (type_name, type_name),
+    )
+    return {
+        int(r["attribute_id"]): float(r["base"]) for r in rows if r["base"] is not None
+    }
+
+
+def abyssal_type_columns(
+    conn: sqlite3.Connection, type_name: str
+) -> tuple[list[dict], dict[int, tuple[float, float]]]:
+    """The rolled attributes of one type that the estate holds values for, with their bounds.
+
+    abyssal_type_attributes lists what the type's mutaplasmids CAN roll, and
+    that list is wider than what any owned item carries: the range table
+    names attributes the source module lacks (a bonus the base type has at
+    zero is "rolled" to zero and never reported by ESI), so a picker or a
+    table built from it offers phantom stats -- a column blank on every row,
+    a slider with no range to run between. The attribute list is therefore
+    cut down to the keys of abyssal_attribute_bounds, which come from the
+    fetched items themselves, and returned with those bounds so the two can
+    never disagree about which attributes exist. Label order and the
+    disambiguated labels are abyssal_type_attributes' own; each attribute
+    also carries the type's base display value under "base"
+    (abyssal_attribute_bases), or None when no fetched item can name a
+    source, so the card can tick the un-mutated figure on its tracks.
+
+    A type with nothing fetched yet has no bounds and so no attributes: the
+    card offers no stat rows and the table grows no columns for it until a
+    fetch (the card's banner) gives them something to show.
+    """
+    bounds = abyssal_attribute_bounds(conn, type_name)
+    bases = abyssal_attribute_bases(conn, type_name)
+    attrs = [
+        a for a in abyssal_type_attributes(conn, type_name) if int(a["attribute_id"]) in bounds
+    ]
+    for a in attrs:
+        a["base"] = bases.get(int(a["attribute_id"]))
+    return attrs, bounds
+
+
+def abyssal_pending_count(conn: sqlite3.Connection, type_names: list[str] | None = None) -> int:
+    """How many owned abyssal items still have no rolls stored, for the card's banner.
+
+    Wraps abyssal.pending, so it counts exactly what the fetch job would
+    ask ESI about: dynamic-type assets with no abyssal_items row, 404'd
+    items excluded. type_names narrows it to the chip's types; None or an
+    empty list means every type, mirroring the chip, whose empty value is
+    "all abyssal types" -- so `abyssal_pending_count(conn,
+    omni.split_types(chip.value))` reads the chip correctly either way.
+    """
+    todo = abyssal.pending(conn)
+    if not type_names:
+        return len(todo)
+    marks = ",".join("?" * len(type_names))
+    wanted = {
+        int(r[0]) for r in conn.execute(
+            f"SELECT type_id FROM sde_types WHERE name IN ({marks})", list(type_names)
+        )
+    }
+    return sum(1 for _item_id, type_id in todo if type_id in wanted)
 
 
 # ---------------------------------------------------------------- structures

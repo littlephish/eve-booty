@@ -5,7 +5,8 @@ over a search field, three combo boxes and two checkboxes -- six widgets that
 each owned a fragment of the WHERE clause and had to be kept mutually
 consistent by hand. Everything that narrows the asset table is now a token in
 a single string: `prefix:value` chips for the grouping levels, `is:` flags,
-`val:` comparisons, and bare words. That makes the whole filter state
+`val:`, `stat:` and `roll:` comparisons, the `abyssal` chip, and bare words.
+That makes the whole filter state
 trivially serialisable (saved views store `to_text()` output), and it gives
 every other control a single verb -- rail rows, value-map segments and
 context-menu items all "add a chip" instead of each poking a different widget.
@@ -27,9 +28,10 @@ same subquery-injection idiom the rest of `queries.py` uses.
 from __future__ import annotations
 
 import re
+from collections.abc import Collection
 from dataclasses import dataclass, field
 
-from . import queries
+from . import abyssal, queries
 from .config import ASSET_SAFETY_LOCATION_ID
 
 # The chip kinds that filter one grouping level by exact label. Six of them
@@ -38,6 +40,30 @@ from .config import ASSET_SAFETY_LOCATION_ID
 LEVEL_KINDS = ("location", "system", "region", "owner", "category", "group", "meta")
 
 IS_FLAGS = ("fitted", "safety", "delivery", "unpriced", "bpc")
+
+# stat:<name><op><number> compares one stored attribute of an abyssal item,
+# in the units the inspector displays. Stored, not rolled, by decision: ESI
+# returns every dogma attribute of the item and all of them are kept, so
+# `stat:cpu<26` finds a module by its CPU whether or not its mutaplasmid
+# rolls CPU -- which is what someone fitting a ship wants to know. Only the
+# rolled subset appears in the inspector. Exported by name so the omnibox
+# and palette key their per-kind behaviour on the same string this module
+# parses.
+STAT_KIND = "stat"
+
+# roll:<name><op><percent> compares the mirrored roll QUALITY of one rolled
+# attribute -- how far along the mutaplasmid's range it landed, 0..100 with
+# 100 always the good end -- so `roll:web>=70` reads the same for a
+# webifier's negative speedFactor as `roll:cpu>=70` does for a positive
+# stat. Rolled attributes only, by construction: the quality is defined by
+# the mutator's range table, so a stored-but-unrolled attribute has none.
+ROLL_KIND = "roll"
+
+# The abyssal chip: `abyssal` alone is every dynamic (mutated) type, and a
+# value narrows it to named types, OR'd, joined by ", " -- see split_types.
+# Its own kind rather than an is: flag because it carries a value, and
+# because the complex-search card hangs off it.
+ABYSSAL_KIND = "abyssal"
 
 # Short forms are what people type; the long forms are accepted too so that
 # to_text() output and hand-written saved views both parse regardless of which
@@ -66,6 +92,93 @@ _KIND_TO_PREFIX = {"location": "loc", "system": "sys", "category": "cat"}
 # falls through to bare text instead of silently parsing as a comparison.
 _VAL_RE = re.compile(r"^(>=|<=|>|<)(\d+(?:\.\d+)?)([kmbt]?)$", re.IGNORECASE)
 _VAL_SUFFIX = {"": 1, "k": 1e3, "m": 1e6, "b": 1e9, "t": 1e12}
+
+# stat: and roll: comparisons -- an attribute name (display or internal, or
+# one of abyssal.STAT_ALIASES; spaces allowed, so the token is usually
+# quoted), an operator, and a number that may be negative because a
+# webifier's speedFactor is -60; or `name=lo..hi`, an inclusive range. The
+# operator group is the only fragment that reaches the SQL text, and it can
+# only ever be one of these five literals; the name and numbers travel as
+# bound parameters. The name group excludes the operator characters
+# outright, so `stat:a<b<3` has no parse at all and degrades to bare text
+# rather than guessing -- with a merely lazy `.+?` the regex backtracked
+# into name `a<b`, op `<`, 3. No SDE attribute name or display name
+# contains `<`, `>` or `=`. Digits are the ASCII class, not `\d`, which
+# would also admit Arabic-Indic and other Unicode digits, and float()
+# accepts those, so `stat:cpu<٣` would have parsed as 3. The regex admits
+# `=` and `..` in any combination; parse_stat then insists they come
+# together, since `cpu=30` has no agreed meaning (equality on a float is
+# never what anyone wants) and `cpu>30..40` has two.
+_STAT_RE = re.compile(
+    r"^\s*([^<>=]+?)\s*(>=|<=|>|<|=)\s*(-?[0-9]+(?:\.[0-9]+)?)(?:\.\.(-?[0-9]+(?:\.[0-9]+)?))?\s*$"
+)
+
+# The attribute-name match shared by the stat: and roll: clauses. COLLATE
+# NOCASE on the equality so "cpu usage" finds "CPU usage".
+#
+# The internal name is matched first and the display name only when no
+# attribute's internal name equals the typed text, because display names
+# are not unique: in the real SDE (build 3487903, checked 2026-09-02) 554
+# signatureRadiusBonus (unit 124, a percent) and 983 signatureRadiusAdd
+# (unit 1, metres) both display "Signature Radius Modifier". Typing the
+# display name still matches either -- the completer is what steers a user
+# to the internal name in that case -- but typing an internal name must
+# never be widened to its namesakes. The typed name is bound three times
+# rather than interpolated once; the SQL text stays constant. The inner
+# NOT EXISTS is uncorrelated, so SQLite evaluates it once per statement,
+# not once per asset row.
+_NAME_MATCH = """(sd.name = ? COLLATE NOCASE
+           OR (sd.display_name = ? COLLATE NOCASE
+               AND NOT EXISTS (SELECT 1 FROM sde_dogma_attributes x
+                               WHERE x.name = ? COLLATE NOCASE)))"""
+
+# Correlated on a.item_id: does this asset have a stored attribute of that
+# name whose DISPLAY value satisfies the comparison. The unit conversion is
+# queries.display_value_sql, the same CASE the inspector renders with, so
+# `stat:duration<9` means nine seconds exactly as the panel shows them.
+# {cmp} is `<op> ?` or `BETWEEN ? AND ?`, filled by where().
+_STAT_EXISTS = f"""EXISTS (
+    SELECT 1 FROM abyssal_attributes sa
+    JOIN sde_dogma_attributes sd ON sd.attribute_id = sa.attribute_id
+    WHERE sa.item_id = a.item_id
+      AND {_NAME_MATCH}
+      AND {queries.display_value_sql("sa.value", "sd.unit_id")} {{cmp}}
+)"""
+
+# Correlated on a.item_id: does this asset have a ROLLED attribute of that
+# name whose quality (queries.roll_quality_sql, percent) satisfies the
+# comparison. Rolled is enforced by the inner join to the item's own
+# mutator's range row, which also supplies the range and the polarity
+# override; the source type's base comes from sde_type_dogma with the
+# attribute default as fallback, exactly as fetch_abyssal_rolls reads it.
+# Every join is a primary-key probe off the abyssal_items row, so the
+# clause costs one lookup chain per asset row (pinned by an EXPLAIN QUERY
+# PLAN test). {quality} is filled at where() time rather than at import,
+# because roll_quality_sql reads abyssal.POLARITY_OVERRIDES when called.
+_ROLL_EXISTS = f"""EXISTS (
+    SELECT 1 FROM abyssal_items i
+    JOIN abyssal_attributes sa ON sa.item_id = i.item_id
+    JOIN sde_mutator_ranges mr ON mr.mutator_type_id = i.mutator_type_id
+                              AND mr.attribute_id = sa.attribute_id
+    JOIN sde_dogma_attributes sd ON sd.attribute_id = sa.attribute_id
+    LEFT JOIN sde_type_dogma td ON td.type_id = i.source_type_id
+                               AND td.attribute_id = sa.attribute_id
+    WHERE i.item_id = a.item_id AND i.status = '{abyssal.STATUS_OK}'
+      AND {_NAME_MATCH}
+      AND {{quality}} {{cmp}}
+)"""
+
+
+def _roll_quality_expr() -> str:
+    return queries.roll_quality_sql(
+        value="sa.value",
+        base="COALESCE(td.value, sd.default_value)",
+        min_mult="mr.min_mult",
+        max_mult="mr.max_mult",
+        attr_high="sd.high_is_good",
+        mutator_high="mr.high_is_good",
+        attribute_id="sd.attribute_id",
+    )
 
 # is:fitted is the same "does my direct parent belong to the Ship category"
 # question the hide-ship-contents checkbox asked, with the polarity flipped:
@@ -150,14 +263,36 @@ _IS_SQL = {
     "bpc": ("a.is_blueprint_copy = 1", "a.is_blueprint_copy = 0"),
 }
 
+# The abyssal chip's positive clause: the type flag, narrowed to named types
+# when the chip carries any. {names} is a list of `?` marks, one per type,
+# so the names are bound, never interpolated.
+_ABYSSAL_ALL = "t.is_dynamic_type = 1"
+_ABYSSAL_TYPES = "(t.is_dynamic_type = 1 AND t.name IN ({names}))"
+
 
 @dataclass
 class Chip:
-    """One parsed token: a level filter, an is: flag, or a val: comparison."""
+    """One parsed token: a level filter, an is: flag, a comparison, or the abyssal chip."""
 
-    kind: str  # one of LEVEL_KINDS, or "is", or "val"
+    kind: str  # one of LEVEL_KINDS, or "item", "is", "val", STAT_KIND, ROLL_KIND, ABYSSAL_KIND
     value: str
     negated: bool = False
+
+
+@dataclass
+class StatTerm:
+    """A parsed stat: or roll: value: `name op low`, or `name=low..high` when op is "..".
+
+    high is None for the four one-sided operators. The name is as typed,
+    before alias resolution, so a completer can show what the user picked
+    and look up the canonical attribute itself via abyssal.STAT_ALIASES;
+    where() resolves it at SQL time.
+    """
+
+    name: str
+    op: str  # one of ">=", "<=", ">", "<", ".."
+    low: float
+    high: float | None = None
 
 
 @dataclass
@@ -186,16 +321,23 @@ class FilterSpec:
         types, so a saved view can be inspected, edited or shared as text
         rather than being an opaque blob. The round-trip guarantee
         parse(spec.to_text()) == spec holds for any chips whose values are
-        semantically valid (is: values from IS_FLAGS, val: values matching
-        the comparison grammar; level values may be any string at all) --
+        semantically valid (is: values from IS_FLAGS; val:, stat: and roll:
+        values matching their comparison grammars; level and abyssal values
+        may be any string at all) --
         property-tested in tests/test_omni.py, because the first version of
         this pair quietly corrupted saved views on three shapes of value:
         embedded quotes, embedded non-space whitespace, and empty labels.
         """
         parts = []
         for c in self.chips:
+            sign = "-" if c.negated else ""
+            if c.kind == ABYSSAL_KIND and not c.value:
+                # The bare word is the canonical spelling of "all abyssal
+                # types"; parse() reads it back to the same empty chip.
+                parts.append(sign + ABYSSAL_KIND)
+                continue
             prefix = _KIND_TO_PREFIX.get(c.kind, c.kind)
-            parts.append(("-" if c.negated else "") + f"{prefix}:{_quote_value(c.value)}")
+            parts.append(sign + f"{prefix}:{_quote_value(c.value)}")
         for word in self.text.split():
             # A bare word that would re-tokenise as a chip (someone searched
             # the literal text "cat:mystery"), or that carries a quote, gets
@@ -208,7 +350,9 @@ class FilterSpec:
             parts.append(word)
         return " ".join(parts)
 
-    def where(self, exclude_level: str | None = None) -> tuple[str, tuple]:
+    def where(
+        self, exclude_level: str | None = None, exclude_kinds: Collection[str] = ()
+    ) -> tuple[str, tuple]:
         """SQL WHERE (no leading keyword) against ASSET_ROWS' inner aliases.
 
         Composition rules: every bare word must match (AND); positive chips
@@ -220,6 +364,15 @@ class FilterSpec:
         exclude_level drops chips of that kind, both polarities. The rail
         facets its rows by every filter except its own level, so that picking
         one location still shows the other locations to switch to.
+        exclude_kinds does the same for several kinds at once: the abyssal
+        card's type picker passes every kind the card rewrites on Done
+        (abyssal, roll:, stat:), since a picker faceted by a roll: chip the
+        user is about to loosen would hide the very types that fail it.
+
+        Two positive abyssal chips mean the union of their type lists, the
+        same "either" that two location chips mean -- and a chip with no
+        types is already every type, so it absorbs any other. A negated
+        abyssal chip is NOT of its own clause and ANDs with everything.
         """
         clauses: list[str] = []
         params: list = []
@@ -228,7 +381,29 @@ class FilterSpec:
             clauses.append("(t.name LIKE ? OR a.custom_name LIKE ?)")
             params.extend([f"%{word}%"] * 2)
 
-        chips = [c for c in self.chips if c.kind != exclude_level]
+        dropped = set(exclude_kinds)
+        if exclude_level is not None:
+            dropped.add(exclude_level)
+        chips = [c for c in self.chips if c.kind not in dropped]
+
+        abyssal_positive = [c for c in chips if c.kind == ABYSSAL_KIND and not c.negated]
+        if abyssal_positive:
+            names: list[str] = []
+            for c in abyssal_positive:
+                names.extend(n for n in split_types(c.value) if n not in names)
+            if any(not split_types(c.value) for c in abyssal_positive) or not names:
+                clauses.append(_ABYSSAL_ALL)
+            else:
+                clauses.append(_ABYSSAL_TYPES.format(names=",".join("?" * len(names))))
+                params.extend(names)
+        for c in chips:
+            if c.kind == ABYSSAL_KIND and c.negated:
+                names = split_types(c.value)
+                if names:
+                    clauses.append("NOT " + _ABYSSAL_TYPES.format(names=",".join("?" * len(names))))
+                    params.extend(names)
+                else:
+                    clauses.append(f"NOT ({_ABYSSAL_ALL})")
 
         # COLLATE NOCASE on every chip comparison. Bare words already matched
         # without regard to case, because SQLite's LIKE is case-insensitive for
@@ -277,8 +452,52 @@ class FilterSpec:
                 comparison = f"a.quantity * COALESCE(p.sell_price, 0) {op} ?"
                 clauses.append(f"NOT ({comparison})" if c.negated else comparison)
                 params.append(amount)
+            elif c.kind in (STAT_KIND, ROLL_KIND):
+                term = parse_stat(c.value)
+                if term is None:
+                    continue
+                # Aliases resolve to the internal attribute name before the
+                # match; anything not an alias is matched as typed, internal
+                # name first and display name as the fallback (_NAME_MATCH).
+                name = abyssal.STAT_ALIASES.get(term.name.lower(), term.name)
+                if term.op == "..":
+                    cmp, numbers = "BETWEEN ? AND ?", [term.low, term.high]
+                else:
+                    cmp, numbers = f"{term.op} ?", [term.low]
+                if c.kind == STAT_KIND:
+                    exists = _STAT_EXISTS.format(cmp=cmp)
+                else:
+                    exists = _ROLL_EXISTS.format(quality=_roll_quality_expr(), cmp=cmp)
+                # NOT EXISTS, not a negated comparison inside the EXISTS:
+                # an item with no stored stats has nothing to compare, and
+                # -stat:cpu<30 must keep it rather than hide it. Likewise
+                # -roll: keeps every item whose rolls are not fetched.
+                clauses.append(f"NOT {exists}" if c.negated else exists)
+                params.extend([name, name, name, *numbers])
 
         return " AND ".join(clauses), tuple(params)
+
+
+def split_types(value: str) -> list[str]:
+    """The type names an abyssal chip value carries, in order, blanks dropped.
+
+    The value is the names joined by ", " (join_types), and this is its
+    inverse for the SQL and the card; it also forgives what a hand-typed
+    value looks like -- "A,B", "A ,  B", a trailing comma, `", ,"` -- so
+    every one of those reads as the same chip. The comma is a hard
+    delimiter: a type name containing one cannot be expressed. Acceptable
+    because no dynamic type's name does (the 89 in build 3487903 are all
+    "<size> Abyssal <module>" or "<size> Mutated <drone>" shapes, checked
+    2026-09-02), and the alternative -- a second quoting layer inside the
+    already-quoted chip value -- is not something anyone would type. An
+    empty result means every dynamic type.
+    """
+    return [name.strip() for name in value.split(",") if name.strip()]
+
+
+def join_types(names: list[str]) -> str:
+    """The abyssal chip value for these type names: split_types' inverse."""
+    return ", ".join(n.strip() for n in names if n.strip())
 
 
 def _parse_val(value: str) -> tuple[str, float] | None:
@@ -288,6 +507,35 @@ def _parse_val(value: str) -> tuple[str, float] | None:
         return None
     op, number, suffix = m.groups()
     return op, float(number) * _VAL_SUFFIX[suffix.lower()]
+
+
+def parse_stat(value: str) -> StatTerm | None:
+    """The StatTerm a stat: or roll: value denotes, or None when malformed.
+
+    A value with no operator, no number, or a blank name is malformed, and
+    so are the two half-ranges: `=` without `..` (float equality is never
+    the question, and silently reading it as >= or as a band would answer
+    one the user did not ask) and `..` after any operator but `=`. A range
+    whose low end exceeds its high end is malformed too rather than
+    quietly swapped -- the card writes ranges the right way round, so a
+    reversed one is a typo mid-edit and the chip should wait. Equal ends
+    are a legitimate one-value band.
+    """
+    m = _STAT_RE.match(value)
+    if m is None:
+        return None
+    name, op, low, high = m.groups()
+    name = name.strip()
+    if not name:
+        return None
+    if (op == "=") != (high is not None):
+        return None
+    if high is None:
+        return StatTerm(name, op, float(low))
+    lo, hi = float(low), float(high)
+    if lo > hi:
+        return None
+    return StatTerm(name, "..", lo, hi)
 
 
 def _tokenize(raw: str) -> list[str]:
@@ -461,21 +709,41 @@ def parse(raw: str, known=None) -> FilterSpec:
         # An unquoted value may run on into the following words. Tried before
         # the checks below so that `owner:` alone, which is otherwise the
         # half-typed state and stays bare text, can still start a real value.
+        #
+        # Only ever fires for a prefixed token, so it cannot swallow the bare
+        # `abyssal` chip handled just below.
         if kind is not None and not quoted and vocab.get(kind):
             extended = _extend_value(vocab[kind], tokens, index - 1, value)
             if extended is not None:
-                resolved, stop = extended
-                chips.append(Chip(kind=kind, value=resolved, negated=negated))
+                resolved_value, stop = extended
+                chips.append(Chip(kind=kind, value=resolved_value, negated=negated))
                 index = stop
                 continue
 
-        if sep and (value or quoted):
+        if not sep and body.lower() == ABYSSAL_KIND:
+            # The one bare word that is a chip. Anyone hunting an item whose
+            # name contains the word has the quoted form, which to_text()
+            # emits for exactly this collision.
+            chip = Chip(kind=ABYSSAL_KIND, value="", negated=negated)
+        elif sep and (value or quoted):
             if kind is not None:
                 chip = Chip(kind=kind, value=value, negated=negated)
+            elif prefix.lower() == ABYSSAL_KIND:
+                # Kept as typed, not normalised through split/join_types, so
+                # to_text() round-trips any value; split_types reads it.
+                chip = Chip(kind=ABYSSAL_KIND, value=value, negated=negated)
+            elif prefix.lower() == "is" and value.lower() == ABYSSAL_KIND:
+                # `is:abyssal` is an alias for the bare chip, kept because
+                # saved views and habit carry it; the negation carries over,
+                # since -is:abyssal and -abyssal ask the same question of a
+                # NOT NULL flag.
+                chip = Chip(kind=ABYSSAL_KIND, value="", negated=negated)
             elif prefix.lower() == "is" and value.lower() in IS_FLAGS:
                 chip = Chip(kind="is", value=value.lower(), negated=negated)
             elif prefix.lower() == "val" and _VAL_RE.match(value):
                 chip = Chip(kind="val", value=value, negated=negated)
+            elif prefix.lower() in (STAT_KIND, ROLL_KIND) and parse_stat(value) is not None:
+                chip = Chip(kind=prefix.lower(), value=value, negated=negated)
         if chip is not None:
             chips.append(chip)
         elif token.startswith('"'):
