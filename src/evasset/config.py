@@ -313,6 +313,9 @@ class Settings:
     # Off by default: the useful lines name someone's characters and
     # holdings, so they belong on disk only when a user asks for them.
     debug_logging: bool = False
+    # Costs one 80-byte request at startup. On by default because the
+    # alternative is a user whose Assets tab is silently empty.
+    check_sde_on_startup: bool = True
 
     @property
     def redirect_uri(self) -> str:

@@ -15,6 +15,8 @@ import json
 import sqlite3
 import zipfile
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -238,6 +240,78 @@ def _import_stations(conn, zf):
 
     conn.execute("DELETE FROM sde_stations")
     db.upsert_many(conn, "sde_stations", ["station_id", "name", "system_id", "region_id"], rows())
+
+
+
+# --------------------------------------------------------- update checking
+# Keys in the meta table. The last check is remembered so a launch does not
+# ask CCP every time, and a declined build is remembered so "not now" means
+# not now rather than "ask me again in ninety seconds".
+META_CHECKED_AT = "sde_checked_at"
+META_SKIPPED_BUILD = "sde_skipped_build"
+
+# The check itself costs one 80-byte GET, so this interval is not about load.
+# It is about a user who opens the app six times in an afternoon not being
+# asked six times.
+CHECK_INTERVAL = timedelta(hours=6)
+
+
+@dataclass(frozen=True)
+class SdeStatus:
+    """What a startup check found."""
+
+    installed: int | None
+    latest: int
+
+    @property
+    def missing(self) -> bool:
+        """Never imported. The app cannot show a single asset in this state:
+        ASSET_ROWS inner joins sde_types, so an empty SDE renders an empty
+        table however much has been synced."""
+        return self.installed is None
+
+    @property
+    def stale(self) -> bool:
+        return self.installed is not None and self.installed < self.latest
+
+    @property
+    def needed(self) -> bool:
+        return self.missing or self.stale
+
+
+def due_for_check(conn: sqlite3.Connection, now: datetime | None = None) -> bool:
+    """Whether enough time has passed to ask CCP again.
+
+    Always true when nothing is imported: that state is broken rather than
+    merely out of date, and it should be raised on the very next launch
+    however recently it was checked.
+    """
+    if installed_build(conn) is None:
+        return True
+    stamp = db.get_meta(conn, META_CHECKED_AT)
+    if not stamp:
+        return True
+    try:
+        last = datetime.fromisoformat(stamp)
+    except ValueError:
+        return True
+    return (now or datetime.now(timezone.utc)) - last >= CHECK_INTERVAL
+
+
+def check(conn: sqlite3.Connection, settings: Settings | None = None) -> SdeStatus:
+    """Ask CCP for the current build and compare. No download."""
+    status = SdeStatus(installed=installed_build(conn), latest=latest_build(settings))
+    db.set_meta(conn, META_CHECKED_AT, datetime.now(timezone.utc).isoformat())
+    return status
+
+
+def skip_build(conn: sqlite3.Connection, build: int) -> None:
+    """Remember that this build was declined, so it is not offered again."""
+    db.set_meta(conn, META_SKIPPED_BUILD, str(build))
+
+
+def was_skipped(conn: sqlite3.Connection, build: int) -> bool:
+    return db.get_meta(conn, META_SKIPPED_BUILD) == str(build)
 
 
 def ensure_current(

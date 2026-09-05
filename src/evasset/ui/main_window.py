@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import db, diagnostics, queries, updater
+from .. import db, diagnostics, queries, sde, updater
 from ..config import DB_PATH, PROJECT_URL, Settings
 from ..esi import TokenCache
 from .assets_view import AssetsView
@@ -32,7 +32,14 @@ from .task_bar import TaskBar
 from .tasks import TaskManager
 from .treemap_view import TreemapView
 from .wallet_view import WalletView
-from .workers import RepriceJob, SdeUpdateJob, SnapshotJob, SyncJob, UpdateCheckJob
+from .workers import (
+    RepriceJob,
+    SdeCheckJob,
+    SdeUpdateJob,
+    SnapshotJob,
+    SyncJob,
+    UpdateCheckJob,
+)
 
 # Who to credit in About, linked to their public character page. These are
 # in-game character names given deliberately as attribution -- the one place
@@ -138,6 +145,11 @@ class MainWindow(QMainWindow):
         self._build_statusbar()
         self._refresh_status()
         self._ensure_tab_loaded(self.tabs.currentIndex())  # load just the visible tab
+
+        # Deferred so the window is up first: this is a network call, and a
+        # dialog that appears before the app has drawn reads as a crash.
+        if settings.check_sde_on_startup:
+            QTimer.singleShot(1200, self._check_game_data)
 
     # ---------------------------------------------------------------- chrome
     def _build_actions(self) -> None:
@@ -416,6 +428,66 @@ class MainWindow(QMainWindow):
                 self, "Update failed",
                 "The update helper could not be started. "
                 "Download the latest release manually instead.",
+            )
+
+    def _check_game_data(self) -> None:
+        """Ask whether newer game data exists, and offer to fetch it.
+
+        Deliberately a prompt rather than an automatic download. The payload is
+        around 95 MB, which is not a thing to start on somebody's connection
+        without asking, and a metered or slow link makes that decision for
+        them.
+        """
+        self.tasks.submit(
+            "sde-check", "Checking game data", SdeCheckJob(self.settings),
+            done=self._on_game_data_checked,
+        )
+
+    def _on_game_data_checked(self, result) -> None:
+        if not result:
+            return  # current, recently checked, or already declined
+        status = result["status"]
+
+        if status.missing:
+            # Not an update, a prerequisite. Nothing can be shown without it:
+            # the assets query inner joins sde_types, so the table renders
+            # empty however much has been synced.
+            title = "Game data needed"
+            text = (
+                "<b>EVE Booty needs CCP's game data before it can show anything.</b>"
+                "<br><br>Without it the Assets tab is empty even after a sync, "
+                "because every item's name, group and volume comes from it."
+                "<br><br>Download it now? It is about 95 MB and imports in a "
+                "few seconds."
+            )
+        else:
+            title = "New game data available"
+            text = (
+                f"<b>Game data build {status.latest} is available.</b>"
+                f"<br>You have build {status.installed}."
+                "<br><br>CCP publishes a new build most patch days; updating "
+                "keeps new items, structures and stations resolving by name."
+                "<br><br>Download it now? It is about 95 MB."
+            )
+
+        box = QMessageBox(self)
+        box.setWindowTitle(title)
+        box.setTextFormat(Qt.RichText)
+        box.setText(text)
+        download = box.addButton("Download now", QMessageBox.AcceptRole)
+        box.addButton("Not now", QMessageBox.RejectRole)
+        box.exec()
+
+        if box.clickedButton() is download:
+            self.update_sde()
+        elif status.stale:
+            # Remember the refusal so the same build is not offered on every
+            # launch. A missing SDE is deliberately not remembered: that state
+            # is broken, and should be raised again next time.
+            sde.skip_build(self.conn, status.latest)
+            self.log.add(
+                f"Game data build {status.latest} skipped. "
+                "Update -> Game data when you want it."
             )
 
     def show_diagnostics(self) -> None:

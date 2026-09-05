@@ -19,6 +19,10 @@ def app():
 def window(app):
     settings = Settings.load()
     settings.client_id = "test-client-id"
+    # Off, or constructing a window asks CCP for the current SDE build and
+    # then opens a modal dialog on a timer, which in a test is a network call
+    # the suite must not make and a box with nobody to click it.
+    settings.check_sde_on_startup = False
     win = MainWindow(settings)
     yield win
     win.close()

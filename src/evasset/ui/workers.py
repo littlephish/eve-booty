@@ -108,6 +108,32 @@ class UpdateCheckJob(Job):
         folder = updater.extract(archive)
         return {"release": release, "folder": str(folder)}
 
+class SdeCheckJob(Job):
+    """Ask CCP which SDE build is current. No download.
+
+    Split from SdeUpdateJob because the question and the answer have wildly
+    different costs: this is one 80-byte GET, while accepting the result is
+    around 95 MB. Startup can afford the first and must not assume the second.
+    """
+
+    def __init__(self, settings):
+        super().__init__()
+        self.settings = settings
+
+    def run_job(self):
+        conn = db.connect()
+        if not sde.due_for_check(conn):
+            return None
+        status = sde.check(conn, self.settings)
+        if not status.needed:
+            return None
+        if status.stale and sde.was_skipped(conn, status.latest):
+            # Declined already. A missing SDE is still raised every launch,
+            # because that state is broken rather than out of date.
+            return None
+        return {"status": status}
+
+
 class SdeUpdateJob(Job):
     def __init__(self, settings: Settings):
         super().__init__()

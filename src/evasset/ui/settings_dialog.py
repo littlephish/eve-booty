@@ -127,6 +127,15 @@ class SettingsDialog(QDialog):
         self.snapshot.setChecked(settings.snapshot_on_sync)
         behave.addRow(self.snapshot)
 
+        self.check_sde = QCheckBox("Check for new game data at startup")
+        self.check_sde.setChecked(settings.check_sde_on_startup)
+        self.check_sde.setToolTip(
+            "Asks CCP which game data build is current, which is a single "
+            "80-byte request, and offers to download it if yours is older. "
+            "Nothing is downloaded without you agreeing to it."
+        )
+        behave.addRow(self.check_sde)
+
         self.debug_logging = QCheckBox("Write a debug log")
         self.debug_logging.setChecked(settings.debug_logging)
         self.debug_logging.setToolTip(
@@ -173,6 +182,7 @@ class SettingsDialog(QDialog):
         s.contract_min_volume = self.min_volume.value()
         s.contract_price_beats_market = self.contract_first.isChecked()
         s.snapshot_on_sync = self.snapshot.isChecked()
+        s.check_sde_on_startup = self.check_sde.isChecked()
         s.debug_logging = self.debug_logging.isChecked()
         # Applied here rather than at the next launch: somebody ticking
         # this is trying to capture something that is happening now.
