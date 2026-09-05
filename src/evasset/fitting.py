@@ -27,6 +27,11 @@ _SLOT_GROUPS = [
     ("Mid slots", [f"MedSlot{i}" for i in range(8)]),
     ("Low slots", [f"LoSlot{i}" for i in range(8)]),
     ("Rig slots", [f"RigSlot{i}" for i in range(8)]),
+    # Upwell structures only. Listed as a slot rack rather than a hold so a
+    # Fortizar's services come out as one section in slot order; without it
+    # _humanize_flag makes a separate one-line group per occupied slot,
+    # headed "Service Slot0", "Service Slot1", and so on.
+    ("Service slots", [f"ServiceSlot{i}" for i in range(8)]),
     ("Subsystem slots", [f"SubSystemSlot{i}" for i in range(8)]),
 ]
 
@@ -52,7 +57,10 @@ _HOLD_GROUPS = [
         ],
     ),
     ("Ammo hold", ["SpecializedAmmoHold"]),
-    ("Fuel bay", ["SpecializedFuelBay"]),
+    # SpecializedFuelBay is a ship's; StructureFuel is an Upwell structure's.
+    # Same bay to a reader, two flags to ESI.
+    ("Fuel bay", ["SpecializedFuelBay", "StructureFuel"]),
+    ("Quantum core", ["QuantumCoreRoom"]),
     ("Asteroid hold", ["SpecializedAsteroidHold"]),
     ("Command center hold", ["SpecializedCommandCenterHold"]),
     ("Planetary commodities hold", ["SpecializedPlanetaryCommoditiesHold"]),
@@ -178,6 +186,11 @@ _EFT_SLOT_FLAGS = [
     [f"HiSlot{i}" for i in range(8)],
     [f"RigSlot{i}" for i in range(8)],
     [f"SubSystemSlot{i}" for i in range(8)],
+    # Structure service modules, exported last -- Pyfa's own slot order ends
+    # with Slot.SERVICE. Without this rack a structure's services are dropped
+    # from the EFT text silently, which is the failure this module keeps
+    # trying not to have.
+    [f"ServiceSlot{i}" for i in range(8)],
 ]
 _EFT_DRONE_FLAG = "DroneBay"
 _EFT_FIGHTER_FLAGS = ["FighterBay", *[f"FighterTube{i}" for i in range(5)]]

@@ -231,7 +231,7 @@ def count_assets(conn: sqlite3.Connection, where: str = "", params: tuple = ()) 
 # the fit dialog's job (see ui/fit_dialog.py), and it has a fallback for any
 # flag this query was not specifically told about, so nothing on the ship is
 # ever silently left out of the SQL either.
-FIT_ROWS = """
+_FIT_SELECT = """
 SELECT
     a.item_id,
     a.type_id,
@@ -247,12 +247,61 @@ JOIN      sde_types      t   ON t.type_id       = a.type_id
 LEFT JOIN sde_groups     g   ON g.group_id      = t.group_id
 LEFT JOIN sde_categories cat ON cat.category_id = g.category_id
 WHERE a.location_id = ?
-ORDER BY a.location_flag, t.name
 """
+
+_FIT_ORDER = "ORDER BY a.location_flag, t.name"
+
+FIT_ROWS = _FIT_SELECT + _FIT_ORDER
 
 
 def fetch_fit(conn: sqlite3.Connection, ship_item_id: int) -> list[sqlite3.Row]:
     return list(conn.execute(FIT_ROWS, (ship_item_id,)))
+
+
+# The same question asked of an Upwell structure needs a different answer.
+# "Everything whose location_id is this id" is the fit of a ship; on a
+# structure it is the structure's entire *contents* -- every corp hangar
+# division (CorpSAG1-7), every office, everything anybody has parked in it.
+# On a busy Fortizar that is thousands of rows, none of which are the fit, and
+# the dialog would render them as enormous "Corp SAG1" sections.
+#
+# Hence an allowlist of the flags that make up a structure's setup, rather
+# than the unfiltered scan above. Allowlist and not a blocklist on purpose: a
+# location_flag CCP introduces later is simply absent from the dialog, which
+# is the harmless way to be wrong. A blocklist of hangar flags would instead
+# dump an entire corp hangar into the fit window the first time they add a
+# division or rename one -- it fails open, and this fails closed.
+#
+# Slot flags are the same vocabulary ships use (structures really do fit
+# high/medium/low and rigs), plus ServiceSlot for service modules. The two
+# non-slot entries are the fuel bay -- the Structures tab shows *when* fuel
+# runs out, and nothing else shows what is burning -- and the quantum core,
+# which sits in the fitting window in game and without which the structure
+# does not work.
+STRUCTURE_FIT_FLAGS = (
+    *[f"HiSlot{i}" for i in range(8)],
+    *[f"MedSlot{i}" for i in range(8)],
+    *[f"LoSlot{i}" for i in range(8)],
+    *[f"RigSlot{i}" for i in range(8)],
+    *[f"ServiceSlot{i}" for i in range(8)],
+    "StructureFuel",
+    "QuantumCoreRoom",
+)
+
+STRUCTURE_FIT_ROWS = (
+    _FIT_SELECT
+    + f"  AND a.location_flag IN ({','.join('?' * len(STRUCTURE_FIT_FLAGS))})\n"
+    + _FIT_ORDER
+)
+
+
+def fetch_structure_fit(conn: sqlite3.Connection, structure_id: int) -> list[sqlite3.Row]:
+    """A structure's fitting, fuel bay and quantum core -- not its hangars.
+
+    Same column shape as fetch_fit, so fitting.group_fit and FitDialog do not
+    need to know which of the two produced the rows.
+    """
+    return list(conn.execute(STRUCTURE_FIT_ROWS, (structure_id, *STRUCTURE_FIT_FLAGS)))
 
 
 def group_names(
