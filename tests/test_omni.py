@@ -360,7 +360,7 @@ def test_where_skips_chips_it_cannot_translate(conn):
         Chip(kind="category", value="Ship"),
     ])
     where, params = spec.where()
-    assert where == "(cat.name = ?)"
+    assert where == "(cat.name = ? COLLATE NOCASE)"
     assert params == ("Ship",)
     assert _ids(conn, spec) == {1, 2, 10}
 
@@ -373,3 +373,119 @@ def test_filterspec_where_only_ever_binds_values_as_parameters():
     where, params = spec.where()
     assert hostile not in where
     assert params == (hostile,)
+
+
+def _names(conn, query: str) -> set[str]:
+    """Item names a query returns, for comparing two spellings of one filter."""
+    from evasset import queries
+
+    spec = parse(query)
+    where, params = spec.where()
+    sql = queries.ASSET_ROWS + (f" WHERE {where}" if where else "")
+    return {r["item"] for r in conn.execute(sql, params)}
+
+
+# ------------------------------------------------------------ case folding
+def test_chip_values_match_regardless_of_case(conn):
+    """A bare word already ignored case, because SQLite's LIKE does for ASCII.
+    Chips used a plain =, so "tritanium" found Tritanium while "cat:ship"
+    found nothing -- the same query typed two ways, behaving differently for a
+    reason nobody could see from the outside.
+    """
+    for query in ("cat:Ship", "cat:ship", "cat:SHIP", "cat:sHiP"):
+        assert _names(conn, query) == _names(conn, "cat:Ship"), query
+
+
+def test_case_folding_applies_to_every_chip_kind(conn):
+    """Not just category: owner, location, system, region, group and meta all
+    build the same comparison, so all of them were affected."""
+    for lower, proper in (
+        ('owner:"test pilot"', 'owner:"Test Pilot"'),
+        ("sys:jita", "sys:Jita"),
+        ('region:"the forge"', 'region:"The Forge"'),
+    ):
+        assert _names(conn, lower) == _names(conn, proper), lower
+
+
+def test_case_folding_applies_to_negation(conn):
+    """A negated chip that matched nothing would exclude nothing, which reads
+    as the filter silently doing nothing at all."""
+    assert _names(conn, "-cat:ship") == _names(conn, "-cat:Ship")
+
+
+def test_a_row_lands_on_exactly_one_side_whatever_the_case(conn):
+    everything = _names(conn, "")
+    included = _names(conn, "cat:ship")
+    excluded = _names(conn, "-cat:ship")
+
+    assert not (included & excluded)
+    assert included | excluded == everything
+
+
+def test_quoted_multi_word_values_fold_too(conn):
+    """The values most worth typing by hand are the long ones."""
+    assert _names(conn, 'loc:"jita iv - moon 4"') == _names(conn, 'loc:"Jita IV - Moon 4"')
+
+
+# --------------------------------------------------------------- injection
+# The WHERE clause is assembled by string concatenation, which is worth being
+# suspicious of. What gets concatenated is structure from closed sets:
+#
+#   expr  comes from queries.OVERVIEW_FILTER_EXPR, six fixed column
+#         expressions, keyed by a loop over the fixed (*LEVEL_KINDS, "item")
+#         rather than by anything a user typed
+#   op    comes from _VAL_RE, an anchored ^(>=|<=|>|<) alternation, so it can
+#         only ever be one of four literal strings
+#   the rest is "?" placeholders and SQL keywords
+#
+# Every value a user can influence goes into params. These tests exist so that
+# stays true: someone adding a filter kind could reasonably reach for an
+# f-string, and this is what should stop them.
+INJECTIONS = [
+    """loc:"x'; DROP TABLE assets; --" """,
+    """owner:"' OR 1=1 --" """,
+    """cat:"' UNION SELECT name FROM sqlite_master --" """,
+    "val:>1); DROP TABLE assets; --",
+    "'; DELETE FROM assets; --",
+    """group:"'||(SELECT value FROM meta)||'" """,
+    """item:"'; UPDATE assets SET quantity=0; --" """,
+]
+
+
+@pytest.mark.parametrize("attack", INJECTIONS)
+def test_a_hostile_filter_value_cannot_reach_the_sql(conn, attack):
+    before = {r["item"] for r in conn.execute(queries.ASSET_ROWS)}
+
+    spec = parse(attack)
+    where, params = spec.where()
+    sql = queries.ASSET_ROWS + (f" WHERE {where}" if where else "")
+    rows = {r["item"] for r in conn.execute(sql, params)}
+
+    # It must match nothing, rather than everything or something extra.
+    assert not rows - before
+    # And it must not have changed anything.
+    assert {r["item"] for r in conn.execute(queries.ASSET_ROWS)} == before
+    assert conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
+    ).fetchone()[0] > 20, "tables are still there"
+
+
+def test_the_value_is_a_parameter_and_never_part_of_the_clause():
+    """The clause carries a placeholder; the value travels beside it."""
+    spec = parse("""owner:"' OR 1=1 --" """)
+    where, params = spec.where()
+
+    assert "?" in where
+    assert "OR 1=1" not in where
+    assert params == ("' OR 1=1 --",)
+
+
+def test_a_chip_kind_from_nowhere_cannot_choose_a_column():
+    """Chips do not only come from parse -- a saved view can carry anything.
+    The column expression is chosen by iterating fixed kinds, so an unknown
+    kind selects no column rather than supplying one."""
+    spec = FilterSpec(text="", chips=[Chip(kind="a.x FROM sqlite_master --", value="z")])
+    where, params = spec.where()
+
+    assert "sqlite_master" not in where
+    assert params == ()

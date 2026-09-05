@@ -194,6 +194,15 @@ class FilterSpec:
 
         chips = [c for c in self.chips if c.kind != exclude_level]
 
+        # COLLATE NOCASE on every chip comparison. Bare words already matched
+        # without regard to case, because SQLite's LIKE is case-insensitive for
+        # ASCII, so "tritanium" found Tritanium while "cat:ship" found nothing
+        # at all -- the same query typed two ways, behaving differently for a
+        # reason no user could see.
+        #
+        # NOCASE folds ASCII only, which matches what LIKE already does, so the
+        # two halves of a query now agree. A chip typed with an accented
+        # character still has to match its case, as a bare word always has.
         for kind in (*LEVEL_KINDS, "item"):
             # item is not a grouping level, but it filters exactly like one:
             # an exact match on a single expression, OR-able and negatable.
@@ -202,13 +211,15 @@ class FilterSpec:
             expr = "t.name" if kind == "item" else queries.OVERVIEW_FILTER_EXPR.get(kind, "mg.name")
             positive = [c for c in chips if c.kind == kind and not c.negated]
             if positive:
-                clauses.append("(" + " OR ".join([f"{expr} = ?"] * len(positive)) + ")")
+                clauses.append(
+                    "(" + " OR ".join([f"{expr} = ? COLLATE NOCASE"] * len(positive)) + ")"
+                )
                 params.extend(c.value for c in positive)
             for c in chips:
                 if c.kind == kind and c.negated:
                     # Keep NULL-labelled rows: excluding "Tech II" must not
                     # also hide every item that has no meta group at all.
-                    clauses.append(f"({expr} IS NULL OR {expr} <> ?)")
+                    clauses.append(f"({expr} IS NULL OR {expr} <> ? COLLATE NOCASE)")
                     params.append(c.value)
 
         # A chip that cannot be translated is skipped, mirroring parse()'s

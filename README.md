@@ -118,6 +118,9 @@ val:>10m   val:<1b
 -owner:Alt                 (a leading - negates any token)
 ```
 
+Filters ignore case, so `cat:ship` and `cat:Ship` are the same thing, as are
+bare words. Values containing spaces need quoting: `owner:"Test Pilot"`.
+
 Typed tokens become deletable chips as you commit them, each washed in its
 kind's own colour (negations always in red); rail rows, value-map segments
 and the cell context menu all add chips the same way, and `Ctrl+F` (or the +
