@@ -112,8 +112,14 @@ class SdeCheckJob(Job):
     """Ask CCP which SDE build is current. No download.
 
     Split from SdeUpdateJob because the question and the answer have wildly
-    different costs: this is one 80-byte GET, while accepting the result is
-    around 95 MB. Startup can afford the first and must not assume the second.
+    different costs: one 80-byte GET against about 95 MB. Startup can afford
+    the first and must not assume the second.
+
+    Bounded by sde.STARTUP_TIMEOUT. Nothing waits on this -- it is a pool
+    thread -- but an unbounded call parks that thread and a task bar entry for
+    however long CCP takes, to learn something only worth knowing promptly.
+    Missing game data needs no network to detect, so the case that matters is
+    never the one that can time out.
     """
 
     def __init__(self, settings):
@@ -124,7 +130,7 @@ class SdeCheckJob(Job):
         conn = db.connect()
         if not sde.due_for_check(conn):
             return None
-        status = sde.check(conn, self.settings)
+        status = sde.check(conn, self.settings, timeout=sde.STARTUP_TIMEOUT)
         if not status.needed:
             return None
         if status.stale and sde.was_skipped(conn, status.latest):

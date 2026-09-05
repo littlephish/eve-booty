@@ -89,7 +89,7 @@ def test_declining_one_build_does_not_decline_the_next(conn):
 
 
 def test_check_records_when_it_ran(conn, monkeypatch):
-    monkeypatch.setattr(sde, "latest_build", lambda settings=None: 3494416)
+    monkeypatch.setattr(sde, "latest_build", lambda *a, **kw: 3494416)
     db.set_meta(conn, "sde_build", "3458726")
 
     status = sde.check(conn)
@@ -99,3 +99,63 @@ def test_check_records_when_it_ran(conn, monkeypatch):
     assert db.get_meta(conn, sde.META_CHECKED_AT)
     # ...and having checked, it does not immediately check again.
     assert sde.due_for_check(conn) is False
+
+
+# ------------------------------------------------------- bounded and optional
+def test_a_missing_sde_needs_no_network(conn, monkeypatch):
+    """The case that matters is settled locally. Asking CCP for a build number
+    nobody will read only adds a way for the answer to arrive late."""
+    def explode(*a, **kw):
+        raise AssertionError("the network must not be touched here")
+
+    monkeypatch.setattr(sde, "latest_build", explode)
+
+    status = sde.check(conn)
+
+    assert status.missing and status.needed
+    assert status.latest is None
+
+
+def test_a_slow_or_dead_endpoint_does_not_raise(conn, monkeypatch):
+    """A startup check that throws would surface as an error dialog for
+    something entirely optional."""
+    import httpx
+
+    db.set_meta(conn, "sde_build", "3458726")
+
+    def timeout(*a, **kw):
+        raise httpx.ConnectTimeout("too slow")
+
+    monkeypatch.setattr(sde, "latest_build", timeout)
+
+    status = sde.check(conn, timeout=sde.STARTUP_TIMEOUT)
+
+    assert status.installed == 3458726
+    assert status.latest is None
+    assert not status.needed, "unknown must not mean out of date"
+
+
+def test_a_failed_check_is_retried_rather_than_recorded(conn, monkeypatch):
+    """Not stamping the timestamp on failure is what makes the next launch try
+    again instead of waiting out the interval on an answer never received."""
+    import httpx
+
+    db.set_meta(conn, "sde_build", "3458726")
+    monkeypatch.setattr(
+        sde, "latest_build", lambda *a, **kw: (_ for _ in ()).throw(httpx.ConnectError("x"))
+    )
+
+    sde.check(conn, timeout=sde.STARTUP_TIMEOUT)
+
+    assert db.get_meta(conn, sde.META_CHECKED_AT) is None
+    assert sde.due_for_check(conn) is True
+
+
+def test_the_startup_budget_is_short(conn):
+    """One second. Nothing waits on this, but an unbounded call parks a pool
+    thread and a task bar entry for as long as CCP takes."""
+    assert sde.STARTUP_TIMEOUT <= 2.0
+
+
+def test_an_unknown_latest_build_is_never_offered_as_an_update():
+    assert not sde.SdeStatus(installed=3458726, latest=None).needed

@@ -50,8 +50,10 @@ def _en(record: dict, key: str = "name") -> str:
     return val or ""
 
 
-def latest_build(settings: Settings | None = None) -> int:
-    r = httpx.get(SDE_LATEST_URL, headers={"User-Agent": user_agent(settings)}, timeout=30)
+def latest_build(settings: Settings | None = None, timeout: float = 30.0) -> int:
+    r = httpx.get(
+        SDE_LATEST_URL, headers={"User-Agent": user_agent(settings)}, timeout=timeout
+    )
     r.raise_for_status()
     for line in r.text.splitlines():
         if not line.strip():
@@ -255,13 +257,29 @@ META_SKIPPED_BUILD = "sde_skipped_build"
 # asked six times.
 CHECK_INTERVAL = timedelta(hours=6)
 
+# A startup check gets one second and then gives up. Measured warm at 0.38s.
+# Nothing waits on it -- it runs on the thread pool -- but a 30 second default
+# leaves a pool thread and a task bar entry parked for half a minute whenever
+# CCP is slow, for information that is only ever nice to have.
+#
+# Giving up costs nothing, because the case that actually matters does not
+# need the network: whether the SDE is missing is a local fact, and staleness
+# can wait for the next launch.
+STARTUP_TIMEOUT = 1.0
+
 
 @dataclass(frozen=True)
 class SdeStatus:
-    """What a startup check found."""
+    """What a startup check found.
+
+    latest is None when CCP was not asked, or did not answer in time. That is
+    not a failure state: a missing SDE is established locally and needs no
+    network, and an unanswered staleness check simply means asking again
+    later.
+    """
 
     installed: int | None
-    latest: int
+    latest: int | None
 
     @property
     def missing(self) -> bool:
@@ -272,7 +290,9 @@ class SdeStatus:
 
     @property
     def stale(self) -> bool:
-        return self.installed is not None and self.installed < self.latest
+        if self.installed is None or self.latest is None:
+            return False
+        return self.installed < self.latest
 
     @property
     def needed(self) -> bool:
@@ -298,11 +318,32 @@ def due_for_check(conn: sqlite3.Connection, now: datetime | None = None) -> bool
     return (now or datetime.now(timezone.utc)) - last >= CHECK_INTERVAL
 
 
-def check(conn: sqlite3.Connection, settings: Settings | None = None) -> SdeStatus:
-    """Ask CCP for the current build and compare. No download."""
-    status = SdeStatus(installed=installed_build(conn), latest=latest_build(settings))
+def check(
+    conn: sqlite3.Connection,
+    settings: Settings | None = None,
+    timeout: float = 30.0,
+) -> SdeStatus:
+    """Compare the installed build against CCP's, without downloading one.
+
+    The network is skipped entirely when nothing is installed. That state is
+    already conclusive -- the app cannot display an asset either way -- so
+    asking CCP for a number nobody will read only adds a way for the answer to
+    arrive late or not at all.
+
+    A network failure is not raised. It leaves latest as None, which reads as
+    "not stale as far as we know", and the check runs again next time.
+    """
+    installed = installed_build(conn)
+    if installed is None:
+        return SdeStatus(installed=None, latest=None)
+
+    try:
+        latest = latest_build(settings, timeout=timeout)
+    except (httpx.HTTPError, ValueError, RuntimeError):
+        return SdeStatus(installed=installed, latest=None)
+
     db.set_meta(conn, META_CHECKED_AT, datetime.now(timezone.utc).isoformat())
-    return status
+    return SdeStatus(installed=installed, latest=latest)
 
 
 def skip_build(conn: sqlite3.Connection, build: int) -> None:
