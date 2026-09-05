@@ -1250,6 +1250,9 @@ def abyssal_pending_count(conn: sqlite3.Connection, type_names: list[str] | None
 STRUCTURES_SQL = """
 SELECT    s.structure_id,
           COALESCE(s.name, 'Structure ' || s.structure_id) AS name,
+          -- The table only shows the type's name, but "View fit" needs the id
+          -- to draw the hull's icon in the dialog header.
+          s.type_id,
           ty.name        AS type_name,
           sys.name       AS system_name,
           reg.name       AS region_name,

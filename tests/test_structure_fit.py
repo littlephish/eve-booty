@@ -77,6 +77,11 @@ def conn(tmp_path):
     add(c, 4, FUEL_BLOCK, "StructureFuel", quantity=5000)
     add(c, 5, QUANTUM_CORE, "QuantumCoreRoom")
     add(c, 6, TRITANIUM, "CorpSAG1", quantity=1_000_000)
+    c.execute(
+        "INSERT INTO structures (structure_id, name, system_id, region_id, type_id,"
+        " owner_id, owned, accessible) VALUES (?,?,?,?,?,?,1,1)",
+        (STRUCTURE, "Jita Fortizar", SYSTEM, REGION, FORTIZAR, 500),
+    )
     return c
 
 
@@ -203,3 +208,84 @@ def test_eft_export_leaves_out_the_fuel_bay(conn):
     for an ore hold."""
     text = fitting.to_eft("Fortizar", queries.fetch_structure_fit(conn, STRUCTURE))
     assert "Nitrogen Fuel Block" not in text
+
+
+# ------------------------------------------------------------ the dialog
+def test_the_structures_query_carries_the_type_id(conn):
+    """FitDialog draws the hull's icon from the type id. STRUCTURES_SQL used
+    to select only the type's *name*, which is all the table column needed."""
+    row = queries.fetch_structures(conn)[0]
+    assert row["type_id"] == FORTIZAR
+
+
+def test_the_dialog_says_what_is_empty_in_its_own_words(qapp_or_skip, conn):
+    """"Nothing fit, loaded or stowed on this ship" is the wrong sentence to
+    show somebody who right-clicked a Fortizar."""
+    from evasset.ui.fit_dialog import FitDialog
+
+    dialog = FitDialog(
+        STRUCTURE,
+        "Jita Fortizar",
+        ship_type_id=FORTIZAR,
+        empty_text="Nothing fitted on this structure.",
+    )
+    dialog._query.cancel()  # drop whatever the constructor started
+    dialog._on_rows([])
+    labels = dialog.body.findChildren(__import__("PySide6.QtWidgets", fromlist=["QLabel"]).QLabel)
+    assert any("structure" in label.text() for label in labels)
+
+
+# ------------------------------------------------------- the context menu
+# Built as a menu rather than exec'd in one step, the same way
+# treemap_view.menu_for_tile is, so the entries can be asserted without a
+# modal event loop.
+def test_the_structures_table_offers_view_fit(qapp_or_skip, conn):
+    from evasset.ui.structures_view import StructuresView
+
+    view = StructuresView(defer_load=True)
+    row = queries.fetch_structures(conn)[0]
+    menu = view.menu_for_structure(row)
+    assert "View fit…" in [a.text() for a in menu.actions()]
+
+
+def test_view_fit_opens_the_structure_that_was_clicked(qapp_or_skip, conn, monkeypatch):
+    from evasset.ui import structures_view
+
+    opened = {}
+
+    class FakeDialog:
+        def __init__(self, item_id, name, ship_type_id=None, **kw):
+            opened.update(item_id=item_id, name=name, type_id=ship_type_id, kw=kw)
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(structures_view, "FitDialog", FakeDialog)
+    view = structures_view.StructuresView(defer_load=True)
+    row = queries.fetch_structures(conn)[0]
+    view.open_fit(row)
+    assert opened["item_id"] == STRUCTURE
+    assert opened["name"] == "Jita Fortizar"
+    assert opened["type_id"] == FORTIZAR
+
+
+def test_the_dialog_is_given_the_structure_query_not_the_ship_one(
+    qapp_or_skip, conn, monkeypatch
+):
+    """The whole point: pointed at a structure with fetch_fit it would show
+    the corp hangar."""
+    from evasset.ui import structures_view
+
+    opened = {}
+
+    class FakeDialog:
+        def __init__(self, item_id, name, ship_type_id=None, **kw):
+            opened.update(kw)
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(structures_view, "FitDialog", FakeDialog)
+    view = structures_view.StructuresView(defer_load=True)
+    view.open_fit(queries.fetch_structures(conn)[0])
+    assert opened["fetch"](conn) == queries.fetch_structure_fit(conn, STRUCTURE)

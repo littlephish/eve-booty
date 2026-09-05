@@ -1,5 +1,9 @@
 """Structures our corporations own: fuel, reinforcement timers, moon drills.
 
+Right-click a row for "View fit" -- the same dialog the Assets tab opens on a
+ship, showing the structure's service modules, slots, rigs, fuel bay and
+quantum core.
+
 Everything here is quoted in EVE time, which is UTC, because every timer in
 the game is. A structure comes out of reinforcement at a wall-clock time that
 CCP states in UTC and that fleets form up on in UTC; rendering it in the
@@ -27,6 +31,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QTableView,
@@ -38,6 +43,7 @@ from .. import queries
 from .assets_view import _SortProxy
 from .async_query import AsyncQuery
 from .debounce import Debounce
+from .fit_dialog import FitDialog
 from .models import fill_combo
 from .palette import CRITICAL, NORMAL, SECONDARY_TEXT, WARN, status_brush
 from .sort_controller import SortController
@@ -371,6 +377,8 @@ class StructuresView(QWidget):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._context_menu)
         self.model = _StructuresModel()
         self.proxy = _SortProxy()
         self.proxy.setSourceModel(self.model)
@@ -418,6 +426,46 @@ class StructuresView(QWidget):
 
         if not defer_load:
             self.first_load()
+
+    # --------------------------------------------------------- context menu
+    def _context_menu(self, pos) -> None:
+        index = self.table.indexAt(pos)
+        if not index.isValid():
+            return
+        row = self.model.rows()[self.proxy.mapToSource(index).row()]
+        self.menu_for_structure(row).exec(self.table.viewport().mapToGlobal(pos))
+
+    def menu_for_structure(self, row) -> QMenu:
+        """Built and returned rather than exec'd here so the entries can be
+        asserted without a modal event loop -- same split as
+        treemap_view.menu_for_tile."""
+        menu = QMenu(self)
+        menu.addAction("View fit…", lambda: self.open_fit(row))
+        return menu
+
+    def open_fit(self, row) -> None:
+        """A structure's fit, explicitly -- not fetch_fit. Asked the ship
+        question, an Upwell structure answers with its entire contents: every
+        corp hangar division and everything anybody parked in it. See
+        queries.fetch_structure_fit."""
+        structure_id = row["structure_id"]
+
+        def fetch(conn):
+            return queries.fetch_structure_fit(conn, structure_id)
+
+        dialog = FitDialog(
+            structure_id,
+            row["name"],
+            ship_type_id=row["type_id"],
+            parent=self,
+            fetch=fetch,
+            empty_text=(
+                "Nothing fitted on this structure.\n\n"
+                "Fittings come from corporation assets, so this stays empty "
+                "without the corp assets scope."
+            ),
+        )
+        dialog.exec()
 
     # ----------------------------------------------------------------- data
     def reset_sort(self) -> None:

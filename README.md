@@ -96,7 +96,11 @@ run from source instead.
   missing rather than deleting it, because assets still recorded there need its
   name to resolve. Their frozen state and fuel clocks are blanked rather than
   counted down to a date nothing will refresh, and an Unanchored tick box brings
-  them back when you want to look
+  them back when you want to look. Right-click a structure for View fit to see
+  its service modules, slots, rigs, quantum core and what is actually in the
+  fuel bay - the table tells you when the fuel runs out, this tells you what is
+  burning. Its hangars are deliberately left out: they are the Assets tab's job,
+  and a busy Fortizar would bury the fit under thousands of rows
 - An estate strip above the table - net worth, assets, liquid ISK, volume,
   unpriced count and a one-row value map of your top locations - always
   whole-estate, never faceted by the filters below it

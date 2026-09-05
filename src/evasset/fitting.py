@@ -2,6 +2,11 @@
 render: fitted slots, drone bay, fighter bay, cargo, fleet hangar, and every
 specialized hold.
 
+Upwell structures come through here too, from fetch_structure_fit. They share
+the ship slot vocabulary (structures really do fit high/medium/low and rigs)
+and add three flags of their own: ServiceSlot0-7 for service modules,
+StructureFuel for the fuel bay, and QuantumCoreRoom for the core.
+
 Kept apart from src/evasset/ui/fit_dialog.py the same way queries.py,
 pricing.py and networth.py are kept apart from the UI -- this is plain data
 transformation with no Qt involved, so it can be unit tested without one.

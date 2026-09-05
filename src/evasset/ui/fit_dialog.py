@@ -2,6 +2,11 @@
 fleet hangar, and every specialized hold -- everything whose location_id is
 that ship's item_id.
 
+Also serves an Upwell structure, from the Structures tab. Same dialog, but
+the caller passes its own fetch: "everything whose location_id is this id" is
+the fit of a ship and the entire hangar contents of a structure, so a
+structure comes in through queries.fetch_structure_fit instead.
+
 The grouping/labelling logic (and the EFT/Pyfa export) lives in
 evasset.fitting (Qt-free, unit tested); this file is just the dialog chrome
 around it.
@@ -20,6 +25,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Callable
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal, Slot
 from PySide6.QtGui import QColor, QPixmap
@@ -86,10 +92,19 @@ class FitDialog(QDialog):
         ship_name: str,
         ship_type_id: int | None = None,
         parent: QWidget | None = None,
+        fetch: Callable[[sqlite3.Connection], list[sqlite3.Row]] | None = None,
+        empty_text: str = "Nothing fit, loaded or stowed on this ship.",
     ):
+        """fetch and empty_text are what let this dialog serve a structure as
+        well as a ship. A structure's fit is a different query -- asking
+        fetch_fit for one returns its entire hangar contents, see
+        queries.fetch_structure_fit -- and "on this ship" is the wrong
+        sentence to show under a Fortizar. Both default to the ship
+        behaviour, so the Assets tab passes neither."""
         super().__init__(parent)
         self._ship_name = ship_name
         self._ship_type_id = ship_type_id
+        self._empty_text = empty_text
         self._rows: list[sqlite3.Row] = []
         # {type_id: [(icon label, display px), ...]} -- filled as the header
         # and rows are built, read when the fetch job reports back.
@@ -146,10 +161,10 @@ class FitDialog(QDialog):
 
         self._query = AsyncQuery(self)
 
-        def fetch(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+        def fetch_ship(conn: sqlite3.Connection) -> list[sqlite3.Row]:
             return queries.fetch_fit(conn, ship_item_id)
 
-        self._query.run(fetch, self._on_rows, self._on_failed)
+        self._query.run(fetch or fetch_ship, self._on_rows, self._on_failed)
 
     def _add_row(self, widget: QWidget) -> None:
         self.body_layout.insertWidget(self.body_layout.count() - 1, widget)
@@ -190,7 +205,7 @@ class FitDialog(QDialog):
         self.status.hide()
         groups = group_fit(rows)
         if not groups:
-            empty = QLabel("Nothing fit, loaded or stowed on this ship.")
+            empty = QLabel(self._empty_text)
             empty.setStyleSheet(f"color: {SECONDARY_TEXT};")
             self._add_row(empty)
             self._start_icon_fetch()
