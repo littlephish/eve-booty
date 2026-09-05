@@ -172,7 +172,10 @@ def test_every_leaf_round_trips_through_index_and_parent(model):
                 assert idx.parent() == gidx
                 assert (idx.row(), idx.column()) == (r, c)
                 checked += 1
-    assert checked == 5 * 15  # the loops really covered every cell
+    # Derived, not hardcoded: adding a column to ASSET_COLUMNS is a normal
+    # thing to do and should not fail three tests that were only ever
+    # asserting the loops visited every cell.
+    assert checked == 5 * len(queries.ASSET_COLUMNS)
 
 
 def test_model_sanity_at_the_edges(model):
@@ -182,10 +185,12 @@ def test_model_sanity_at_the_edges(model):
     assert not model.index(0, 99).isValid()
     assert model.parent(QModelIndex()) == QModelIndex()
     assert model.rowCount(leaf(model, 0, 0)) == 0
-    # 15 columns everywhere: at the root, under a header, under a leaf.
-    assert model.columnCount() == 15
-    assert model.columnCount(model.index(0, 0)) == 15
-    assert model.columnCount(leaf(model, 0, 0)) == 15
+    # The same column count everywhere: at the root, under a header, under
+    # a leaf. That it matches ASSET_COLUMNS is the point, not the number.
+    width = len(queries.ASSET_COLUMNS)
+    assert model.columnCount() == width
+    assert model.columnCount(model.index(0, 0)) == width
+    assert model.columnCount(leaf(model, 0, 0)) == width
     assert model.data(QModelIndex()) is None
     assert model.row_for_index(QModelIndex()) is None
 
@@ -225,7 +230,9 @@ def test_header_display_fills_column_zero_only(model):
     gidx = model.index(0, 0)
     assert gidx.data() == "Jita IV - Moon 4 · 2 stacks · 50,015 m³ · 151.50m ISK"
     empties = [model.index(0, c).data() for c in range(1, model.columnCount())]
-    assert len(empties) == 14 and set(empties) == {""}
+    # Every column but the first: the header line lives in column zero and
+    # the rest stay blank so it reads as one label rather than a row.
+    assert len(empties) == len(queries.ASSET_COLUMNS) - 1 and set(empties) == {""}
 
 
 def test_leaves_carry_no_group_roles_and_headers_no_row(model):
@@ -252,7 +259,7 @@ def test_leaves_format_exactly_like_the_flat_table_model(app, rows):
                     f"row {r} col {c} role {role} diverged"
                 )
                 compared += 1
-    assert compared == 5 * 15 * 3
+    assert compared == 5 * len(queries.ASSET_COLUMNS) * 3
 
 
 def test_display_order_and_rows_agree(model, rows):
@@ -511,9 +518,9 @@ def test_without_extras_the_column_set_is_exactly_asset_columns(model):
     """Every positional reader of ASSET_COLUMNS (tests included) depends on
     the plain table serving precisely that list, in that order."""
     assert model.columns() == list(queries.ASSET_COLUMNS)
-    assert model.columnCount() == len(queries.ASSET_COLUMNS) == 15
+    assert model.columnCount() == len(queries.ASSET_COLUMNS)
     assert model.key_at(3) == "quantity"
-    assert model.key_at(15) is None and model.key_at(-1) is None
+    assert model.key_at(len(queries.ASSET_COLUMNS)) is None and model.key_at(-1) is None
 
 
 def test_extra_columns_slot_in_after_qty_and_leave_the_rest_in_order(app, conn):
@@ -522,7 +529,8 @@ def test_extra_columns_slot_in_after_qty_and_leave_the_rest_in_order(app, conn):
     qty = keys.index("quantity")
     assert keys[qty + 1:qty + 4] == [gm.roll_key(CPU), gm.roll_key(SPEED), gm.ROLL_MEAN_KEY]
     assert keys[:qty + 1] + keys[qty + 4:] == [k for k, _h in queries.ASSET_COLUMNS]
-    assert model.columnCount() == 18
+    # The base columns plus the three roll extras slotted in after Qty.
+    assert model.columnCount() == len(queries.ASSET_COLUMNS) + 3
     assert model.headerData(qty + 1, Qt.Horizontal) == "CPU"
     assert model.headerData(qty + 3, Qt.Horizontal) == "Roll"
     assert model.key_at(qty + 3) == gm.ROLL_MEAN_KEY

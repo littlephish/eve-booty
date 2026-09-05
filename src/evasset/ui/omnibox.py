@@ -701,6 +701,10 @@ class Omnibox(QWidget):
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
+        # Filter values that actually exist, used only to resolve unquoted
+        # multi-word values while typing. Empty until the view supplies it,
+        # which is a working state: those values just need quoting until then.
+        self._vocabulary: dict = {}
         # A plain QWidget subclass ignores stylesheet backgrounds unless told
         # otherwise, so without this attribute the border below draws nothing
         # and the omnibox stops reading as one field.
@@ -930,10 +934,19 @@ class Omnibox(QWidget):
         self._emit_changed_now()
         self._request_card_later([chip for chip in parsed if chip not in before])
 
+    def set_vocabulary(self, vocabulary: dict) -> None:
+        """The values that actually exist, per chip kind.
+
+        Only used to resolve unquoted multi-word values while typing, so it is
+        allowed to be stale or absent: without it those values simply need
+        quoting, which is what they needed before.
+        """
+        self._vocabulary = vocabulary or {}
+
     def _migrate_tokens(self) -> list[omni.Chip]:
         """Turn the field's finished tokens into chips and return the parsed
         ones, minted or already present -- empty when the text held none."""
-        spec = omni.parse(self.edit.text())
+        spec = omni.parse(self.edit.text(), self._vocabulary)
         if not spec.chips:
             return []
         for chip in spec.chips:

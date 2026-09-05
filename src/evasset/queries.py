@@ -22,6 +22,58 @@ LOCATION_EXPR = f"""CASE WHEN a.root_location_id = {ASSET_SAFETY_LOCATION_ID} TH
 
 # Every asset row, already joined to names, location and price.
 ASSET_ROWS = f"""
+WITH RECURSIVE
+-- Every ancestor of a row that is itself an asset, outermost first, as
+-- "Asset Safety Wrap > L2 HMS Dragoon". The station is deliberately not in it
+-- -- that is the Location column, and repeating it on every row would spend
+-- width saying what is already said.
+--
+-- A path rather than just the immediate parent, because the nesting is real:
+-- a fuel can in a capital's hangar, a can in a corp division, a ship inside an
+-- asset safety wrap. Naming only the innermost container answers "which can"
+-- while losing "which ship", and those are the same question asked twice.
+--
+-- The Slot column stays, and stays complementary. It carries the compartment
+-- when that is a property of the row itself (CorpSAG1 for a corp division,
+-- HiSlot0 for a fitting). This carries it when the compartment is a property
+-- of an ancestor -- an item in an asset safety wrap has its own flag set to
+-- Hangar, because it is in the hangar of the wrap.
+--
+-- Depth is capped rather than trusted. Container cycles should be impossible,
+-- but the flattening resolver already had to be hardened against one, and an
+-- unbounded recursive CTE meeting a cycle does not return.
+-- Owner is carried through the walk, not just item_id. The assets primary
+-- key is (owner_type, owner_id, item_id), and following it means a container
+-- is only ever matched within its own owner's assets -- and that the join uses
+-- that index rather than scanning.
+container_walk(owner_type, owner_id, item_id, parent_id, depth, path) AS (
+    SELECT a.owner_type, a.owner_id, a.item_id, a.location_id, 0, ''
+    FROM assets a
+    UNION ALL
+    SELECT w.owner_type, w.owner_id, w.item_id, par.location_id, w.depth + 1,
+           COALESCE(par.custom_name, pt.name)
+           || CASE WHEN w.path = '' THEN '' ELSE ' > ' || w.path END
+    FROM container_walk w
+    JOIN assets par ON par.owner_type = w.owner_type
+                   AND par.owner_id   = w.owner_id
+                   AND par.item_id    = w.parent_id
+    LEFT JOIN sde_types pt ON pt.type_id = par.type_id
+    WHERE w.depth < 8
+),
+-- The deepest row per item is the complete path; the shallower ones are its
+-- prefixes. Picked with a window function rather than a correlated
+-- MAX(depth) subselect, which EXPLAIN QUERY PLAN showed running once per
+-- asset row -- the exact shape the abyssal roll clause has a test guarding
+-- against, and for the same reason.
+container_path(owner_type, owner_id, item_id, path) AS (
+    SELECT owner_type, owner_id, item_id, path FROM (
+        SELECT owner_type, owner_id, item_id, path,
+               ROW_NUMBER() OVER (
+                   PARTITION BY owner_type, owner_id, item_id ORDER BY depth DESC
+               ) AS rank
+        FROM container_walk WHERE path <> ''
+    ) WHERE rank = 1
+)
 SELECT
     a.owner_type,
     a.owner_id,
@@ -35,6 +87,19 @@ SELECT
     mg.name                                                                AS meta,
     a.quantity,
     a.location_flag,
+    -- What the row is directly inside: a can, a ship, an asset safety wrap.
+    -- NULL when it sits in the location itself, so the column is blank for
+    -- the common case rather than repeating the station on every row.
+    --
+    -- The Slot column answers the same question wherever the compartment is a
+    -- property of the row (CorpSAG1 for a corp division, HiSlot0 for a
+    -- fitting). It cannot answer it when the compartment is a property of the
+    -- parent: an item inside an asset safety wrap has its own flag set to
+    -- Hangar, because it is in the hangar of the wrap. This is that case.
+    --
+    -- The container's custom name wins: "in Ore Can 3" beats "in Station
+    -- Container" for anyone trying to find the thing again.
+    cp.path                                                                AS container,
     a.is_singleton,
     a.is_blueprint_copy,
     t.is_dynamic_type                                                      AS is_dynamic_type,
@@ -53,6 +118,9 @@ SELECT
     a.quantity * COALESCE(t.volume, 0)                                     AS volume
 FROM assets a
 JOIN      sde_types      t    ON t.type_id      = a.type_id
+LEFT JOIN container_path cp   ON cp.owner_type  = a.owner_type
+                             AND cp.owner_id    = a.owner_id
+                             AND cp.item_id     = a.item_id
 LEFT JOIN sde_groups     g    ON g.group_id     = t.group_id
 LEFT JOIN sde_categories cat  ON cat.category_id = g.category_id
 LEFT JOIN sde_meta_groups mg  ON mg.meta_group_id = t.meta_group_id
@@ -75,6 +143,7 @@ ASSET_COLUMNS = [
     ("category", "Category"),
     ("meta", "Meta"),
     ("location", "Location"),
+    ("container", "Container"),
     ("location_flag", "Slot"),
     ("system", "System"),
     ("region", "Region"),

@@ -9,18 +9,20 @@ recorded next to the item so nobody rediscovers it.
 
 ## Next
 
-- [ ] **Asset safety wraps, searchable** (jEveAssets parity)
+- [x] **Asset safety wraps, searchable** (jEveAssets parity)
 
-      Items in asset safety already resolve to an "Asset Safety" location and
-      match `is:safety`, but they list flat. jEveAssets shows the wrap as a
-      container you can open.
+      Done, and it turned out not to be the feature it looked like. Wrap
+      contents were already searchable: they are ordinary child rows and the
+      container resolver already flattened them to the station. jEveAssets has
+      no asset safety handling at all, for the same reason -- a wrap is just a
+      container.
 
-      ESI tags every asset with a `location_flag`, and `AssetSafety` is one
-      value; `Deliveries` and `CapsuleerDeliveries` have the same shape of
-      problem and should be solved once. Start with a spike: confirm whether
-      wrap contents come back as children of the wrap's `item_id` or as flat
-      rows. That answer decides whether this is a query change or a sync
-      change, and it is cheap to establish before designing anything.
+      What was actually broken was `is:safety`, which matched nothing. It
+      tested `root_location_id = 2004`, and on a real account of 18,263 assets
+      that found 0 rows against 213 wraps holding 2,483 items. 2004 describes
+      items while the safety timer runs; delivered ones are a wrap in an
+      ordinary station. Both are now matched, recursively, because a ship in a
+      wrap keeps its modules inside the ship.
 
 - [ ] **Citadel service view**
 

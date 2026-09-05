@@ -350,9 +350,23 @@ def test_every_is_flag_and_its_negation_pick_the_seeded_rows(aconn):
     `is:abyssal` is an alias parse() turns into the abyssal chip rather
     than an is: flag, so it is walked here but is not in IS_FLAGS, whose
     length the last line pins."""
+    # Seeded here rather than in the fixture: the tests below assert exact id
+    # sets and a new fixture row would move all of them. Item 14 is free, and
+    # Tritanium at a station is priced and unfitted, so it lands only in the
+    # delivery bucket and leaves every other expectation alone.
+    aconn.execute(
+        "INSERT INTO assets (owner_type,owner_id,item_id,type_id,quantity,location_id,"
+        "location_flag,location_type,is_singleton,is_blueprint_copy,custom_name,"
+        "root_location_id,system_id,region_id) VALUES "
+        "('character',100,14,34,25,60003760,'Deliveries','station',0,0,NULL,"
+        "60003760,30000142,10000002)"
+    )
+    all_items = ABYSSAL_ALL | {14}
+
     expectations = {
         "fitted": {3},
         "safety": {9},
+        "delivery": {14},
         "unpriced": {7, 8, 11, 12, 13},
         "bpc": {7},
         "abyssal": {11, 12},
@@ -360,10 +374,16 @@ def test_every_is_flag_and_its_negation_pick_the_seeded_rows(aconn):
     seen = 0
     for flag, expected in expectations.items():
         assert _ids(aconn, parse(f"is:{flag}")) == expected, f"is:{flag}"
-        assert _ids(aconn, parse(f"-is:{flag}")) == ABYSSAL_ALL - expected, f"-is:{flag}"
+        assert _ids(aconn, parse(f"-is:{flag}")) == all_items - expected, f"-is:{flag}"
         seen += 1
-    assert seen == 5, "every flag and the alias must be exercised"
-    assert len(omni.IS_FLAGS) == 4 and "abyssal" not in omni.IS_FLAGS
+    # Derived rather than a literal, so adding a flag without an expectation
+    # here fails the suite -- which is how is:delivery was caught. The +1 is
+    # the abyssal alias, which parse() turns into its own chip kind and so is
+    # deliberately not a member of IS_FLAGS.
+    assert seen == len(omni.IS_FLAGS) + 1, "every flag and the alias must be exercised"
+    # The alias is a chip kind of its own, not an is: flag, which is what the
+    # +1 above accounts for.
+    assert "abyssal" not in omni.IS_FLAGS
 
 
 def test_level_chips_filter_by_exact_label(conn):
@@ -452,7 +472,7 @@ def test_where_skips_chips_it_cannot_translate(conn):
         Chip(kind="category", value="Ship"),
     ])
     where, params = spec.where()
-    assert where == "(cat.name = ?)"
+    assert where == "(cat.name = ? COLLATE NOCASE)"
     assert params == ("Ship",)
     assert _ids(conn, spec) == {1, 2, 10}
 
@@ -467,6 +487,223 @@ def test_filterspec_where_only_ever_binds_values_as_parameters():
     assert params == (hostile,)
 
 
+def _names(conn, query: str) -> set[str]:
+    """Item names a query returns, for comparing two spellings of one filter."""
+    from evasset import queries
+
+    spec = parse(query)
+    where, params = spec.where()
+    sql = queries.ASSET_ROWS + (f" WHERE {where}" if where else "")
+    return {r["item"] for r in conn.execute(sql, params)}
+
+
+# ------------------------------------------------------------ case folding
+def test_chip_values_match_regardless_of_case(conn):
+    """A bare word already ignored case, because SQLite's LIKE does for ASCII.
+    Chips used a plain =, so "tritanium" found Tritanium while "cat:ship"
+    found nothing -- the same query typed two ways, behaving differently for a
+    reason nobody could see from the outside.
+    """
+    for query in ("cat:Ship", "cat:ship", "cat:SHIP", "cat:sHiP"):
+        assert _names(conn, query) == _names(conn, "cat:Ship"), query
+
+
+def test_case_folding_applies_to_every_chip_kind(conn):
+    """Not just category: owner, location, system, region, group and meta all
+    build the same comparison, so all of them were affected."""
+    for lower, proper in (
+        ('owner:"test pilot"', 'owner:"Test Pilot"'),
+        ("sys:jita", "sys:Jita"),
+        ('region:"the forge"', 'region:"The Forge"'),
+    ):
+        assert _names(conn, lower) == _names(conn, proper), lower
+
+
+def test_case_folding_applies_to_negation(conn):
+    """A negated chip that matched nothing would exclude nothing, which reads
+    as the filter silently doing nothing at all."""
+    assert _names(conn, "-cat:ship") == _names(conn, "-cat:Ship")
+
+
+def test_a_row_lands_on_exactly_one_side_whatever_the_case(conn):
+    everything = _names(conn, "")
+    included = _names(conn, "cat:ship")
+    excluded = _names(conn, "-cat:ship")
+
+    assert not (included & excluded)
+    assert included | excluded == everything
+
+
+def test_quoted_multi_word_values_fold_too(conn):
+    """The values most worth typing by hand are the long ones."""
+    assert _names(conn, 'loc:"jita iv - moon 4"') == _names(conn, 'loc:"Jita IV - Moon 4"')
+
+
+# --------------------------------------------------------------- injection
+# The WHERE clause is assembled by string concatenation, which is worth being
+# suspicious of. What gets concatenated is structure from closed sets:
+#
+#   expr  comes from queries.OVERVIEW_FILTER_EXPR, six fixed column
+#         expressions, keyed by a loop over the fixed (*LEVEL_KINDS, "item")
+#         rather than by anything a user typed
+#   op    comes from _VAL_RE, an anchored ^(>=|<=|>|<) alternation, so it can
+#         only ever be one of four literal strings
+#   the rest is "?" placeholders and SQL keywords
+#
+# Every value a user can influence goes into params. These tests exist so that
+# stays true: someone adding a filter kind could reasonably reach for an
+# f-string, and this is what should stop them.
+INJECTIONS = [
+    """loc:"x'; DROP TABLE assets; --" """,
+    """owner:"' OR 1=1 --" """,
+    """cat:"' UNION SELECT name FROM sqlite_master --" """,
+    "val:>1); DROP TABLE assets; --",
+    "'; DELETE FROM assets; --",
+    """group:"'||(SELECT value FROM meta)||'" """,
+    """item:"'; UPDATE assets SET quantity=0; --" """,
+]
+
+
+@pytest.mark.parametrize("attack", INJECTIONS)
+def test_a_hostile_filter_value_cannot_reach_the_sql(conn, attack):
+    before = {r["item"] for r in conn.execute(queries.ASSET_ROWS)}
+
+    spec = parse(attack)
+    where, params = spec.where()
+    sql = queries.ASSET_ROWS + (f" WHERE {where}" if where else "")
+    rows = {r["item"] for r in conn.execute(sql, params)}
+
+    # It must match nothing, rather than everything or something extra.
+    assert not rows - before
+    # And it must not have changed anything.
+    assert {r["item"] for r in conn.execute(queries.ASSET_ROWS)} == before
+    assert conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
+    ).fetchone()[0] > 20, "tables are still there"
+
+
+def test_the_value_is_a_parameter_and_never_part_of_the_clause():
+    """The clause carries a placeholder; the value travels beside it."""
+    spec = parse("""owner:"' OR 1=1 --" """)
+    where, params = spec.where()
+
+    assert "?" in where
+    assert "OR 1=1" not in where
+    assert params == ("' OR 1=1 --",)
+
+
+def test_a_chip_kind_from_nowhere_cannot_choose_a_column():
+    """Chips do not only come from parse -- a saved view can carry anything.
+    The column expression is chosen by iterating fixed kinds, so an unknown
+    kind selects no column rather than supplying one."""
+    spec = FilterSpec(text="", chips=[Chip(kind="a.x FROM sqlite_master --", value="z")])
+    where, params = spec.where()
+
+    assert "sqlite_master" not in where
+    assert params == ()
+
+
+# ------------------------------------------------- unquoted multi-word values
+# Most filter values have spaces in them: on a real account 469 of 472
+# locations and 308 of 376 group names do. Requiring quotes for those made the
+# common case the awkward one.
+#
+# The naive rule -- swallow words until the next prefix -- cannot be used: it
+# would turn `owner:Main tritanium` into a search for an owner of that name
+# and silently drop the text search. Resolving against the values that
+# actually exist is what makes both readings possible.
+VOCAB = {
+    "owner": ["Test Pilot", "Main", "Main Fleet", "Jita Trader"],
+    "system": ["Jita", "Amarr"],
+    "region": ["The Forge"],
+    "location": ["Jita IV - Moon 4 - Caldari Navy Assembly Plant"],
+    "category": ["Ship", "Module"],
+}
+
+
+def _chips(query: str):
+    return [(c.kind, c.value, c.negated) for c in parse(query, VOCAB).chips]
+
+
+def test_an_unquoted_multi_word_value_is_matched():
+    assert _chips("owner:Test Pilot") == [("owner", "Test Pilot", False)]
+    assert parse("owner:Test Pilot", VOCAB).text == ""
+
+
+def test_a_space_after_the_colon_is_allowed():
+    spec = parse("owner: Test Pilot sys:Jita", VOCAB)
+    assert [(c.kind, c.value) for c in spec.chips] == [
+        ("owner", "Test Pilot"), ("system", "Jita")
+    ]
+    assert spec.text == ""
+
+
+def test_a_following_chip_ends_the_value():
+    """Otherwise one long value would swallow the rest of the query."""
+    spec = parse("loc:Jita IV - Moon 4 - Caldari Navy Assembly Plant cat:Ship", VOCAB)
+    assert [c.kind for c in spec.chips] == ["location", "category"]
+
+
+def test_words_that_are_not_part_of_a_value_stay_a_search():
+    """The case that rules out swallowing words until the next prefix."""
+    spec = parse("owner:Main tritanium", VOCAB)
+    assert [(c.kind, c.value) for c in spec.chips] == [("owner", "Main")]
+    assert spec.text == "tritanium"
+
+
+def test_the_longest_real_value_wins():
+    """"Main" is a value and so is "Main Fleet"; typing the longer one must
+    not be read as the shorter one plus a stray word."""
+    assert _chips("owner:Main Fleet") == [("owner", "Main Fleet", False)]
+    assert _chips("owner:Main") == [("owner", "Main", False)]
+
+
+def test_matching_ignores_case_and_returns_the_stored_spelling():
+    """The chip has to carry the value as stored: it is displayed, saved into
+    views, and round-tripped through to_text()."""
+    assert _chips("owner:test pilot") == [("owner", "Test Pilot", False)]
+    assert _chips("REGION:the forge") == [("region", "The Forge", False)]
+
+
+def test_negation_still_works_unquoted():
+    assert _chips("-owner:Test Pilot") == [("owner", "Test Pilot", True)]
+
+
+def test_an_unknown_value_behaves_as_it_always_did():
+    """No vocabulary entry means no run-on. The first word becomes the value,
+    matching nothing, and the rest stays a search -- which is what an
+    unrecognised value did before any of this."""
+    spec = parse("owner:Nobody Here tritanium", VOCAB)
+    assert [(c.kind, c.value) for c in spec.chips] == [("owner", "Nobody")]
+    assert spec.text == "Here tritanium"
+
+
+def test_quoting_still_works_and_still_delimits():
+    spec = parse('owner:"Test Pilot" tritanium', VOCAB)
+    assert [(c.kind, c.value) for c in spec.chips] == [("owner", "Test Pilot")]
+    assert spec.text == "tritanium"
+
+
+def test_a_bare_prefix_is_still_the_half_typed_state():
+    """`owner:` on its own is what the box holds mid-keystroke. It must stay
+    bare text rather than becoming a chip matching everything or nothing."""
+    spec = parse("owner:", VOCAB)
+    assert spec.chips == []
+    assert spec.text == "owner:"
+
+
+def test_without_a_vocabulary_nothing_changes():
+    """Every existing caller, and every saved view, parses without one."""
+    spec = parse("owner:Test Pilot")
+    assert [(c.kind, c.value) for c in spec.chips] == [("owner", "Test")]
+    assert spec.text == "Pilot"
+
+
+def test_a_quoted_word_is_never_absorbed_into_a_value():
+    """Quotes are a deliberate delimiter in both directions."""
+    spec = parse('owner:Main "Fleet"', VOCAB)
+    assert [(c.kind, c.value) for c in spec.chips] == [("owner", "Main")]
+    assert spec.text == "Fleet"
 # ---------------------------------------------------------------- stat: chips
 def test_stat_parses_name_operator_and_number_including_negatives_and_spaces():
     T = omni.StatTerm
@@ -919,7 +1156,13 @@ def test_roll_clause_probes_every_abyssal_table_by_key_and_scans_none(aconn):
         "EXPLAIN QUERY PLAN " + queries.ASSET_ROWS + f" WHERE {where}", params
     )]
     scans = [line for line in plan if line.startswith("SCAN")]
-    assert all(line in ("SCAN a", "SCAN x") for line in scans), scans
+    # The clause being correlated is the design -- what must not happen is a
+    # *scan* inside it. Allowed here: the asset table itself (a), the
+    # uncorrelated display-name subselect (x), and the container_walk CTE with
+    # its window-function subquery (w, container_walk, subquery-N), which
+    # SQLite builds once and then searches by key.
+    allowed = ("SCAN a", "SCAN x", "SCAN w", "SCAN container_walk", "SCAN (subquery-")
+    assert all(line.startswith(allowed) for line in scans), scans
     assert not any("abyssal_attributes" in line for line in scans)
     assert any(line.startswith("SEARCH sa USING") for line in plan), plan
     assert any(line.startswith("SEARCH i USING INTEGER PRIMARY KEY") for line in plan), plan
