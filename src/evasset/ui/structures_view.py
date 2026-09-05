@@ -219,10 +219,71 @@ class _StructuresModel(QAbstractTableModel):
     def set_rows(self, rows) -> None:
         self.beginResetModel()
         self._rows = list(rows)
+        # What "Reset sort" goes back to. A fresh query result is an order in
+        # its own right, so it is kept rather than re-derived.
+        self._unsorted = list(self._rows)
         self.endResetModel()
 
     def rows(self) -> list:
         return self._rows
+
+    def sort_value(self, row, key: str):
+        """What a column sorts by, as opposed to what it displays.
+
+        The two differ on every column that is not plain text. "Fuel expires"
+        renders as "2026-09-24 04:00  ·  19d 2h", and ordering that string
+        sorts by the rendered date text with the remaining-time suffix as a
+        tiebreak -- close enough to look right and not a chronological order.
+        The vuln hour renders as "09:00" and is a number. Text is folded
+        because every name ordering in the SQL says COLLATE NOCASE, and a raw
+        str comparison would file "apple" after "Zebra".
+        """
+        if key in self.DEADLINES:
+            return sort_key(row[key])
+        if key == "reinforce_hour":
+            hour = row["reinforce_hour"]
+            return -1 if hour is None else int(hour)
+        value = row[key]
+        return "" if value is None else str(value).casefold()
+
+    def sort(self, column: int, order=Qt.AscendingOrder) -> None:
+        """Reorder the rows themselves.
+
+        SortController asks the *source* model to sort rather than the proxy
+        in front of it, for the reasons in its module docstring. Without this
+        method that call reached QAbstractTableModel.sort(), which is a
+        base-class no-op: the header highlighted, the sort arrow flipped, and
+        the rows never moved. Everything else about the click looked like it
+        had worked, which is why it survived a first report.
+
+        A column outside the table is the reset case -- SortController.reset()
+        passes -1 -- and means "back to the order the query returned".
+        """
+        before = self._rows
+        self.layoutAboutToBeChanged.emit()
+        stale = self.persistentIndexList()
+        if 0 <= column < len(self._keys):
+            key = self._keys[column]
+            self._rows = sorted(
+                before,
+                key=lambda row: self.sort_value(row, key),
+                reverse=order == Qt.DescendingOrder,
+            )
+        else:
+            self._rows = list(self._unsorted)
+        if stale:
+            # Keep the selection on the structure it was on, not on whatever
+            # row number it happened to occupy.
+            landed = {id(row): i for i, row in enumerate(self._rows)}
+            self.changePersistentIndexList(
+                stale,
+                [
+                    self.index(landed[id(before[ix.row()])], ix.column())
+                    if 0 <= ix.row() < len(before) else QModelIndex()
+                    for ix in stale
+                ],
+            )
+        self.layoutChanged.emit()
 
     def rowCount(self, parent=QModelIndex()) -> int:  # noqa: N802
         return 0 if parent.isValid() else len(self._rows)
@@ -281,14 +342,8 @@ class _StructuresModel(QAbstractTableModel):
         if role == Qt.DisplayRole:
             return self.display(row, key)
 
-        if role == Qt.UserRole:            # what the sort proxy compares
-            if key in self.DEADLINES:
-                return sort_key(row[key])
-            if key == "reinforce_hour":
-                hour = row["reinforce_hour"]
-                return -1 if hour is None else int(hour)
-            value = row[key]
-            return "" if value is None else str(value)
+        if role == Qt.UserRole:            # what a sort compares
+            return self.sort_value(row, key)
 
         # Colour reinforces what the text already says -- an empty fuel bay
         # reads as "passed", a reinforced structure says so in the State
