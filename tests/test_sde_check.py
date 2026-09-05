@@ -151,10 +151,13 @@ def test_a_failed_check_is_retried_rather_than_recorded(conn, monkeypatch):
     assert sde.due_for_check(conn) is True
 
 
-def test_the_startup_budget_is_short(conn):
-    """One second. Nothing waits on this, but an unbounded call parks a pool
-    thread and a task bar entry for as long as CCP takes."""
-    assert sde.STARTUP_TIMEOUT <= 2.0
+def test_the_startup_budget_is_bounded_but_reachable(conn):
+    """Bounded, because an unbounded call parks a pool thread for as long as
+    CCP takes. Not tight, because a cold connection is about four round trips
+    before the server does anything, which is a full second of floor on a
+    250ms RTT link -- a shorter budget would fail exactly the users furthest
+    from CCP."""
+    assert 3.0 <= sde.STARTUP_TIMEOUT <= 10.0
 
 
 def test_an_unknown_latest_build_is_never_offered_as_an_update():

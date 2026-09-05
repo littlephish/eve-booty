@@ -22,6 +22,12 @@ SOFTWARE.
 
 ---
 
-EVE Online and all related material are the intellectual property of CCP hf.
-This project uses CCP's public ESI API and Static Data Export under the CCP
-Developer License Agreement and is not endorsed by or affiliated with CCP hf.
+© 2014 CCP hf. All rights reserved. "EVE", "EVE Online", "CCP", and all
+related logos and images are trademarks or registered trademarks of CCP hf.
+
+This notice is the one required by section 7.1 of the CCP Developer License
+Agreement, reproduced verbatim.
+
+EVE Booty uses CCP's public ESI API and Static Data Export under that
+agreement. It is a non-commercial third-party application and is not
+endorsed by, sponsored by, or affiliated with CCP hf.

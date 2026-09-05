@@ -532,7 +532,9 @@ class MainWindow(QMainWindow):
             f'<a href="{PROJECT_URL}">{PROJECT_URL}</a></p>'
             "<p>Item and market data from CCP's ESI and Static Data Export. "
             "Jita aggregates from Fuzzwork.<br>"
-            "EVE Online and all related material are property of CCP hf.</p>",
+            "© 2014 CCP hf. All rights reserved. &quot;EVE&quot;, &quot;EVE Online&quot;, "
+            "&quot;CCP&quot;, and all related logos and images are trademarks or "
+            "registered trademarks of CCP hf.</p>",
         )
 
     # ------------------------------------------------------------- callbacks

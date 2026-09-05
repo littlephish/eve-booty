@@ -257,15 +257,24 @@ META_SKIPPED_BUILD = "sde_skipped_build"
 # asked six times.
 CHECK_INTERVAL = timedelta(hours=6)
 
-# A startup check gets one second and then gives up. Measured warm at 0.38s.
-# Nothing waits on it -- it runs on the thread pool -- but a 30 second default
-# leaves a pool thread and a task bar entry parked for half a minute whenever
-# CCP is slow, for information that is only ever nice to have.
+# How long a startup staleness check may take before giving up.
 #
-# Giving up costs nothing, because the case that actually matters does not
-# need the network: whether the SDE is missing is a local fact, and staleness
-# can wait for the next launch.
-STARTUP_TIMEOUT = 1.0
+# Nothing waits on it -- it runs on the thread pool -- but the 30 second
+# default parks that thread and a task bar entry for half a minute whenever
+# CCP is slow, to learn something only worth knowing promptly.
+#
+# Five, not one. A cold connection is roughly four round trips before the
+# server does any work: DNS, TCP, TLS, then the request. Measured from a
+# European connection that is 163ms end to end, but at the 250ms RTT of a
+# Tokyo-to-Iceland link it is a full second of floor, so a one second budget
+# would fail exactly the users furthest from CCP and never fail anyone near
+# it. Five leaves real headroom over that floor while staying nowhere near
+# thirty.
+#
+# Being generous is cheap here because the case that actually matters never
+# makes the call: whether the SDE is missing is a local fact, and staleness
+# can always wait for the next launch.
+STARTUP_TIMEOUT = 5.0
 
 
 @dataclass(frozen=True)
