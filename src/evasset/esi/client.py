@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 
 from ..config import COMPATIBILITY_DATE, ESI_BASE, Settings, user_agent
+from ..logsetup import LOGGER
 from .auth import TokenCache
 
 
@@ -97,10 +98,22 @@ class ESIClient:
                 )
             except httpx.TransportError as exc:
                 last_exc = exc
+                LOGGER.warning(
+                    "ESI %s %s: transport error on attempt %d/%d: %s",
+                    method, path, attempt + 1, self.max_retries, exc,
+                )
                 time.sleep(2**attempt)
                 continue
 
             self.errors.observe(resp.headers)
+            # The single most useful line in the log. A 403 from one endpoint
+            # and "this character simply owns nothing" are indistinguishable by
+            # the time either reaches the table.
+            LOGGER.debug(
+                "ESI %s %s -> %s%s",
+                method, path, resp.status_code,
+                f" (character {character_id})" if character_id else "",
+            )
 
             if resp.status_code == 404 and allow_404:
                 return None

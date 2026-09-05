@@ -310,6 +310,9 @@ class Settings:
     contract_price_beats_market: bool = False
     snapshot_on_sync: bool = True
     contact_email: str = ""
+    # Off by default: the useful lines name someone's characters and
+    # holdings, so they belong on disk only when a user asks for them.
+    debug_logging: bool = False
 
     @property
     def redirect_uri(self) -> str:

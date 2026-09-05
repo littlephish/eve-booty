@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from .. import db
 from ..config import ASSET_SAFETY_LOCATION_ID, Settings
+from ..logsetup import LOGGER
 from .auth import AuthError
 from .client import ESIClient, ESIError
 
@@ -155,8 +156,10 @@ class Syncer:
                 warnings.append(f"{row['name']}: skipped {label} (scope not granted)")
                 continue
             try:
+                LOGGER.debug("sync %s: %s", row["name"], label)
                 fn(cid)
             except ESIError as exc:
+                LOGGER.warning("sync %s: %s failed: %s", row["name"], label, exc)
                 warnings.append(f"{row['name']}: {label} failed -- {exc}")
 
         if row["include_corp"] and row["corporation_id"]:

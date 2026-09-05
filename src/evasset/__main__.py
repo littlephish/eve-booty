@@ -37,8 +37,16 @@ def main() -> int:
     from PySide6.QtWidgets import QApplication, QMessageBox
 
     from evasset.config import Settings
+    from evasset.logsetup import configure, install_excepthook
     from evasset.ui import MainWindow
     from evasset.ui.workers import StartupInitJob
+
+    # Before the window exists, so a failure building it is still recorded.
+    # A windowed build has no stderr at all, so without this an exception
+    # off the GUI thread leaves no trace anywhere.
+    settings = Settings.load()
+    configure(settings.debug_logging)
+    install_excepthook()
 
     app = QApplication(sys.argv)
     app.setApplicationName("EVE Booty")
@@ -74,7 +82,7 @@ def main() -> int:
     state: dict = {}
 
     def start_main_window(_result=None) -> None:
-        state["window"] = MainWindow(Settings.load())
+        state["window"] = MainWindow(settings)
         state["window"].show()
         splash.close()
 
@@ -132,8 +140,11 @@ def _headless(args) -> int:
     from evasset.config import Settings
     from evasset.esi import ESIClient, TokenCache
     from evasset.esi.sync import Syncer
+    from evasset.logsetup import configure, install_excepthook
 
     settings = Settings.load()
+    configure(settings.debug_logging)
+    install_excepthook()
     conn = db.init()
 
     def show(msg: str, pct: int) -> None:

@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import db, queries, updater
+from .. import db, diagnostics, queries, updater
 from ..config import DB_PATH, PROJECT_URL, Settings
 from ..esi import TokenCache
 from .assets_view import AssetsView
@@ -221,6 +221,13 @@ class MainWindow(QMainWindow):
         if not updater.can_update():
             self.act_update.setToolTip("Updates apply to the installed build only")
         help_menu.addAction(self.act_update)
+        self.act_diagnostics = QAction("&Diagnostics…", self)
+        self.act_diagnostics.setToolTip(
+            "A summary to paste into a bug report: versions, row counts and "
+            "what the last sync said"
+        )
+        self.act_diagnostics.triggered.connect(self.show_diagnostics)
+        help_menu.addAction(self.act_diagnostics)
         help_menu.addAction(about)
 
     def _build_statusbar(self) -> None:
@@ -410,6 +417,35 @@ class MainWindow(QMainWindow):
                 "The update helper could not be started. "
                 "Download the latest release manually instead.",
             )
+
+    def show_diagnostics(self) -> None:
+        """The report, with a button that puts it on the clipboard.
+
+        Read-only and copyable rather than written to a file the user then has
+        to find: the whole point is that "paste this into the issue" is one
+        click from the menu.
+        """
+        text = diagnostics.report(self.conn, self.settings)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Diagnostics")
+        dialog.resize(720, 560)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Paste this into a bug report."))
+
+        view = QTextEdit()
+        view.setReadOnly(True)
+        view.setLineWrapMode(QTextEdit.NoWrap)
+        view.setFontFamily("Consolas")
+        view.setPlainText(text)
+        layout.addWidget(view, 1)
+
+        buttons = QDialogButtonBox()
+        copy = buttons.addButton("Copy to clipboard", QDialogButtonBox.ActionRole)
+        buttons.addButton("Close", QDialogButtonBox.RejectRole)
+        copy.clicked.connect(lambda: QApplication.clipboard().setText(text))
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
 
     def about(self) -> None:
         QMessageBox.about(

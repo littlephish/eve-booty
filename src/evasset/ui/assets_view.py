@@ -263,6 +263,14 @@ class AssetsView(QWidget):
         self.state_label = QLabel("")
         self.state_label.setStyleSheet(f"color: {palette.SECONDARY_TEXT};")
         state_row.addWidget(self.state_label)
+
+        # Hidden unless the table is empty for a reason the user cannot see.
+        # It sits on the state row, beside the stack count, because that is
+        # where the eye already is when the number reads zero.
+        self.empty_hint = QLabel("")
+        self.empty_hint.setTextFormat(Qt.RichText)
+        self.empty_hint.setVisible(False)
+        state_row.addWidget(self.empty_hint)
         self.clear_all_btn = QPushButton("Clear all")
         # A neutral pill rather than a flat button: flat blended into the
         # window and only looked clickable under the pointer, and this is the
@@ -526,6 +534,45 @@ class AssetsView(QWidget):
         suffix = f" · {count} filter{'s' if count != 1 else ''}" if count else ""
         self.state_label.setText(f"{shown:,} of {self._total_stacks:,} stacks{suffix}")
         self.clear_all_btn.setVisible(count > 0)
+        self._explain_if_empty(shown)
+
+    def _explain_if_empty(self, shown: int) -> None:
+        """Say why the table is empty when the reason is not the filter.
+
+        A first-time user reported 32,297 synced stacks showing as "0 of
+        32,297" with every column blank. The cause was that the game data had
+        never been imported: ASSET_ROWS inner joins sde_types, so an empty SDE
+        removes every row before the table sees one. The status bar did say
+        "SDE build not imported", but that is the wrong place -- it is not
+        where somebody looks when a table they expected to be full is empty,
+        and it does not connect the two facts.
+
+        Only speaks up when rows exist but none survive the query, so a filter
+        that genuinely matches nothing still reads as an ordinary empty result.
+        """
+        if shown or not self._total_stacks:
+            self.empty_hint.setVisible(False)
+            return
+        try:
+            has_sde = bool(
+                db.connect().execute("SELECT 1 FROM sde_types LIMIT 1").fetchone()
+            )
+        except Exception:  # noqa: BLE001 - a hint must never break the view
+            has_sde = True
+        if has_sde:
+            self.empty_hint.setVisible(False)
+            return
+        # status_hex rather than a literal: it is already measured against
+        # WCAG AA in both themes by tests/test_contrast.py, and a warning
+        # nobody can read is not a warning.
+        colour = palette.status_hex(palette.WARN, self.palette())
+        self.empty_hint.setStyleSheet(f"color: {colour};" if colour else "")
+        self.empty_hint.setText(
+            "Game data has not been imported, so none of your "
+            f"{self._total_stacks:,} stacks can be shown. "
+            "Run <b>Update -&gt; Game data</b> to download it."
+        )
+        self.empty_hint.setVisible(True)
 
     def _on_query_failed(self, message: str) -> None:
         self.footer.setText(f"Query failed: {message}")

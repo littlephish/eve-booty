@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import Settings
+from ..logsetup import LOG_PATH, configure
 
 
 class SettingsDialog(QDialog):
@@ -125,6 +126,18 @@ class SettingsDialog(QDialog):
         self.snapshot = QCheckBox("Record a net worth snapshot after every sync")
         self.snapshot.setChecked(settings.snapshot_on_sync)
         behave.addRow(self.snapshot)
+
+        self.debug_logging = QCheckBox("Write a debug log")
+        self.debug_logging.setChecked(settings.debug_logging)
+        self.debug_logging.setToolTip(
+            "Records every ESI request and its status, each sync step, and any "
+            "unhandled error, to:\n"
+            f"{LOG_PATH}\n\n"
+            "Off by default because those lines name your characters and what "
+            "they hold. Turn it on when reporting a problem, then send that "
+            "file. Takes effect immediately."
+        )
+        behave.addRow(self.debug_logging)
         root.addWidget(behave_box)
 
         root.addStretch(1)
@@ -160,5 +173,9 @@ class SettingsDialog(QDialog):
         s.contract_min_volume = self.min_volume.value()
         s.contract_price_beats_market = self.contract_first.isChecked()
         s.snapshot_on_sync = self.snapshot.isChecked()
+        s.debug_logging = self.debug_logging.isChecked()
+        # Applied here rather than at the next launch: somebody ticking
+        # this is trying to capture something that is happening now.
+        configure(s.debug_logging)
         s.save()
         self.accept()
