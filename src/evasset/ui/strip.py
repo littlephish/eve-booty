@@ -43,13 +43,28 @@ from .models import fmt_short_isk
 _SEGMENT_LIGHTNESS = (100, 135, 75, 160, 90, 120)
 
 
+# The caption's size step below the body face, shared by the strip's
+# captions, the inspector's range labels and the search card's track
+# labels.
+CAPTION_SHRINK = 1.5
+
+
+def caption_font(reference: QFont) -> QFont:
+    """The reference face a caption step smaller. The body face rather than
+    a fixed-pitch one: the app sets every other figure in it, and Windows
+    resolves the system fixed font to Courier New, which looked like a
+    different application."""
+    font = QFont(reference)
+    font.setPointSizeF(max(reference.pointSizeF() - CAPTION_SHRINK, 6.0))
+    return font
+
+
 def _caption_label(text: str) -> QLabel:
     """The concept board's cell caption: small, uppercase, letter-spaced,
     muted -- scaffolding the eye skips once the layout is familiar."""
     label = QLabel(text.upper())
     label.setStyleSheet(f"color: {palette.SECONDARY_TEXT};")
-    font = label.font()
-    font.setPointSizeF(max(font.pointSizeF() - 1.5, 6.0))
+    font = caption_font(label.font())
     font.setLetterSpacing(QFont.PercentageSpacing, 106)
     label.setFont(font)
     return label

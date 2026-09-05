@@ -56,7 +56,7 @@ def _every_menu_label(window):
 def test_update_menu_lists_widest_scope_first(window):
     items = _labels(window.update_menu)
     assert items[:3] == ["All", "All characters", "Character"]
-    assert items[3:] == ["Prices", "Game data", "Net worth snapshot"]
+    assert items[3:] == ["Prices", "Game data", "Abyssal stats", "Net worth snapshot"]
 
 
 def test_refresh_actions_moved_off_file_and_data(window):
@@ -84,10 +84,32 @@ def test_there_is_no_toolbar(window):
 
 @pytest.mark.parametrize(
     "label",
-    ["All", "Characters…", "Prices", "Net worth snapshot", "Game data", "Settings…"],
+    [
+        "All", "Characters…", "Prices", "Net worth snapshot", "Game data",
+        "Abyssal stats", "Settings…",
+    ],
 )
 def test_every_command_is_reachable_from_a_menu(window, label):
     assert label in _every_menu_label(window)
+
+
+def test_abyssal_stats_waits_for_any_sync_and_dedups_like_the_snapshot(window, started_tasks):
+    """The fetch is keyed on item_ids the sync rewrites one owner at a time;
+    started alongside a sync it would read a half-replaced assets table."""
+    window._submit("sync:all", "Update all", object())
+    window.act_abyssal.trigger()
+    assert [t.kind for t in started_tasks] == ["sync:all"], "abyssal queues behind the sync"
+    task = next(t for t in window.tasks.active() if t.kind == "abyssal")
+    assert task.after == ("sync",)
+    window.act_abyssal.trigger()
+    assert [t.kind for t in window.tasks.active()].count("abyssal") == 1
+
+
+def test_startup_skips_the_sde_refresh_on_a_database_with_no_sde(window):
+    """A fresh install has no SDE and no dogma tables; refreshing tables it
+    never had would be a surprise download before the user has seen the
+    Update menu. Only an installed-but-older import triggers it."""
+    assert not window.tasks.is_active("sde")
 
 
 def test_menu_items_carry_mnemonics(window):

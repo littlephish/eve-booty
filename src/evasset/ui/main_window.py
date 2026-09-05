@@ -33,6 +33,7 @@ from .tasks import TaskManager
 from .treemap_view import TreemapView
 from .wallet_view import WalletView
 from .workers import (
+    AbyssalStatsJob,
     RepriceJob,
     SdeCheckJob,
     SdeUpdateJob,
@@ -40,6 +41,19 @@ from .workers import (
     SyncJob,
     UpdateCheckJob,
 )
+
+# meta key remembering that the one-time "fetch rolls during sync?" offer
+# has been made, so it is never asked twice however many manual runs follow.
+ABYSSAL_OFFER_META_KEY = "abyssal_sync_offer_made"
+
+
+def abyssal_summary_line(stats: dict) -> str:
+    """The Log line for one abyssal.fetch_rolls result."""
+    return (
+        f"Abyssal stats: fetched {stats.get('fetched', 0):,}, "
+        f"{stats.get('missing', 0):,} not known to ESI, "
+        f"{stats.get('failed', 0):,} failed (will retry)"
+    )
 
 # Who to credit in About, linked to their public character page. These are
 # in-game character names given deliberately as attribution -- the one place
@@ -133,6 +147,7 @@ class MainWindow(QMainWindow):
         self._dirty: set = set()
         self.tabs.currentChanged.connect(self._ensure_tab_loaded)
         self.treemap.filter_assets_requested.connect(self._filter_assets_from_treemap)
+        self.assets.abyssal_fetch_requested.connect(self._fetch_abyssal_items)
         self._status_query = AsyncQuery(self)
 
         # Connected here rather than next to the TaskManager itself: warned
@@ -144,6 +159,7 @@ class MainWindow(QMainWindow):
         self._build_actions()
         self._build_statusbar()
         self._refresh_status()
+        self._auto_refresh_sde_tables()
         self._ensure_tab_loaded(self.tabs.currentIndex())  # load just the visible tab
 
         # Deferred so the window is up first: this is a network call, and a
@@ -186,6 +202,10 @@ class MainWindow(QMainWindow):
             "&Game data", self.update_sde,
             "Check for a newer Static Data Export",
         )
+        self.act_abyssal = action(
+            "A&byssal stats", self.update_abyssal,
+            "Fetch the rolled attributes of abyssal modules not yet asked of ESI",
+        )
         self.act_chars = action(
             "&Characters…", self.open_characters,
             "Add, remove and authorise characters",
@@ -215,6 +235,7 @@ class MainWindow(QMainWindow):
         update_menu.addSeparator()
         update_menu.addAction(self.act_prices)
         update_menu.addAction(self.act_sde)
+        update_menu.addAction(self.act_abyssal)
         update_menu.addAction(self.act_snapshot)
 
         self.act_reset_sort = QAction("Reset sort", self)
@@ -328,6 +349,70 @@ class MainWindow(QMainWindow):
             "sde", "Update game data",
             SdeUpdateJob(self.settings), self._after_data_change,
         )
+
+    def _auto_refresh_sde_tables(self) -> None:
+        """Re-import the SDE at startup when this build reads tables the
+        installed import never filled (the dogma tables behind abyssal
+        rolls, for one). Only for an estate that already has an SDE: the
+        importer reuses the cached zip when the build is current, so this
+        is a few seconds of local work, whereas a fresh install with no SDE
+        at all would be a surprise download before the user has been shown
+        the Update menu that normally starts one."""
+        if db.get_meta(self.conn, "sde_build") is None or not sde.tables_stale(self.conn):
+            return
+        self._submit(
+            "sde", "Refresh game data tables",
+            SdeUpdateJob(self.settings), self._after_data_change,
+        )
+
+    def update_abyssal(self) -> None:
+        # Follows any sync for the same reason the snapshot does: the fetch
+        # is keyed on the item_ids in the assets table, and a sync replaces
+        # that table one owner at a time.
+        self._submit(
+            "abyssal", "Abyssal stats",
+            AbyssalStatsJob(self.settings, self.tokens), self._on_abyssal_done,
+            after=("sync",),
+        )
+
+    def _fetch_abyssal_items(self, item_ids: list) -> None:
+        """The Assets tab's abyssal card asked for specific items' rolls: the
+        same job and the same after-sync ordering as the Update menu's full
+        run, scoped to the ids the card resolved."""
+        self._submit(
+            "abyssal", "Abyssal stats",
+            AbyssalStatsJob(self.settings, self.tokens, item_ids=list(item_ids)),
+            self._on_abyssal_done,
+            after=("sync",),
+        )
+
+    def _on_abyssal_done(self, result) -> None:
+        self.log.add(abyssal_summary_line(result))
+        self._after_data_change()
+        if result.get("cancelled") or not result.get("fetched"):
+            return
+        # The first run that actually brought rolls home is the one moment
+        # the sync-time switch is worth explaining; the meta flag makes it
+        # the only moment. Set before the question so a crash or a second
+        # run mid-dialog still counts as asked.
+        if (
+            self.settings.abyssal_stats_on_sync
+            or db.get_meta(self.conn, ABYSSAL_OFFER_META_KEY) is not None
+        ):
+            return
+        db.set_meta(self.conn, ABYSSAL_OFFER_META_KEY, "1")
+        answer = QMessageBox.question(
+            self, "Abyssal stats",
+            "Fetch rolls for new abyssal items automatically during every sync?\n\n"
+            "Items already fetched are never asked for again, so this only costs "
+            "one ESI request per new abyssal module. You can change it later under "
+            "Settings → Behaviour.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if answer == QMessageBox.Yes:
+            self.settings.abyssal_stats_on_sync = True
+            self.settings.save()
+            self.log.add("Abyssal rolls will be fetched during sync.")
 
     def _populate_character_menu(self) -> None:
         """Rebuilt every time the submenu opens: characters get added and
@@ -561,6 +646,8 @@ class MainWindow(QMainWindow):
                 )
             if result.get("characters"):
                 self.log.add(f"Synced {result['characters']} character(s).")
+            if isinstance(result.get("abyssal"), dict):
+                self.log.add(abyssal_summary_line(result["abyssal"]))
         self._refresh_status()
 
     def _ensure_tab_loaded(self, index: int) -> None:

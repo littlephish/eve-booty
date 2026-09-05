@@ -27,7 +27,24 @@ can neither freeze typing nor land out of order (the generation guard and
 QRunnable lifetime rules are documented in async_query.py). ``is:`` and
 ``val:`` tokens get no lookup on purpose: the flag vocabulary is a handful of
 fixed words and ``val:`` is a comparison the user writes, so the database has
-nothing to offer for either.
+nothing to offer for either. ``stat:`` sits between the two: the attribute
+name half of its value completes from the SDE's mutable dogma attributes (and
+the curated aliases in abyssal.STAT_ALIASES), while the operator and number
+stay the user's to type -- so picking a completion fills the name in and
+leaves the field open rather than minting a chip the grammar would reject.
+``roll:`` shares that completion: it names the same attributes, only ranked
+by roll quality instead of compared by value.
+
+The ``abyssal`` chip is the one chip with a second button. Its value is a
+list of module types, which no single-line completer builds well, and the
+stat rows that go with it (one slider per rolled attribute) do not fit in a
+chip at all -- so the chip carries a glyph that asks the owning view, via
+card_requested, to open the complex-search card anchored under it. The same
+request goes out on its own when the chip is minted by typing (Enter, or the
+draft builder), one event turn later; see _request_card_later. The chip
+itself renders as "Abyssal", "Abyssal · Stasis Webifier" or "Abyssal · 3
+types" with its prefix hidden: the word is the kind, and repeating it as a
+muted ``abyssal:`` in front would say the same thing twice.
 """
 
 from __future__ import annotations
@@ -47,7 +64,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import omni, queries
+from .. import abyssal, omni, queries
 from . import palette
 from .async_query import AsyncQuery
 from .debounce import Debounce
@@ -71,8 +88,15 @@ _KIND_FOR_PREFIX = {
     # "item:Dom" silently offered nothing while the draft builder completed
     # the very same values.
     "item": "item",
+    "stat": omni.STAT_KIND,
+    "roll": omni.ROLL_KIND,
+    "abyssal": omni.ABYSSAL_KIND,
 }
 _PREFIX_FOR_KIND = {kind: prefix for prefix, kind in _KIND_FOR_PREFIX.items()}
+
+# The two kinds whose value opens with an attribute name and closes with a
+# comparison the user types; they share one completion and one commit path.
+_ATTRIBUTE_KINDS = (omni.STAT_KIND, omni.ROLL_KIND)
 
 # Output column of queries.ASSET_ROWS per completable kind. Only kinds listed
 # here get a completion popup at all.
@@ -90,15 +114,64 @@ _COMPLETION_COLUMN = {
 _TOKEN_RE = re.compile(r"^(-?)([A-Za-z]+):(.*)$")
 
 # Every kind the draft-chip builder offers, in the order its list shows them.
-_ALL_KINDS = (*omni.LEVEL_KINDS, "item", "is", "val")
+_ALL_KINDS = (
+    *omni.LEVEL_KINDS, "item", "is", "val", omni.STAT_KIND, omni.ROLL_KIND, omni.ABYSSAL_KIND,
+)
 
 # Placeholder per chosen kind: the draft's value stage should say what kind
-# of thing it wants, because "value…" teaches nothing for the two kinds
-# whose vocabulary is fixed.
+# of thing it wants, because "value…" teaches nothing for the kinds whose
+# vocabulary is fixed or whose value has a shape to learn.
 _VALUE_PLACEHOLDER = {
     "is": " / ".join(omni.IS_FLAGS),
     "val": ">10m   <1b   >=500k …",
+    omni.STAT_KIND: '"CPU usage"<30   web>55   duration<9',
+    omni.ROLL_KIND: "web>=70   cpu=60..90",
+    omni.ABYSSAL_KIND: "module type, or Enter for every abyssal item",
 }
+
+# Abyssal type names the user owns, for the abyssal chip's value stage: the
+# same COUNT projection the level kinds use, restricted to dynamic types.
+_ABYSSAL_TYPES_SQL = (
+    f"SELECT item AS label, COUNT(*) AS stacks FROM ({queries.ASSET_ROWS})"
+    " WHERE is_dynamic_type = 1 AND label LIKE ? ESCAPE '\\'"
+    " GROUP BY label ORDER BY stacks DESC, label COLLATE NOCASE LIMIT 12"
+)
+
+# Attribute names a stat: value can start with: every dogma attribute some
+# mutaplasmid rolls, matched on the English display name or CCP's internal
+# name. One row per attribute (DISTINCT, because one attribute appears in
+# many mutators' ranges) rather than per display name, with a count of how
+# many mutable attributes share the display name: in the real SDE 554
+# signatureRadiusBonus (%) and 983 signatureRadiusAdd (m) both display
+# "Signature Radius Modifier", and a completion that wrote the shared
+# display name back would mint a chip matching either. _stat_option offers
+# the internal name for those, annotated with the display name and unit.
+_STAT_NAMES_SQL = """
+WITH mutable AS (
+    SELECT DISTINCT d.attribute_id, d.name, d.display_name, u.display_name AS unit
+    FROM sde_dogma_attributes d
+    JOIN sde_mutator_ranges m ON m.attribute_id = d.attribute_id
+    LEFT JOIN sde_dogma_units u ON u.unit_id = d.unit_id
+    WHERE d.display_name IS NOT NULL AND d.display_name <> ''
+)
+SELECT name, display_name, unit,
+       (SELECT COUNT(*) FROM mutable x WHERE x.display_name = mutable.display_name) AS shared
+FROM mutable
+WHERE display_name LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\'
+ORDER BY display_name COLLATE NOCASE, name LIMIT 12
+"""
+# The same shape for one alias target, so an alias to a shared display name
+# ("sig" -> signatureRadiusBonus) is offered as the internal name too.
+_STAT_ALIAS_SQL = """
+SELECT d.name, d.display_name, u.display_name AS unit,
+       (SELECT COUNT(DISTINCT x.attribute_id)
+        FROM sde_dogma_attributes x
+        JOIN sde_mutator_ranges mx ON mx.attribute_id = x.attribute_id
+        WHERE x.display_name = d.display_name) AS shared
+FROM sde_dogma_attributes d
+LEFT JOIN sde_dogma_units u ON u.unit_id = d.unit_id
+WHERE d.name = ?
+"""
 
 _VALUE_ROLE = Qt.UserRole
 _KIND_ROLE = Qt.UserRole + 1
@@ -124,12 +197,136 @@ def _like_pattern(fragment: str) -> str:
     return f"%{escaped}%"
 
 
+def _quote(value: str) -> str:
+    """Quote a value for the field the way to_text() would, so the token
+    written back by a stat completion parses to exactly that name."""
+    if value and '"' not in value and not any(ch.isspace() for ch in value):
+        return value
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _option_text(row) -> str:
+    """One completion line: the label, its stack count when the lookup has
+    one, and the alias that led here when it was an alias match."""
+    text = str(row["label"])
+    stacks = row["stacks"]
+    if stacks is not None:
+        text += f" · {stacks:,}"
+    note = row["note"] if "note" in row.keys() else None
+    if note:
+        text += f"  ({note})"
+    return text
+
+
+def _completion_fetch(kind: str, fragment: str):
+    """The pool-thread lookup behind a completion popup, or None when the
+    kind has nothing to offer (val:, or a kind with no column)."""
+    if kind in _ATTRIBUTE_KINDS:
+        return _stat_completion_fetch(fragment)
+    if kind == omni.ABYSSAL_KIND:
+        pattern = _like_pattern(fragment)
+
+        def fetch_types(conn: sqlite3.Connection) -> list:
+            return list(conn.execute(_ABYSSAL_TYPES_SQL, (pattern,)))
+
+        return fetch_types
+    column = _COMPLETION_COLUMN.get(kind)
+    if column is None:
+        return None
+    # A projection of queries.ASSET_ROWS: building on the exact same SELECT
+    # guarantees the labels offered are precisely the strings the resulting
+    # chip will filter on. Its shape (LIKE, count ordering, LIMIT) is a
+    # property of this popup, not a reusable read, so it lives beside the
+    # completer rather than in queries.py.
+    sql = (
+        f"SELECT {column} AS label, COUNT(*) AS stacks"
+        f" FROM ({queries.ASSET_ROWS})"
+        " WHERE label IS NOT NULL AND label LIKE ? ESCAPE '\\'"
+        " GROUP BY label ORDER BY stacks DESC, label COLLATE NOCASE LIMIT 12"
+    )
+    pattern = _like_pattern(fragment)
+
+    def fetch(conn: sqlite3.Connection) -> list:
+        return list(conn.execute(sql, (pattern,)))
+
+    return fetch
+
+
+def _stat_option(row, alias: str | None = None) -> dict:
+    """One stat: completion from a _STAT_NAMES_SQL or _STAT_ALIAS_SQL row.
+
+    The label is what gets written into the field, so it must be a name the
+    grammar resolves to exactly this attribute: the display name when it is
+    unique among mutable attributes, the internal name when it is shared,
+    with the display name and unit as the annotation so the two namesakes
+    can be told apart in the popup. An alias that led here is shown too.
+    """
+    if row["shared"] > 1:
+        label = row["name"]
+        note = f"{row['display_name']}, {row['unit']}" if row["unit"] else row["display_name"]
+        if alias:
+            note = f"{alias} · {note}"
+    else:
+        label, note = row["display_name"], alias
+    return {"label": label, "stacks": None, "note": note}
+
+
+def _stat_completion_fetch(fragment: str):
+    """Attribute names for a stat: value. Once an operator has been typed
+    the name is settled, so there is nothing left to offer."""
+    if "<" in fragment or ">" in fragment:
+        return None
+    needle = fragment.strip().lower()
+    pattern = _like_pattern(fragment.strip())
+
+    def fetch(conn: sqlite3.Connection) -> list[dict]:
+        rows = [_stat_option(r) for r in conn.execute(_STAT_NAMES_SQL, (pattern, pattern))]
+        if not needle:
+            return rows
+        # Aliases ride on top of the name matches, resolved to the canonical
+        # name so the chip carries one the grammar will match, and shown
+        # with the alias beside them so the user sees what "cpu" meant. An
+        # alias row replaces the plain row for the same name rather than
+        # sitting next to a duplicate of it.
+        aliased: list[dict] = []
+        for alias, internal in sorted(abyssal.STAT_ALIASES.items()):
+            if not alias.startswith(needle):
+                continue
+            hit = conn.execute(_STAT_ALIAS_SQL, (internal,)).fetchone()
+            if hit is None or not hit["display_name"]:
+                continue
+            option = _stat_option(hit, alias)
+            if option["label"] not in {o["label"] for o in aliased}:
+                aliased.append(option)
+        taken = {o["label"] for o in aliased}
+        return (aliased + [r for r in rows if r["label"] not in taken])[:12]
+
+    return fetch
+
+
+def abyssal_chip_label(chip: omni.Chip) -> str:
+    """The abyssal chip's text: the word alone for every dynamic type, the
+    one type with its "Abyssal " prefix stripped (the chip already says it),
+    or a count -- three long type names would eat the whole field."""
+    types = omni.split_types(chip.value)
+    if not types:
+        return "Abyssal"
+    if len(types) == 1:
+        return f"Abyssal · {abyssal.strip_type_prefix(types[0])}"
+    return f"Abyssal · {len(types)} types"
+
+
 class _ChipWidget(QFrame):
     """One removable filter token: muted ``kind:`` prefix, the value, and a
     cross. The prefix is muted because the value is the payload -- the kind is
     scaffolding the eye should be able to skip once the colour has already
     said which axis this chip filters (each kind wears its own wash) and, in
-    red, whether it excludes rather than includes."""
+    red, whether it excludes rather than includes.
+
+    The abyssal chip alone hides its prefix (its label already is the kind)
+    and grows card_btn, the glyph that opens the complex-search card; on
+    every other chip card_btn is None so callers can tell the two apart
+    without knowing the kind."""
 
     def __init__(self, chip: omni.Chip, parent: QWidget | None = None):
         super().__init__(parent)
@@ -141,13 +338,29 @@ class _ChipWidget(QFrame):
         row.setContentsMargins(8, 2, 3, 2)
         row.setSpacing(2)
 
+        is_abyssal = chip.kind == omni.ABYSSAL_KIND
         prefix = ("-" if chip.negated else "") + _PREFIX_FOR_KIND.get(chip.kind, chip.kind) + ":"
+        if is_abyssal:
+            # A negated abyssal chip keeps only the minus: the wash already
+            # went red, and "-abyssal: Abyssal" would say the kind twice.
+            prefix = "-" if chip.negated else ""
         self.prefix_label = QLabel(prefix)
         self.prefix_label.setStyleSheet(f"color: {palette.SECONDARY_TEXT};")
+        self.prefix_label.setVisible(bool(prefix))
         row.addWidget(self.prefix_label)
 
-        self.value_label = QLabel(chip.value)
+        self.value_label = QLabel(abyssal_chip_label(chip) if is_abyssal else chip.value)
         row.addWidget(self.value_label)
+
+        self.card_btn: QToolButton | None = None
+        if is_abyssal:
+            self.card_btn = QToolButton()
+            self.card_btn.setText("▾")
+            self.card_btn.setAutoRaise(True)
+            self.card_btn.setCursor(Qt.PointingHandCursor)
+            self.card_btn.setToolTip("Refine: module type and stat ranges")
+            self.card_btn.setStyleSheet("QToolButton { border: none; padding: 0 2px; }")
+            row.addWidget(self.card_btn)
 
         self.close_btn = QToolButton()
         self.close_btn.setText("×")
@@ -343,6 +556,13 @@ class _DraftChip(QFrame):
     def _enter_value_stage(self, kind: str, negated: bool) -> None:
         self.kind = kind
         self.negated = negated
+        if kind == omni.ABYSSAL_KIND:
+            # The abyssal chip has no value stage of its own: picking the
+            # kind mints the bare chip at once, and the card that opens on
+            # it is where the module type gets chosen -- a second type list
+            # here, in a one-line draft field, was the same choice twice.
+            self._commit("")
+            return
         prefix = _PREFIX_FOR_KIND.get(kind, kind)
         self.prefix_label.setText(("-" if negated else "") + prefix + ":")
         self.prefix_label.setVisible(True)
@@ -368,7 +588,11 @@ class _DraftChip(QFrame):
         elif self.kind == "is":
             flags = [f for f in omni.IS_FLAGS if f.startswith(text.strip().lower())]
             self.set_value_options([{"label": f, "stacks": None} for f in flags])
-        elif self.kind in _COMPLETION_COLUMN or self.kind == "item":
+        elif (
+            self.kind in _COMPLETION_COLUMN
+            or self.kind in _ATTRIBUTE_KINDS
+            or self.kind == omni.ABYSSAL_KIND
+        ):
             self.value_fragment_edited.emit(self.kind, text)
         # val: has nothing to offer -- the comparison is the user's to write.
 
@@ -378,9 +602,7 @@ class _DraftChip(QFrame):
             return
         self._value_model.clear()
         for row in rows:
-            count = row["stacks"]
-            text = row["label"] if count is None else f"{row['label']} · {count:,}"
-            item = QStandardItem(text)
+            item = QStandardItem(_option_text(row))
             item.setEditable(False)
             item.setData(row["label"], _VALUE_ROLE)
             self._value_model.appendRow(item)
@@ -389,8 +611,19 @@ class _DraftChip(QFrame):
 
     def _value_picked(self, index: QModelIndex) -> None:
         value = index.data(_VALUE_ROLE)
-        if value is not None:
-            self._commit(str(value))
+        if value is None:
+            return
+        if self.kind in _ATTRIBUTE_KINDS:
+            # The name is only half a stat: value; drop it into the field
+            # and leave the operator and number to the user. setText does
+            # not fire textEdited, so no fresh lookup reopens the popup.
+            self.edit.setText(str(value))
+            self.edit.setCursorPosition(len(self.edit.text()))
+            popup = self._value_completer.popup()
+            if popup is not None and popup.isVisible():
+                popup.hide()
+            return
+        self._commit(str(value))
 
     def _on_return(self) -> None:
         if self.kind is None:
@@ -398,9 +631,33 @@ class _DraftChip(QFrame):
             if resolved is not None:
                 self._enter_value_stage(*resolved)
             return
+        if self.kind in _ATTRIBUTE_KINDS:
+            self._commit_stat(self.edit.text())
+            return
         value = self.edit.text().strip().strip('"')
-        if value:
+        if value or self.kind == omni.ABYSSAL_KIND:
+            # An empty abyssal value is the whole point of the kind ("every
+            # abyssal item"); for anything else an empty value is no chip.
             self._commit(value)
+
+    def _commit_stat(self, text: str) -> None:
+        """Commit a stat: or roll: value only if the grammar accepts it, by
+        asking the grammar. A draft that let `CPU usage` through without an
+        operator would mint a chip whose SQL half has nothing to compare, so
+        the card stays open until the value is one omni.parse would have
+        minted -- the parser, not a second regex here, decides what that
+        means."""
+        raw = text.strip()
+        if not raw:
+            return
+        # The placeholder teaches `"CPU usage"<30`; the value the grammar
+        # holds is the unquoted `CPU usage<30`, which parse() derives from
+        # the quoted token exactly as it would from typed text.
+        prefix = _PREFIX_FOR_KIND[self.kind]
+        spec = omni.parse(f"{prefix}:{raw}" if '"' in raw else f"{prefix}:{_quote(raw)}")
+        chips = [c for c in spec.chips if c.kind == self.kind]
+        if chips:
+            self._commit(chips[0].value)
 
     def _commit(self, value: str) -> None:
         for completer in (self._kind_completer, self._value_completer):
@@ -436,6 +693,11 @@ class Omnibox(QWidget):
     changed = Signal()
     chip_added = Signal(object)
     escape_pressed = Signal()
+    # The abyssal chip's glyph was clicked, or the chip was just typed:
+    # (chip, the chip widget to anchor the card under). The omnibox stays
+    # database-free about the card's contents; the view that owns the
+    # queries builds and places it.
+    card_requested = Signal(object, QWidget)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -477,7 +739,9 @@ class Omnibox(QWidget):
         self.edit = QLineEdit()
         self.edit.setFrame(False)
         self.edit.setStyleSheet("background: transparent;")
-        self.edit.setPlaceholderText("Search, or filter with loc: owner: cat: is: val: …")
+        self.edit.setPlaceholderText(
+            "Search, or filter with loc: owner: cat: is: val: abyssal roll: …"
+        )
         self._row.addWidget(self.edit)
 
         self.hint = QLabel("/ to search")
@@ -585,7 +849,10 @@ class Omnibox(QWidget):
 
     def _on_draft_committed(self, chip: omni.Chip) -> None:
         self._close_draft()
-        self.add_chip(chip.kind, chip.value, chip.negated)
+        if self._insert_chip(chip):
+            self.chip_added.emit(chip)
+            self._emit_changed_now()
+            self._request_card_later([chip])
 
     def _close_draft(self) -> None:
         if self._draft is None:
@@ -601,20 +868,9 @@ class Omnibox(QWidget):
         the token completer uses, delivered to the card instead of the main
         popup. One AsyncQuery serves both: only one of the two completers is
         ever active, and the generation guard already handles the overlap."""
-        column = _COMPLETION_COLUMN.get(kind)
-        if column is None:
+        fetch = _completion_fetch(kind, fragment.strip().strip('"'))
+        if fetch is None:
             return
-        sql = (
-            f"SELECT {column} AS label, COUNT(*) AS stacks"
-            f" FROM ({queries.ASSET_ROWS})"
-            " WHERE label IS NOT NULL AND label LIKE ? ESCAPE '\\'"
-            " GROUP BY label ORDER BY stacks DESC, label COLLATE NOCASE LIMIT 12"
-        )
-        pattern = _like_pattern(fragment.strip().strip('"'))
-
-        def fetch(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-            return list(conn.execute(sql, (pattern,)))
-
         self._complete_query.run(
             fetch,
             lambda rows: self._draft is not None and self._draft.set_value_options(rows),
@@ -627,6 +883,10 @@ class Omnibox(QWidget):
             return False
         widget = _ChipWidget(chip)
         widget.close_btn.clicked.connect(lambda _checked=False, c=chip: self.remove_chip(c))
+        if widget.card_btn is not None:
+            widget.card_btn.clicked.connect(
+                lambda _checked=False, c=chip, w=widget: self.card_requested.emit(c, w)
+            )
         # Chips sit between the search glyph (index 0) and the line edit, in
         # the order they were added, so the row reads left to right as the
         # filter accumulated.
@@ -662,20 +922,54 @@ class Omnibox(QWidget):
         # guard matches the space-commit path above -- committing
         # 'loc:"Jita IV ' mid-quote would mint a chip whose value carries an
         # invisible trailing space and exact-matches nothing.
+        before = [chip for chip, _widget in self._chips]
+        parsed: list[omni.Chip] = []
         if self.edit.text().count('"') % 2 == 0:
-            self._migrate_tokens()
+            parsed = self._migrate_tokens()
         self._hide_completions()
         self._emit_changed_now()
+        self._request_card_later([chip for chip in parsed if chip not in before])
 
-    def _migrate_tokens(self) -> bool:
+    def _migrate_tokens(self) -> list[omni.Chip]:
+        """Turn the field's finished tokens into chips and return the parsed
+        ones, minted or already present -- empty when the text held none."""
         spec = omni.parse(self.edit.text())
         if not spec.chips:
-            return False
+            return []
         for chip in spec.chips:
             if self._insert_chip(chip):
                 self.chip_added.emit(chip)
         self.edit.setText(spec.text)
-        return True
+        return spec.chips
+
+    def _request_card_later(self, minted: list[omni.Chip]) -> None:
+        """Open the card under an abyssal chip the user has just typed or
+        built, without a glyph click: typing the word and pressing Enter is
+        the natural way in, and the card is the point of the chip.
+
+        Only the freshly minted, positive chip qualifies. A chip that arrives
+        by set_spec (a saved view, the card's own Done) or add_chip (the
+        rail, a context menu) is being restored or placed, not asked for,
+        and Done re-opening the card it just closed would loop; a negated
+        chip is one the card cannot express. The trailing-space commit does
+        not qualify either: a Qt.Popup steals the keyboard, and the user who
+        typed ``abyssal `` is on the way to ``roll:web>=70``.
+
+        Deferred a turn because a Qt.Popup shown in the same event turn as
+        the chip widget is inserted into the layout is closed by Qt before
+        it is seen (pinned in tests/test_omnibox.py); the chip is looked
+        up again when the timer fires, since a cross or a set_spec may have
+        removed it in between.
+        """
+        chip = next((c for c in minted if c.kind == omni.ABYSSAL_KIND and not c.negated), None)
+        if chip is None:
+            return
+        QTimer.singleShot(0, self, lambda: self._request_card(chip))
+
+    def _request_card(self, chip: omni.Chip) -> None:
+        widget = next((w for c, w in self._chips if c == chip), None)
+        if widget is not None:
+            self.card_requested.emit(chip, widget)
 
     def _escape(self) -> None:
         if self.edit.text():
@@ -709,22 +1003,10 @@ class Omnibox(QWidget):
             return
         negated = match.group(1) == "-"
         partial = match.group(3).lstrip('"')
-        # The one piece of SQL in this file is a projection of
-        # queries.ASSET_ROWS: building on the exact same SELECT guarantees
-        # the labels offered here are precisely the strings the resulting
-        # chip will filter on. Its shape (LIKE, count ordering, LIMIT) is a
-        # property of this popup, not a reusable read, so it lives beside the
-        # completer rather than in queries.py.
-        sql = (
-            f"SELECT {_COMPLETION_COLUMN[kind]} AS label, COUNT(*) AS stacks"
-            f" FROM ({queries.ASSET_ROWS})"
-            " WHERE label IS NOT NULL AND label LIKE ? ESCAPE '\\'"
-            " GROUP BY label ORDER BY stacks DESC, label COLLATE NOCASE LIMIT 12"
-        )
-        pattern = _like_pattern(partial)
-
-        def fetch(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-            return list(conn.execute(sql, (pattern,)))
+        fetch = _completion_fetch(kind, partial)
+        if fetch is None:
+            self._hide_completions()
+            return
 
         # One query per keystroke; AsyncQuery's generation guard drops any
         # result a newer keystroke has already superseded. A failed lookup
@@ -735,9 +1017,7 @@ class Omnibox(QWidget):
             lambda _message: self._hide_completions(),
         )
 
-    def _show_completions(
-        self, token: str, kind: str, negated: bool, rows: list[sqlite3.Row]
-    ) -> None:
+    def _show_completions(self, token: str, kind: str, negated: bool, rows: list) -> None:
         _head, current = _split_trailing_token(self.edit.text())
         if current != token:
             # The generation guard drops superseded queries, but a commit or
@@ -746,7 +1026,7 @@ class Omnibox(QWidget):
             return
         self._completion_model.clear()
         for row in rows:
-            item = QStandardItem(f"{row['label']} · {row['stacks']:,}")
+            item = QStandardItem(_option_text(row))
             item.setEditable(False)
             item.setData(row["label"], _VALUE_ROLE)
             item.setData(kind, _KIND_ROLE)
@@ -761,8 +1041,20 @@ class Omnibox(QWidget):
         value = index.data(_VALUE_ROLE)
         if value is None:
             return
-        chip = omni.Chip(index.data(_KIND_ROLE), value, bool(index.data(_NEGATED_ROLE)))
+        kind, negated = index.data(_KIND_ROLE), bool(index.data(_NEGATED_ROLE))
         head, _token = _split_trailing_token(self.edit.text())
+        if kind in _ATTRIBUTE_KINDS:
+            # Half a value: write `stat:"CPU usage"` back into the field for
+            # the user to finish with an operator and number. The quoted
+            # name unquotes inside parse() the same way a whole quoted value
+            # would, so `stat:"CPU usage"<30` and `stat:"CPU usage<30"` are
+            # the same chip.
+            prefix = _PREFIX_FOR_KIND[kind]
+            self.edit.setText(f"{head}{'-' if negated else ''}{prefix}:{_quote(str(value))}")
+            self.edit.setCursorPosition(len(self.edit.text()))
+            self._hide_completions()
+            return
+        chip = omni.Chip(kind, value, negated)
         self.edit.setText(head.rstrip())
         self._hide_completions()
         if self._insert_chip(chip):

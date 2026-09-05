@@ -309,6 +309,11 @@ class Settings:
     # token listing.
     contract_price_beats_market: bool = False
     snapshot_on_sync: bool = True
+    # Ask ESI for the rolled stats of newly seen abyssal items as part of a
+    # routine sync. Off by default because it is one public GET per item and
+    # ESI has no batch route -- the first successful manual run offers to
+    # turn it on once the user has seen what it costs.
+    abyssal_stats_on_sync: bool = False
     contact_email: str = ""
     # Off by default: the useful lines name someone's characters and
     # holdings, so they belong on disk only when a user asks for them.

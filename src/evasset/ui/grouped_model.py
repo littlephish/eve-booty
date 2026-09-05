@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 from PySide6.QtCore import QAbstractItemModel, QModelIndex, Qt
 from PySide6.QtGui import QBrush, QColor
 
+from .. import abyssal
 from ..queries import ASSET_COLUMNS, DATE_COLUMNS, ISK_COLUMNS, NUMERIC_COLUMNS
 from . import palette
 from .models import fmt_date, fmt_isk, fmt_num, fmt_short_isk
@@ -36,9 +37,38 @@ GROUP_ROLLUP_ROLE = Qt.UserRole + 2
 HEAT_ROLE = Qt.UserRole + 3
 PRICE_AGE_ROLE = Qt.UserRole + 4
 PRICE_BADGE_ROLE = Qt.UserRole + 5
+# Tooltip text for an abyssal row's value cells: the per-attribute roll
+# quality one-liner once fetched, or the not-fetched notice.
+ABYSSAL_SUMMARY_ROLE = Qt.UserRole + 6
+# The raw 0..1 roll quality behind a roll cell (None when unranked), for a
+# delegate or test that wants the number rather than the wash it produced.
+ROLL_QUALITY_ROLE = Qt.UserRole + 7
+
+# The dynamic roll columns. They exist only while the abyssal chip names a
+# single module type (every type rolls a different attribute set, so a mixed
+# table has no honest column to show) and are keyed apart from ASSET_COLUMNS:
+# ``roll:<attribute_id>`` per rolled attribute, ROLL_MEAN_KEY for the item's
+# mean quality. Their cells come from set_abyssal_cells, not from the row.
+ROLL_MEAN_KEY = "roll"
+_ROLL_PREFIX = "roll:"
+
+
+def roll_key(attribute_id: int) -> str:
+    return f"{_ROLL_PREFIX}{attribute_id}"
+
+
+def is_roll_key(key: str) -> bool:
+    return key == ROLL_MEAN_KEY or key.startswith(_ROLL_PREFIX)
+
 
 # The two columns that carry heat tint, staleness and price badges.
 _VALUE_KEYS = {"buy_value", "sell_value"}
+
+# The badge every mutated module wears, fetched or not. Abyssal items have no
+# market, so "unpriced" was technically true but told the user nothing they
+# could act on; "abyssal" says why there is no quote and points at the rolls.
+ABYSSAL_BADGE = "abyssal"
+ABYSSAL_NOT_FETCHED = "Rolls not fetched"
 
 # A quote older than this is flagged. Jita moves fast enough that a two-day-old
 # price on something volatile can be off by double digits, but flagging at, say,
@@ -132,10 +162,76 @@ class GroupedAssetsModel(QAbstractItemModel):
         self._flat: list = []
         self._flat_original: list = []
         self._max_sell = 0.0
+        # item_id -> roll summary, for the abyssal badge tooltip. Filled by
+        # the host from one batched query per reload rather than one query
+        # per hovered cell, and deliberately NOT cleared by set_rows: the
+        # group-by combo re-buckets the same rows without re-querying, and
+        # the tooltips must survive that.
+        self._abyssal_summaries: dict[int, str] = {}
+        # item_id -> {attribute_id: (display value, quality)} behind the roll
+        # columns, plus each attribute's unit for rendering. Same lifetime
+        # rule as the summaries: survives set_rows, replaced per reload.
+        self._cells: dict[int, dict[int, tuple]] = {}
+        self._units: dict[int, tuple[int | None, str | None]] = {}
 
     # ---- data plumbing
-    def set_rows(self, rows: list, group_key: str | None) -> None:
+    def set_abyssal_summaries(self, summaries: dict[int, str]) -> None:
+        """Replace the cached roll summaries; missing item_ids read as not
+        fetched. Called before set_rows on every reload so a fetch that just
+        completed is reflected the moment the table repaints."""
+        self._abyssal_summaries = dict(summaries)
+
+    def abyssal_summary(self, row) -> str | None:
+        """Tooltip text for an abyssal row, None for every other row."""
+        if not _row_get(row, "is_dynamic_type"):
+            return None
+        item_id = _row_get(row, "item_id")
+        return self._abyssal_summaries.get(item_id, ABYSSAL_NOT_FETCHED)
+
+    def set_abyssal_cells(self, cells: dict[int, dict[int, tuple]], attributes=()) -> None:
+        """Replace the roll cells (queries.abyssal_roll_data's cells) and, when
+        given, the attribute rows (queries.abyssal_type_attributes' dicts)
+        whose unit_id/unit render each column's numbers. Units are optional
+        so a caller that only has cells still gets bare numbers rather than
+        nothing; called before set_rows on every reload like the summaries."""
+        self._cells = dict(cells)
+        if attributes:
+            self._units = {
+                int(a["attribute_id"]): (a.get("unit_id"), a.get("unit")) for a in attributes
+            }
+
+    def columns(self) -> list[tuple[str, str]]:
+        """The (key, header) columns currently served, extras included. The
+        view reads this instead of queries.ASSET_COLUMNS wherever it indexes
+        a column, because the roll columns come and go with the filter."""
+        return list(self._columns)
+
+    def key_at(self, column: int) -> str | None:
+        """The key of one column, or None past the end -- a sort remembered
+        by key re-resolves its column through this after every reload."""
+        if 0 <= column < len(self._keys):
+            return self._keys[column]
+        return None
+
+    def set_rows(
+        self, rows: list, group_key: str | None, extra_columns: list[tuple[str, str]] = ()
+    ) -> None:
+        """Replace the rows; extra_columns (key, header) slot in after Qty.
+
+        After Qty rather than at the end because the roll columns are what
+        the abyssal filter is for: a user who narrowed to one module type
+        wants its strength and range beside the item name, not past the
+        price columns off the right edge. Group, Category, Meta and the
+        value columns keep their relative order, so every positional reader
+        of ASSET_COLUMNS stays right as long as no extras are present.
+        """
         self.beginResetModel()
+        columns = list(ASSET_COLUMNS)
+        if extra_columns:
+            at = next(i for i, (key, _h) in enumerate(columns) if key == "quantity") + 1
+            columns[at:at] = [(str(k), str(h)) for k, h in extra_columns]
+        self._columns = columns
+        self._keys = [key for key, _ in columns]
         self._group_key = group_key
         self._groups = []
         self._flat = []
@@ -240,7 +336,13 @@ class GroupedAssetsModel(QAbstractItemModel):
             return None
         key = self._keys[index.column()]
 
-        if role in (HEAT_ROLE, PRICE_AGE_ROLE, PRICE_BADGE_ROLE, Qt.BackgroundRole):
+        if is_roll_key(key):
+            return self._roll_data(row, key, role)
+
+        if role in (
+            HEAT_ROLE, PRICE_AGE_ROLE, PRICE_BADGE_ROLE, ABYSSAL_SUMMARY_ROLE,
+            Qt.BackgroundRole, Qt.ToolTipRole,
+        ):
             if key not in _VALUE_KEYS:
                 return None
             if role == HEAT_ROLE:
@@ -249,6 +351,11 @@ class GroupedAssetsModel(QAbstractItemModel):
                 return _price_age_days(row)
             if role == PRICE_BADGE_ROLE:
                 return self._badge(row)
+            if role in (ABYSSAL_SUMMARY_ROLE, Qt.ToolTipRole):
+                # The view asks ToolTipRole itself on hover, so serving the
+                # summary under both roles gives the badge its tooltip with
+                # no delegate or event filter to keep in step.
+                return self.abyssal_summary(row)
             fraction = self._heat(row, key)
             if fraction <= 0:
                 return None
@@ -277,6 +384,64 @@ class GroupedAssetsModel(QAbstractItemModel):
             return raw if raw is not None else (0 if key in NUMERIC_COLUMNS else "")
         return None
 
+    # ---- roll columns
+    def roll_cell(self, row, key: str) -> tuple[float | None, float | None]:
+        """(display value, quality) behind one roll cell; (None, None) for an
+        unfetched or unranked item. The Roll column's value IS its quality:
+        the item's mean over its rolled attributes, or None when no roll of
+        it could be ranked."""
+        cells = self._cells.get(_row_get(row, "item_id"))
+        if not cells:
+            return None, None
+        if key == ROLL_MEAN_KEY:
+            mean = abyssal.mean_quality(cells)
+            return mean, mean
+        pair = cells.get(int(key[len(_ROLL_PREFIX):]))
+        if pair is None:
+            return None, None
+        return pair[0], pair[1]
+
+    def cell_value(self, row, key: str):
+        """The raw value a column holds for a row, roll columns included --
+        what a CSV export writes, since a roll cell is not a row column. The
+        Roll column exports as the percent it displays (80.4), not the 0..1
+        fraction it sorts by, so the spreadsheet reads like the table."""
+        if key == ROLL_MEAN_KEY:
+            mean = self.roll_cell(row, key)[0]
+            return None if mean is None else round(mean * 100, 1)
+        if is_roll_key(key):
+            return self.roll_cell(row, key)[0]
+        return _row_get(row, key)
+
+    def roll_cell_text(self, row, key: str) -> str:
+        """The text a roll column shows for a row -- what column sizing must
+        measure. cell_value hands out the raw display value for the export,
+        and its repr ("25.799999713897705") is four times the width of the
+        "26 tf" the cell paints; a column sized from it opened at 240 px."""
+        return self._roll_data(row, key, Qt.DisplayRole)
+
+    def _roll_data(self, row, key: str, role):
+        value, quality = self.roll_cell(row, key)
+        if role == Qt.DisplayRole:
+            if value is None:
+                return ""
+            if key == ROLL_MEAN_KEY:
+                return f"{value * 100:.0f}%"
+            unit_id, unit = self._units.get(int(key[len(_ROLL_PREFIX):]), (None, None))
+            return abyssal.format_value(value, unit_id, unit)
+        if role == Qt.UserRole:
+            return value if value is not None else 0.0
+        if role == ROLL_QUALITY_ROLE:
+            return quality
+        if role == Qt.BackgroundRole:
+            tint = palette.quality_tint(quality)
+            return None if tint is None else QBrush(QColor(tint))
+        if role == Qt.TextAlignmentRole:
+            return int(Qt.AlignRight | Qt.AlignVCenter)
+        if role == Qt.ToolTipRole and quality is not None and key != ROLL_MEAN_KEY:
+            return f"{quality * 100:.0f}% of the possible roll"
+        return None
+
     def _header_data(self, index: QModelIndex, role):
         group = self._groups[index.row()]
         if role == Qt.DisplayRole:
@@ -293,7 +458,14 @@ class GroupedAssetsModel(QAbstractItemModel):
         'manual' outranks the age badge on purpose: a pinned price does not go
         stale in the market sense -- the repricer refuses to touch it -- so
         showing '10d' on it would nag the user about a number they chose.
+
+        'abyssal' outranks everything, fetched or not, and leaves price_source
+        alone: the row still counts as unpriced (is:unpriced, the strip, the
+        totals) because it genuinely has no market quote -- the badge only
+        explains why and points at the rolls.
         """
+        if _row_get(row, "is_dynamic_type"):
+            return ABYSSAL_BADGE
         source = _row_get(row, "price_source")
         if source == "none":
             return "unpriced"
@@ -331,6 +503,24 @@ class GroupedAssetsModel(QAbstractItemModel):
     def sort_by(self, key: str, order: Qt.SortOrder = Qt.AscendingOrder) -> None:
         """Sort leaves by raw value within every group; groups do not move."""
         reverse = order == Qt.DescendingOrder
+        if is_roll_key(key):
+            # Numeric on the cell value, with unfetched and unranked items
+            # kept at the bottom in either direction: they have no number to
+            # take part in the order, and letting them sort as zero would
+            # wedge them between the negative and positive rolls of a
+            # webifier's speed factor.
+            def arrange(rows):
+                # One roll_cell per row: the two filter passes plus the sort
+                # key read it about two and a half times each, and the Roll
+                # column's mean recomputes on every read (47 ms over 25k rows
+                # against 6.5 ms for Qty, measured 2026-09-02).
+                keyed = [(self.roll_cell(r, key)[0], r) for r in rows]
+                ranked = [(v, r) for v, r in keyed if v is not None]
+                ranked.sort(key=lambda pair: float(pair[0]), reverse=reverse)
+                return [r for _v, r in ranked] + [r for v, r in keyed if v is None]
+
+            self._reorder(arrange)
+            return
         if key in NUMERIC_COLUMNS:
             def sort_key(row):
                 try:

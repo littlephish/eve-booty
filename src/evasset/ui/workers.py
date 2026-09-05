@@ -7,7 +7,7 @@ import traceback
 
 from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
-from .. import db, janice, networth, pricing, sde, updater
+from .. import abyssal, db, janice, networth, pricing, sde, updater
 from ..config import Settings
 from ..esi import ESIClient, TokenCache
 from ..esi.auth import login as sso_login
@@ -242,11 +242,24 @@ class SyncJob(Job):
 
             if self.reprice:
                 def price_relay(msg, pct):
-                    self._progress(msg, 70 + int(pct * 25 / 100))
+                    self._progress(msg, 70 + int(pct * 20 / 100))
 
                 stats = pricing.refresh_prices(conn, client, self.settings, price_relay)
             else:
                 stats = {}
+
+            # After the assets are in and before the snapshot: the rolls are
+            # keyed on item_ids the sync just wrote, and the snapshot does
+            # not depend on them. One public request per new abyssal item,
+            # so this is opt-in (Settings -> Behaviour) and only ever asks
+            # for items with no stored answer yet.
+            rolls = None
+            if self.settings.abyssal_stats_on_sync and not self.cancelled:
+                rolls = abyssal.fetch_rolls(
+                    conn, client,
+                    progress=_abyssal_relay(self._progress, 90, 7),
+                    should_stop=lambda: self.cancelled,
+                )
 
             if self.snapshot:
                 self._progress("Recording net worth snapshot", 97)
@@ -256,9 +269,67 @@ class SyncJob(Job):
             self._progress("Sync complete", 100)
             for w in warnings:
                 self.signals.warning.emit(w)
-            return {"characters": len(chars), "prices": stats, "warnings": warnings}
+            result = {"characters": len(chars), "prices": stats, "warnings": warnings}
+            if rolls is not None:
+                result["abyssal"] = rolls
+            return result
         finally:
             client.close()
+
+
+def _abyssal_relay(progress, base: int, span: int):
+    """Adapt abyssal.fetch_rolls' (done, total, message) progress to the
+    job's (message, percent) signal, squeezed into base..base+span."""
+    def relay(done: int, total: int, message: str) -> None:
+        fraction = done / total if total else 1.0
+        progress(message, base + int(fraction * span))
+    return relay
+
+
+class AbyssalStatsJob(Job):
+    """Fetch the rolled attributes of every abyssal item ESI has not yet been
+    asked about, one public request per item.
+
+    Its own job rather than a SyncJob flag because the estate can hold
+    hundreds of mutated modules and ESI has no batch route (research notes,
+    2026-09-01): a first fetch is minutes of sequential requests, which is
+    something to start on purpose from the Update menu, not a cost every
+    routine sync silently pays. Items answered once are never asked again;
+    retry_missing re-asks the ones ESI 404'd.
+    """
+
+    def __init__(
+        self,
+        settings: Settings,
+        tokens: TokenCache,
+        item_ids: list[int] | None = None,
+        retry_missing: bool = False,
+    ):
+        super().__init__()
+        self.settings = settings
+        self.tokens = tokens
+        self.item_ids = item_ids
+        self.retry_missing = retry_missing
+
+    def run_job(self):
+        conn = db.init()
+        client = ESIClient(self.settings, self.tokens)
+        try:
+            self._progress("Looking for abyssal items to fetch", 0)
+            result = abyssal.fetch_rolls(
+                conn, client,
+                progress=_abyssal_relay(self._progress, 0, 100),
+                should_stop=lambda: self.cancelled,
+                item_ids=self.item_ids,
+                retry_missing=self.retry_missing,
+            )
+        finally:
+            client.close()
+        if self.cancelled:
+            self._progress("Cancelled", 100)
+            return {"cancelled": True, **result}
+        self._progress("Abyssal stats complete", 100)
+        return dict(result)
 
 
 class RepriceJob(Job):

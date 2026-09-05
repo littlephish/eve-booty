@@ -126,6 +126,14 @@ class SettingsDialog(QDialog):
         self.snapshot = QCheckBox("Record a net worth snapshot after every sync")
         self.snapshot.setChecked(settings.snapshot_on_sync)
         behave.addRow(self.snapshot)
+        self.abyssal_on_sync = QCheckBox("Fetch rolls for new abyssal items during sync")
+        self.abyssal_on_sync.setChecked(settings.abyssal_stats_on_sync)
+        self.abyssal_on_sync.setToolTip(
+            "ESI serves abyssal rolls one item per request, so a sync that fetches "
+            "them takes longer by about half a second per new abyssal module. "
+            "Items already fetched are never asked for again."
+        )
+        behave.addRow(self.abyssal_on_sync)
 
         self.check_sde = QCheckBox("Check for new game data at startup")
         self.check_sde.setChecked(settings.check_sde_on_startup)
@@ -182,6 +190,7 @@ class SettingsDialog(QDialog):
         s.contract_min_volume = self.min_volume.value()
         s.contract_price_beats_market = self.contract_first.isChecked()
         s.snapshot_on_sync = self.snapshot.isChecked()
+        s.abyssal_stats_on_sync = self.abyssal_on_sync.isChecked()
         s.check_sde_on_startup = self.check_sde.isChecked()
         s.debug_logging = self.debug_logging.isChecked()
         # Applied here rather than at the next launch: somebody ticking
