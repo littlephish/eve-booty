@@ -17,3 +17,13 @@ os.environ.setdefault("EVEBOOTY_CACHE_DIR", _TMP)
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture()
+def qapp_or_skip():
+    """One QApplication for any test that needs widgets, skipped without Qt."""
+    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
