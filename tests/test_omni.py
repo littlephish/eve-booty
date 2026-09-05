@@ -260,18 +260,34 @@ def test_bare_text_matches_item_and_custom_name_but_never_places_or_owners(conn)
 
 
 def test_every_is_flag_and_its_negation_pick_the_seeded_rows(conn):
+    # Added here rather than to the shared fixture: several tests below assert
+    # exact id sets, and a new seeded row would move all of them for the sake
+    # of one flag. Tritanium at a station is priced and unfitted, so it lands
+    # only in the delivery bucket and leaves the other expectations alone.
+    conn.execute(
+        "INSERT INTO assets (owner_type,owner_id,item_id,type_id,quantity,location_id,"
+        "location_flag,location_type,is_singleton,is_blueprint_copy,custom_name,"
+        "root_location_id,system_id,region_id) VALUES "
+        "('character',100,11,34,25,60003760,'Deliveries','station',0,0,NULL,"
+        "60003760,30000142,10000002)"
+    )
+    all_items = ALL_ITEMS | {11}
+
     expectations = {
         "fitted": {3},
         "safety": {9},
+        "delivery": {11},
         "unpriced": {7, 8},
         "bpc": {7},
     }
     seen = 0
     for flag, expected in expectations.items():
         assert _ids(conn, parse(f"is:{flag}")) == expected, f"is:{flag}"
-        assert _ids(conn, parse(f"-is:{flag}")) == ALL_ITEMS - expected, f"-is:{flag}"
+        assert _ids(conn, parse(f"-is:{flag}")) == all_items - expected, f"-is:{flag}"
         seen += 1
-    assert seen == len(omni.IS_FLAGS) == 4, "every advertised flag must be exercised"
+    # The count is the point: an advertised flag with no expectation here is a
+    # flag nothing checks. This caught is:delivery being added without one.
+    assert seen == len(omni.IS_FLAGS), "every advertised flag must be exercised"
 
 
 def test_level_chips_filter_by_exact_label(conn):

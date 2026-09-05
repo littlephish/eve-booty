@@ -117,7 +117,7 @@ match item and custom names; everything else is a `prefix:value` chip:
 ```
 loc:"Jita IV - Moon 4"     sys:Jita      region:"The Forge"
 owner:Main                 cat:Ship      group:Battleship      meta:"Tech II"
-is:fitted  is:safety  is:unpriced  is:bpc
+is:fitted  is:safety  is:delivery  is:unpriced  is:bpc
 val:>10m   val:<1b
 -owner:Alt                 (a leading - negates any token)
 ```

@@ -67,6 +67,15 @@ def conn(tmp_path):
     return c
 
 
+def _ids(conn, query: str) -> set[int]:
+    """item_ids a query returns. Names collide when the same type sits in more
+    than one place, which it does throughout these fixtures."""
+    spec = omni.parse(query)
+    where, params = spec.where()
+    sql = queries.ASSET_ROWS + (f" WHERE {where}" if where else "")
+    return {r["item_id"] for r in conn.execute(sql, params)}
+
+
 def matching(conn, query: str) -> set[str]:
     """Item names for a query. Fine for "is this in the set" assertions."""
     return {r["item"] for r in _rows(conn, query)}
@@ -132,3 +141,64 @@ def test_it_combines_with_other_chips(conn):
     """An is: flag that cannot be narrowed is not much of a filter."""
     assert ids(conn, "is:safety cat:Ship") == {902}, "the ship in the wrap"
     assert ids(conn, "is:safety Tritanium") == {901}, "the wrapped stack, not the loose one"
+
+
+# ---------------------------------------------------------------- deliveries
+# Same shape as asset safety: the compartment is on the row sitting in the
+# location, and its contents are ordinary child rows with ordinary flags. A
+# delivered ship arrives with its fitting, so this walks too.
+def test_a_personal_delivery_is_found(conn):
+    insert(conn, 910, 34, STATION, "Deliveries", qty=50)
+    assert 910 in _ids(conn, "is:delivery")
+
+
+def test_a_corp_delivery_is_found(conn):
+    conn.execute(
+        "INSERT INTO assets (owner_type, owner_id, item_id, type_id, quantity,"
+        " location_id, location_flag, location_type, is_singleton,"
+        " is_blueprint_copy, custom_name, root_location_id, system_id, region_id)"
+        " VALUES ('corporation',200,911,34,5,?,'CorpDeliveries','item',1,0,NULL,?,30000142,10000002)",
+        (STATION, STATION),
+    )
+    assert 911 in _ids(conn, "is:delivery")
+
+
+def test_the_contents_of_a_delivery_are_found(conn):
+    """A delivered ship arrives fitted; the modules carry their own slot flags
+    and would be missed by matching the flag alone."""
+    insert(conn, 912, 645, STATION, "Deliveries")     # a ship being delivered
+    insert(conn, 913, 2873, 912, "HiSlot0")           # fitted to it
+    found = _ids(conn, "is:delivery")
+    assert {912, 913} <= found
+
+
+def test_all_four_esi_delivery_flags_are_matched(conn):
+    """Two of these appear in one real account; the others are in ESI's enum
+    and would otherwise be silently ignored until somebody had one."""
+    from evasset.omni import DELIVERY_FLAGS
+
+    assert set(DELIVERY_FLAGS) == {
+        "Deliveries", "CorpDeliveries", "CapsuleerDeliveries", "CorporationGoalDeliveries",
+    }
+    for i, flag in enumerate(DELIVERY_FLAGS):
+        insert(conn, 920 + i, 34, STATION, flag)
+    assert {920 + i for i in range(len(DELIVERY_FLAGS))} <= _ids(conn, "is:delivery")
+
+
+def test_an_ordinary_hangar_item_is_not_a_delivery(conn):
+    assert 904 not in _ids(conn, "is:delivery")
+
+
+def test_delivery_negation_splits_every_row(conn):
+    insert(conn, 930, 34, STATION, "Deliveries")
+    inside = _ids(conn, "is:delivery")
+    outside = _ids(conn, "-is:delivery")
+    assert not (inside & outside)
+    total = {r["item_id"] for r in conn.execute(queries.ASSET_ROWS)}
+    assert inside | outside == total
+
+
+def test_delivery_is_offered_as_a_flag():
+    """The chip builder and the completer both read IS_FLAGS, so a flag that
+    works but is not listed is a flag nobody finds."""
+    assert "delivery" in omni.IS_FLAGS
