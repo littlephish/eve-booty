@@ -38,8 +38,19 @@ def main() -> int:
 
     from evasset.config import Settings
     from evasset.logsetup import configure, install_excepthook
-    from evasset.ui import MainWindow
-    from evasset.ui.workers import StartupInitJob
+    from evasset.ui.startup import StartupInitJob
+
+    # evasset.ui is deliberately NOT imported here. Pulling it in costs about
+    # 440ms -- every view module, the chart and the treemap -- and imported at
+    # this point that is 440ms with no window on screen at all, before
+    # QApplication even exists. The splash then appeared for a few frames and
+    # vanished, which is why it never looked like it animated: it was not
+    # frozen, it barely existed.
+    #
+    # StartupInitJob does that import on the pool thread instead, so the cost
+    # is paid behind a splash that is already up and pumping. Importing a
+    # module that defines QWidget subclasses off the GUI thread is fine;
+    # constructing one is not, and construction stays in start_main_window.
 
     # Before the window exists, so a failure building it is still recorded.
     # A windowed build has no stderr at all, so without this an exception
@@ -82,6 +93,10 @@ def main() -> int:
     state: dict = {}
 
     def start_main_window(_result=None) -> None:
+        # Imported by StartupInitJob already, so this is a dict lookup rather
+        # than the 440ms it would otherwise cost on the GUI thread.
+        from evasset.ui import MainWindow
+
         state["window"] = MainWindow(settings)
         state["window"].show()
         splash.close()

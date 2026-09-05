@@ -59,28 +59,6 @@ class Job(QRunnable):
             self.signals.finished.emit(result)
 
 
-class StartupInitJob(Job):
-    """Runs db.init() -- the schema script, the migration check, and (the
-    first time after an upgrade that adds one) building a brand new index
-    over however many rows are already in the table -- off the GUI thread.
-
-    MainWindow.__init__ used to call db.init() itself, directly, before the
-    window was ever shown. Since window construction happens before
-    QApplication.exec() starts pumping the event loop, that was blocking
-    time during which the app was not just slow, it genuinely was not
-    processing window messages at all -- which is exactly what makes an OS
-    report a process as "not responding" rather than just looking idle.
-    Running it here first, behind a splash screen, means MainWindow's own
-    db.init() call (on the main thread, once this has already primed the
-    schema on disk) finds nothing left to do.
-    """
-
-    def run_job(self):
-        db.init()
-        return None
-
-
-
 class UpdateCheckJob(Job):
     """Ask GitHub whether there is a newer release, and fetch it if so.
 
