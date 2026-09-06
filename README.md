@@ -11,6 +11,10 @@ character is worth over time.
 
 ![Filtering to abyssal modules, inspecting one, then narrowing Heat Sinks by three rolled stats](docs/abyssal-search.gif)
 
+**Powerful filtering tools made for real use cases**
+
+![Storing a Dominix fit from EFT text, filtering to the ships that deviate from it and to one station, comparing the one ship against the fit rack by rack, and pasting the multibuy shopping list into Notepad](docs/fit-compare.gif)
+
 **Build complex searches, save them, and load them**
 
 ![Building a five-chip filter from the rail, the field, the completion popup, a cell menu and the + builder, saving it with the save: command, clearing, then loading it back from the Load pill](docs/save-load-views.gif)

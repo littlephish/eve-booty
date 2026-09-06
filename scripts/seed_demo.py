@@ -29,6 +29,8 @@ so every stored fit is answered by a dozen ships rather than by an anecdote.
 A Rorqual and a Thanatos carry the holds the bay forms are about (fuel, ammo,
 ore, ship hangar, fighter tubes, fleet hangar) and a Rifter is fitted with no
 stored fit for its hull, so both polarities of `is:fit` must leave it out.
+A Dominix refitted mostly wrong against the sentry fit -- twelve of twenty
+modules -- gives the Compare deviation window a rack worth looking at.
 
 Two saved views go in on top of that, one on digit 1 and one unslotted, so
 `Ctrl+L` opens on a library rather than on an empty list.
@@ -915,6 +917,55 @@ RIFTER_HOLDS = (
     ("Cargo", PASTE, 60, 0),
 )
 
+# A Dominix refitted from memory of the Sentry Ratting fit and got mostly
+# wrong. Twelve of the fit's twenty modules are absent from the rack -- a meta
+# repairer and a meta cap recharger where the fit wants Tech II, a thermal
+# hardener for the kinetic one, a damage control and a Tech I amplifier in two
+# of the four amplifier slots, a shield extender and an afterburner in the
+# mids, one meta link augmentor, a nosferatu and a second gun for two of the
+# neutralisers, and two rigs of the wrong kind -- and the holds are short or
+# wrong in the same spirit. It exists for the Compare deviation window: the
+# designed cases differ from their fit by one module, which is the right test
+# and a dull picture, and this ship is the picture, a rack red and green down
+# most of its length with a shopping list worth copying. BOTCHED_WRONG pins
+# the count so a later edit cannot quietly make it a little wrong instead. It
+# berths alone in a station no other seeded asset uses, so one `loc:` chip
+# isolates it on screen.
+BOTCHED_NAME = "Sentry Domi (bad refit)"
+BOTCHED_STATION = "Hek VIII - Moon 12 - Boundless Creation Factory"
+BOTCHED_WRONG = 12
+BOTCHED_DOMINIX_SLOTS = rack(
+    ("LoSlot", (
+        "Large Armor Repairer I", "Reactive Armor Hardener",
+        "Thermal Armor Hardener II", "Drone Damage Amplifier II",
+        "Drone Damage Amplifier II", "Drone Damage Amplifier I", "Damage Control II",
+    )),
+    ("MedSlot", (
+        "Large Shield Extender II", "Omnidirectional Tracking Link II",
+        "10MN Afterburner II", "Cap Recharger I",
+    )),
+    ("HiSlot", (
+        "Drone Link Augmentor II", "Drone Link Augmentor I",
+        "Heavy Energy Neutralizer II", "Heavy Energy Nosferatu II",
+        "425mm Prototype Gauss Gun", "425mm Prototype Gauss Gun",
+    )),
+    ("RigSlot", (
+        "Large Thermal Armor Reinforcer I", "Large Trimark Armor Pump I",
+        "Large Explosive Armor Reinforcer I",
+    )),
+)
+BOTCHED_DOMINIX_HOLDS = (
+    ("HiSlot4", "Antimatter Charge L", 40, 0),
+    ("HiSlot5", "Antimatter Charge L", 40, 0),
+    ("DroneBay", "Warden II", 2, 1),
+    ("DroneBay", "Garde II", 5, 1),
+    ("DroneBay", "Hornet II", 5, 1),
+    ("DroneBay", "Hammerhead II", 5, 1),
+    ("Cargo", "Antimatter Charge L", 400, 0),
+    ("Cargo", "Optimal Range Script", 2, 0),
+    ("Cargo", PASTE, 20, 0),
+)
+
 # The two stacks of rounds that must never reach a `holds:` count. The
 # container's contents hang off the container's own item id, one level below
 # the ship, and the hangar stack is not inside anything at all.
@@ -943,6 +994,7 @@ class Fleet:
     designed: list[tuple[Hull, Fit, str, int]] = field(default_factory=list)
     packaged: set[int] = field(default_factory=set)
     rifter: int = 0
+    botched: int = 0
     rorqual: int = 0
     container: int = 0
     container_ship: int = 0
@@ -950,18 +1002,21 @@ class Fleet:
     hangar_stack: int = 0
 
 
+def station_by_name(conn, name: str) -> tuple[int, int, int]:
+    """(station, system, region) ids for one SDE station, by its full name."""
+    row = conn.execute(
+        "SELECT station_id, system_id, region_id FROM sde_stations WHERE name = ? COLLATE NOCASE",
+        (name,),
+    ).fetchone()
+    if row is None:
+        raise SystemExit(f"the imported SDE has no station named {name!r}")
+    return int(row["station_id"]), int(row["system_id"]), int(row["region_id"])
+
+
 def fleet_berths(conn) -> list[Berth]:
     """The owner/station cells the fleet is dealt round-robin into."""
     stations = [(JITA_4_4, JITA_SYS, THE_FORGE), (AMARR_VIII, AMARR_SYS, DOMAIN)]
-    for name in FLEET_STATION_NAMES:
-        row = conn.execute(
-            "SELECT station_id, system_id, region_id FROM sde_stations "
-            "WHERE name = ? COLLATE NOCASE",
-            (name,),
-        ).fetchone()
-        if row is None:
-            raise SystemExit(f"the imported SDE has no station named {name!r}")
-        stations.append((int(row["station_id"]), int(row["system_id"]), int(row["region_id"])))
+    stations += [station_by_name(conn, name) for name in FLEET_STATION_NAMES]
     return [
         Berth(owner_type, owner_id, flag, station, system, region)
         for station, system, region in stations
@@ -1229,7 +1284,11 @@ def seed_fleet(conn) -> Fleet:
     fleet.rifter = build_ship(
         conn, rows, ids, next(berth), type_id(conn, "Rifter"), RIFTER_SLOTS, RIFTER_HOLDS
     )
-    fleet.ships += [fleet.rorqual, thanatos, fleet.rifter]
+    fleet.botched = build_ship(
+        conn, rows, ids, Berth("character", PILOT, "Hangar", *station_by_name(conn, BOTCHED_STATION)),
+        type_id(conn, "Dominix"), BOTCHED_DOMINIX_SLOTS, BOTCHED_DOMINIX_HOLDS,
+    )
+    fleet.ships += [fleet.rorqual, thanatos, fleet.rifter, fleet.botched]
 
     # A can of rounds in a ship's cargo, and a pile of them in a hangar. Both
     # are the estate a `holds:` count has to see past: the can's contents hang
@@ -1257,9 +1316,15 @@ def seed_fleet(conn) -> Fleet:
     )
     for hull, ship, here in abyssal_swaps:
         claim_abyssal(conn, hull.abyssal[1], ship, hull.abyssal[0], here)
+    # Named so the one ship built to be looked at can be picked out of a table
+    # of Dominixes that all deviate from the same fit.
+    conn.execute(
+        "UPDATE assets SET custom_name = ? WHERE item_id = ?", (BOTCHED_NAME, fleet.botched)
+    )
     conn.commit()
 
     check_designed(conn, fleet, stored)
+    check_botched(conn, fleet, stored)
     check_holds(conn, fleet)
     check_is_fit(conn, fleet)
     check_fit_populations(conn)
@@ -1323,6 +1388,33 @@ def check_designed(conn, fleet: Fleet, stored: dict) -> None:
                 f"{where} shows {missing} missing and {extra} extra, "
                 f"not {want_missing} and {want_extra}"
             )
+
+
+def check_botched(conn, fleet: Fleet, stored: dict) -> None:
+    """The bad refit is as wrong as the compare window's demonstration needs.
+
+    BOTCHED_WRONG of the fit's modules must be absent from the rack and as
+    many strangers present. Every other check would still pass with a rack
+    edited to be a little wrong, and the window's showpiece would be back to
+    the one-module picture the designed cases already paint.
+    """
+    aboard = fitting.fitted_modules(queries.fetch_fit(conn, fleet.botched))
+    verdict = verdict_multiset(stored["Sentry Ratting"])
+    missing = sum(max(0, n - aboard.get(t, 0)) for t, n in verdict.items())
+    extra = sum(max(0, n - verdict.get(t, 0)) for t, n in aboard.items())
+    if (missing, extra) != (BOTCHED_WRONG, BOTCHED_WRONG):
+        raise SystemExit(
+            f"the bad refit shows {missing} missing and {extra} extra against "
+            f"Sentry Ratting, not {BOTCHED_WRONG} and {BOTCHED_WRONG}"
+        )
+    station = station_by_name(conn, BOTCHED_STATION)[0]
+    strangers = int(conn.execute(
+        "SELECT COUNT(*) FROM assets WHERE root_location_id = ? AND item_id != ? "
+        "AND location_id != ?",
+        (station, fleet.botched, fleet.botched),
+    ).fetchone()[0])
+    if strangers:
+        raise SystemExit(f"{strangers} other assets share the bad refit's station")
 
 
 def check_holds(conn, fleet: Fleet) -> None:
