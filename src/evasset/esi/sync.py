@@ -8,6 +8,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 
 from .. import db
+from .. import structure_history as sh
 from ..config import ASSET_SAFETY_LOCATION_ID, Settings
 from ..logsetup import LOGGER
 from .auth import AuthError
@@ -17,6 +18,11 @@ Progress = Callable[[str, int], None]
 
 CHAR = "character"
 CORP = "corporation"
+
+# What changed about each structure, recorded as raw before/after values for
+# the History tab to word later. See evasset/structure_history.py for why the
+# wording is not decided here.
+HISTORY_COLS = ["structure_id", "observed_at", "field", "old_value", "new_value"]
 
 # The wallet transactions route returns at most this many rows per call and has
 # no page parameter; you rewind through history with from_id instead.
@@ -684,8 +690,81 @@ class Syncer:
                 s.get("next_reinforce_apply"), s.get("unanchors_at"),
                 json.dumps(s.get("services") or []), now,
             ))
+        # Before the upsert, not after: upsert_many is INSERT OR REPLACE and
+        # the previous values are gone the moment it runs.
+        self._record_structure_changes({s["structure_id"]: s for s in got}, now)
         db.upsert_many(self.conn, "structures", self.STRUCTURE_COLS, rows)
         self._mark_unanchored(corp_id, [s["structure_id"] for s in got])
+
+    # ------------------------------------------------------------- history
+    def _record_structure_changes(self, incoming: dict, now: str) -> None:
+        """Compare what ESI just said against what is stored, and write down
+        the differences.
+
+        Must run before the upsert. A structure nobody has seen before gets a
+        single "tracking started" row rather than one row per field: nine
+        fields going from nothing to something says nothing anybody wants to
+        read, and calling it an anchor would be a lie about every structure
+        that was already up the day this feature shipped.
+        """
+        if not incoming:
+            return
+        ids = list(incoming)
+        placeholders = ",".join("?" * len(ids))
+        existing = {
+            row["structure_id"]: row
+            for row in self.conn.execute(
+                f"SELECT * FROM structures WHERE structure_id IN ({placeholders})", ids
+            )
+        }
+        rows = []
+        for sid, fresh in incoming.items():
+            was = existing.get(sid)
+            if was is None:
+                rows.append((sid, now, sh.TRACKING, None, "started"))
+                continue
+            # A structure ESI had stopped reporting is being reported again --
+            # a cancelled unanchor, or a sync that came back empty once. The
+            # upsert clears gone_at for free, so without this the log would
+            # show a departure and never a return.
+            if was["gone_at"]:
+                rows.append((sid, now, sh.GONE, was["gone_at"], None))
+            rows += [
+                (sid, now, field, before, after)
+                for field, before, after in sh.diff(was, fresh)
+            ]
+        if rows:
+            db.upsert_many(self.conn, "structure_changes", HISTORY_COLS, rows)
+
+    def _record_extraction_changes(self, corp_id: int, incoming: list, now: str) -> None:
+        """Moon drill cycles, recorded before _corp_extractions deletes them.
+
+        ESI reports only the current cycle per drill and repeats it on every
+        sync, so the news is a start time that has changed -- or a drill that
+        has dropped out of the response, which is how a finished cycle looks
+        from here.
+        """
+        stored = {
+            row["structure_id"]: row["extraction_start_time"]
+            for row in self.conn.execute(
+                "SELECT structure_id, extraction_start_time FROM moon_extractions"
+                " WHERE owner_id=?",
+                (corp_id,),
+            )
+        }
+        fresh = {
+            e["structure_id"]: e.get("extraction_start_time")
+            for e in incoming
+            if e.get("structure_id") is not None
+        }
+        rows = []
+        for sid in set(stored) | set(fresh):
+            before = stored.get(sid)
+            after = fresh.get(sid)
+            if before != after:
+                rows.append((sid, now, sh.EXTRACTION, before, after))
+        if rows:
+            db.upsert_many(self.conn, "structure_changes", HISTORY_COLS, rows)
 
     def _mark_unanchored(self, corp_id: int, seen: list[int]) -> None:
         """Flag structures ESI no longer reports for this corp.
@@ -710,6 +789,27 @@ class Syncer:
         if not seen:
             return
         placeholders = ",".join("?" * len(seen))
+        now = _now()
+        # Ask who is about to be flagged before flagging them. There is no
+        # value to record either side of this -- ESI never says "unanchored",
+        # it just stops mentioning the structure -- so the only honest entry
+        # is that a sync noticed it missing.
+        going = [
+            row["structure_id"]
+            for row in self.conn.execute(
+                f"""SELECT structure_id FROM structures
+                     WHERE owned = 1
+                       AND owner_id = ?
+                       AND gone_at IS NULL
+                       AND structure_id NOT IN ({placeholders})""",
+                (corp_id, *seen),
+            )
+        ]
+        if going:
+            db.upsert_many(
+                self.conn, "structure_changes", HISTORY_COLS,
+                [(sid, now, sh.GONE, None, now) for sid in going],
+            )
         self.conn.execute(
             f"""UPDATE structures
                    SET gone_at = ?
@@ -717,7 +817,7 @@ class Syncer:
                    AND owner_id = ?
                    AND gone_at IS NULL
                    AND structure_id NOT IN ({placeholders})""",
-            (_now(), corp_id, *seen),
+            (now, corp_id, *seen),
         )
         # Anything still reported had gone_at cleared for free: upsert_many is
         # INSERT OR REPLACE, which rewrites the whole row, and gone_at is not
@@ -741,6 +841,9 @@ class Syncer:
             )
             for e in got
         ]
+        # Before the DELETE: this table is a snapshot of the current cycle and
+        # the previous one is gone the moment it runs.
+        self._record_extraction_changes(corp_id, got, now)
         self.conn.execute("DELETE FROM moon_extractions WHERE owner_id=?", (corp_id,))
         db.upsert_many(
             self.conn, "moon_extractions",
