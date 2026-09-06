@@ -31,6 +31,14 @@ ICON_SIZE = 32
 
 ICON_DIR = CACHE_DIR / "icons"
 
+# The structure Overview tab shows the hull itself, which is a different
+# endpoint and a different size. Cached in its own directory because both
+# files are named "<type_id>.png": sharing one would mean whichever was
+# fetched first won, and an Athanor would be represented by a 32px icon or
+# a fit line by a 512px render, depending on which dialog opened first.
+RENDER_DIR = CACHE_DIR / "renders"
+RENDER_SIZE = 512
+
 # Cold downloads run concurrently: measured sequentially they cost ~150ms
 # each, so a 16-icon first open kept placeholders up for ~2.4s. Six workers
 # bring that down to roughly the cost of the slowest three requests. Modest on
@@ -109,3 +117,46 @@ def fetch_icons(
         if dest is not None:
             out[tid] = dest
     return out
+
+
+def render_path(type_id: int) -> Path | None:
+    """The cached render file, or None if it has never been fetched."""
+    path = RENDER_DIR / f"{type_id}.png"
+    return path if path.exists() else None
+
+
+def fetch_render(
+    type_id: int,
+    settings: Settings | None = None,
+    transport: httpx.BaseTransport | None = None,
+) -> Path | None:
+    """The hull picture for one type, cached on disk, or None.
+
+    One id rather than a batch: exactly one of these is shown at a time, on
+    the structure Overview tab. None covers every way this can go wrong --
+    no render for the type, offline, a bad write -- because the tab shows a
+    placeholder and carries on. A missing picture is not worth an error
+    dialog over a structure whose fuel state the user came to read.
+    """
+    cached = render_path(type_id)
+    if cached is not None:
+        return cached
+    try:
+        RENDER_DIR.mkdir(parents=True, exist_ok=True)
+        headers = {"User-Agent": user_agent(settings)}
+        with httpx.Client(
+            base_url=IMAGE_SERVER, headers=headers, timeout=30,
+            follow_redirects=True, transport=transport,
+        ) as client:
+            r = client.get(f"/types/{type_id}/render", params={"size": RENDER_SIZE})
+            if r.status_code != 200 or not r.content:
+                return None
+            dest = RENDER_DIR / f"{type_id}.png"
+            # Same per-writer temp name as the icon path, for the same reason:
+            # two dialogs can want the same uncached render at once.
+            tmp = dest.with_name(f"{type_id}.{os.getpid()}-{threading.get_ident()}.part")
+            tmp.write_bytes(r.content)
+            tmp.replace(dest)
+            return dest
+    except (httpx.HTTPError, OSError):
+        return None

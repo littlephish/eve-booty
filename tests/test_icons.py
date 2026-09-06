@@ -131,3 +131,48 @@ def test_one_failing_id_does_not_take_the_rest_of_the_batch_with_it():
     got = _fetch([MISSING_ID, CACHED_ID], handler)
     assert MISSING_ID not in got
     assert got[CACHED_ID] == icons.ICON_DIR / f"{CACHED_ID}.png"
+
+
+# ------------------------------------------------------------------ renders
+# The structure Overview tab shows the hull, not a 32px icon. Same image
+# service, same disk cache, different endpoint and a much larger size.
+def test_a_render_is_fetched_and_cached(tmp_path, monkeypatch):
+    monkeypatch.setattr(icons, "RENDER_DIR", tmp_path / "renders")
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(200, content=b"PNGDATA")
+
+    path = icons.fetch_render(35835, transport=httpx.MockTransport(handler))
+    assert path is not None
+    assert path.read_bytes() == b"PNGDATA"
+    assert "/types/35835/render" in seen[0]
+
+
+def test_a_cached_render_is_not_refetched(tmp_path, monkeypatch):
+    monkeypatch.setattr(icons, "RENDER_DIR", tmp_path / "renders")
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return httpx.Response(200, content=b"PNGDATA")
+
+    transport = httpx.MockTransport(handler)
+    icons.fetch_render(35835, transport=transport)
+    icons.fetch_render(35835, transport=transport)
+    assert len(calls) == 1
+
+
+def test_a_render_that_does_not_exist_is_none_not_an_error(tmp_path, monkeypatch):
+    """Not every type has a render, and the Overview tab shows a placeholder
+    rather than failing to open."""
+    monkeypatch.setattr(icons, "RENDER_DIR", tmp_path / "renders")
+    transport = httpx.MockTransport(lambda r: httpx.Response(404))
+    assert icons.fetch_render(35835, transport=transport) is None
+
+
+def test_a_render_is_kept_apart_from_the_icons(tmp_path, monkeypatch):
+    """Both are "<type_id>.png". Sharing a directory would mean whichever was
+    fetched first won, and a 32px icon would end up as the hull picture."""
+    assert icons.RENDER_DIR != icons.ICON_DIR

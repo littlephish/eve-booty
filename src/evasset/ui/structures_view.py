@@ -1,8 +1,8 @@
 """Structures our corporations own: fuel, reinforcement timers, moon drills.
 
-Right-click a row for "View fit" -- the same dialog the Assets tab opens on a
-ship, showing the structure's service modules, slots, rigs, fuel bay and
-quantum core.
+Double-click a row, or right-click it for "Open structure", to get the detail
+dialog: an Overview, the Fit (service modules, slots, rigs, fuel bay, quantum
+core) and a History of everything a sync has noticed changing.
 
 Everything here is quoted in EVE time, which is UTC, because every timer in
 the game is. A structure comes out of reinforcement at a wall-clock time that
@@ -56,10 +56,10 @@ from ..evetime import (  # noqa: F401
 from .assets_view import _SortProxy
 from .async_query import AsyncQuery
 from .debounce import Debounce
-from .fit_dialog import FitDialog
 from .models import fill_combo
 from .palette import CRITICAL, NORMAL, SECONDARY_TEXT, WARN, status_brush
 from .sort_controller import SortController
+from .structure_dialog import StructureDialog
 
 # How close to empty before a fuel bay is worth shouting about. Three days is
 # roughly "you can still fix this at the weekend"; one day is "today".
@@ -392,6 +392,7 @@ class StructuresView(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._context_menu)
+        self.table.doubleClicked.connect(self._open_double_clicked)
         self.model = _StructuresModel()
         self.proxy = _SortProxy()
         self.proxy.setSourceModel(self.model)
@@ -448,37 +449,28 @@ class StructuresView(QWidget):
         row = self.model.rows()[self.proxy.mapToSource(index).row()]
         self.menu_for_structure(row).exec(self.table.viewport().mapToGlobal(pos))
 
+    def _open_double_clicked(self, index) -> None:
+        if index.isValid():
+            self.open_structure(self.model.rows()[self.proxy.mapToSource(index).row()])
+
     def menu_for_structure(self, row) -> QMenu:
         """Built and returned rather than exec'd here so the entries can be
         asserted without a modal event loop -- same split as
         treemap_view.menu_for_tile."""
         menu = QMenu(self)
-        menu.addAction("View fit…", lambda: self.open_fit(row))
+        menu.addAction("Open structure…", lambda: self.open_structure(row))
+        menu.addAction("View fit…", lambda: self.open_structure(row, tab="Fit"))
         return menu
 
-    def open_fit(self, row) -> None:
-        """A structure's fit, explicitly -- not fetch_fit. Asked the ship
-        question, an Upwell structure answers with its entire contents: every
-        corp hangar division and everything anybody parked in it. See
-        queries.fetch_structure_fit."""
-        structure_id = row["structure_id"]
+    def open_structure(self, row, tab: str = "Overview") -> None:
+        """The detail dialog: Overview, Fit and History for one structure.
 
-        def fetch(conn):
-            return queries.fetch_structure_fit(conn, structure_id)
-
-        dialog = FitDialog(
-            structure_id,
-            row["name"],
-            ship_type_id=row["type_id"],
-            parent=self,
-            fetch=fetch,
-            empty_text=(
-                "Nothing fitted on this structure.\n\n"
-                "Fittings come from corporation assets, so this stays empty "
-                "without the corp assets scope."
-            ),
-        )
-        dialog.exec()
+        "View fit" opens that same window on its Fit tab rather than a
+        separate one. There is one place everything about a structure lives,
+        and the menu entry is a shortcut into it rather than a second feature
+        that happens to show the same data.
+        """
+        StructureDialog(row["structure_id"], row["name"], parent=self, tab=tab).exec()
 
     # ----------------------------------------------------------------- data
     def reset_sort(self) -> None:

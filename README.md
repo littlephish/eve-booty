@@ -96,11 +96,20 @@ run from source instead.
   missing rather than deleting it, because assets still recorded there need its
   name to resolve. Their frozen state and fuel clocks are blanked rather than
   counted down to a date nothing will refresh, and an Unanchored tick box brings
-  them back when you want to look. Right-click a structure for View fit to see
-  its service modules, slots, rigs, quantum core and what is actually in the
-  fuel bay - the table tells you when the fuel runs out, this tells you what is
-  burning. Its hangars are deliberately left out: they are the Assets tab's job,
-  and a busy Fortizar would bury the fit under thousands of rows
+  them back when you want to look. Double-click a structure for its own window:
+
+  - **Overview** - what it is, where, whose, what it is running, when the fuel
+    goes and when the next chunk lands. Power is worked out from the fuel clock
+    and says so, because ESI does not report it
+  - **Fit** - service modules, slots, rigs, quantum core, and what is actually
+    in the fuel bay: the table tells you when the fuel runs out, this tells you
+    what is burning. Hangars are deliberately left out - they are the Assets
+    tab's job, and a busy Fortizar would bury the fit under thousands of rows
+  - **History** - anchors, unanchors, reinforcements, refuels, services going
+    on and offline, moon extractions starting and ending. Built by comparing
+    each sync against the last, because ESI has no structure event log, so it
+    starts the day you install it and fills in from there. Times are when a
+    sync noticed, not when it happened in game, and the tab says so
 - An estate strip above the table - net worth, assets, liquid ISK, volume,
   unpriced count and a one-row value map of your top locations - always
   whole-estate, never faceted by the filters below it

@@ -85,7 +85,7 @@ def _placeholder(size: int) -> QPixmap:
     return pm
 
 
-class FitDialog(QDialog):
+class FitPane(QWidget):
     def __init__(
         self,
         ship_item_id: int,
@@ -95,7 +95,7 @@ class FitDialog(QDialog):
         fetch: Callable[[sqlite3.Connection], list[sqlite3.Row]] | None = None,
         empty_text: str = "Nothing fit, loaded or stowed on this ship.",
     ):
-        """fetch and empty_text are what let this dialog serve a structure as
+        """fetch and empty_text are what let this pane serve a structure as
         well as a ship. A structure's fit is a different query -- asking
         fetch_fit for one returns its entire hangar contents, see
         queries.fetch_structure_fit -- and "on this ship" is the wrong
@@ -110,9 +110,6 @@ class FitDialog(QDialog):
         # and rows are built, read when the fetch job reports back.
         self._icon_labels: dict[int, list[tuple[QLabel, int]]] = {}
         self._icon_job: _IconFetchJob | None = None
-        self.setWindowTitle(f"Fit - {ship_name}")
-        self.resize(460, 600)
-
         layout = QVBoxLayout(self)
 
         header = QHBoxLayout()
@@ -164,7 +161,11 @@ class FitDialog(QDialog):
         def fetch_ship(conn: sqlite3.Connection) -> list[sqlite3.Row]:
             return queries.fetch_fit(conn, ship_item_id)
 
-        self._query.run(fetch or fetch_ship, self._on_rows, self._on_failed)
+        # Kept rather than passed straight through: which query a pane is
+        # reading is the difference between a structure's fit and its entire
+        # hangar, and that is worth being able to look at.
+        self._fetch = fetch or fetch_ship
+        self._query.run(self._fetch, self._on_rows, self._on_failed)
 
     def _add_row(self, widget: QWidget) -> None:
         self.body_layout.insertWidget(self.body_layout.count() - 1, widget)
@@ -273,3 +274,33 @@ class FitDialog(QDialog):
     def _say(self, message: str) -> None:
         self.status.setText(message)
         self.status.show()
+
+
+class FitDialog(QDialog):
+    """A FitPane in a window of its own.
+
+    What the Assets tab opens when you pick "View fit" on a ship. The
+    Structures tab does not use this -- a structure's fit is one tab of its
+    detail dialog, so that one embeds the pane directly. The split exists for
+    exactly that reason: a QDialog cannot be a tab.
+    """
+
+    def __init__(
+        self,
+        ship_item_id: int,
+        ship_name: str,
+        ship_type_id: int | None = None,
+        parent: QWidget | None = None,
+        fetch: Callable[[sqlite3.Connection], list[sqlite3.Row]] | None = None,
+        empty_text: str = "Nothing fit, loaded or stowed on this ship.",
+    ):
+        super().__init__(parent)
+        self.setWindowTitle(f"Fit - {ship_name}")
+        self.resize(460, 600)
+        self.pane = FitPane(
+            ship_item_id, ship_name, ship_type_id,
+            parent=self, fetch=fetch, empty_text=empty_text,
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.pane)

@@ -229,9 +229,9 @@ def test_the_dialog_says_what_is_empty_in_its_own_words(qapp_or_skip, conn):
         ship_type_id=FORTIZAR,
         empty_text="Nothing fitted on this structure.",
     )
-    dialog._query.cancel()  # drop whatever the constructor started
-    dialog._on_rows([])
-    labels = dialog.body.findChildren(__import__("PySide6.QtWidgets", fromlist=["QLabel"]).QLabel)
+    dialog.pane._query.cancel()  # drop whatever the constructor started
+    dialog.pane._on_rows([])
+    labels = dialog.pane.body.findChildren(__import__("PySide6.QtWidgets", fromlist=["QLabel"]).QLabel)
     assert any("structure" in label.text() for label in labels)
 
 
@@ -254,38 +254,47 @@ def test_view_fit_opens_the_structure_that_was_clicked(qapp_or_skip, conn, monke
     opened = {}
 
     class FakeDialog:
-        def __init__(self, item_id, name, ship_type_id=None, **kw):
-            opened.update(item_id=item_id, name=name, type_id=ship_type_id, kw=kw)
+        def __init__(self, structure_id, name, parent=None, **kw):
+            opened.update(structure_id=structure_id, name=name, tab=kw.get("tab"))
 
         def exec(self):
             return 0
 
-    monkeypatch.setattr(structures_view, "FitDialog", FakeDialog)
+    monkeypatch.setattr(structures_view, "StructureDialog", FakeDialog)
     view = structures_view.StructuresView(defer_load=True)
-    row = queries.fetch_structures(conn)[0]
-    view.open_fit(row)
-    assert opened["item_id"] == STRUCTURE
+    view.open_structure(queries.fetch_structures(conn)[0], tab="Fit")
+    assert opened["structure_id"] == STRUCTURE
     assert opened["name"] == "Jita Fortizar"
-    assert opened["type_id"] == FORTIZAR
+    assert opened["tab"] == "Fit"
 
 
-def test_the_dialog_is_given_the_structure_query_not_the_ship_one(
-    qapp_or_skip, conn, monkeypatch
-):
-    """The whole point: pointed at a structure with fetch_fit it would show
-    the corp hangar."""
+def test_opening_a_structure_lands_on_the_overview(qapp_or_skip, conn, monkeypatch):
     from evasset.ui import structures_view
 
     opened = {}
 
     class FakeDialog:
-        def __init__(self, item_id, name, ship_type_id=None, **kw):
-            opened.update(kw)
+        def __init__(self, structure_id, name, parent=None, **kw):
+            opened.update(tab=kw.get("tab"))
 
         def exec(self):
             return 0
 
-    monkeypatch.setattr(structures_view, "FitDialog", FakeDialog)
+    monkeypatch.setattr(structures_view, "StructureDialog", FakeDialog)
     view = structures_view.StructuresView(defer_load=True)
-    view.open_fit(queries.fetch_structures(conn)[0])
-    assert opened["fetch"](conn) == queries.fetch_structure_fit(conn, STRUCTURE)
+    view.open_structure(queries.fetch_structures(conn)[0])
+    assert opened["tab"] == "Overview"
+
+
+def test_the_fit_tab_is_given_the_structure_query_not_the_ship_one(qapp_or_skip, conn):
+    """The whole point: pointed at a structure with fetch_fit it would show
+    the corp hangar. Asserted on the dialog itself rather than on how the view
+    calls it, because the dialog is what decides now."""
+    from evasset.ui.structure_dialog import StructureDialog
+
+    dialog = StructureDialog(STRUCTURE, "Jita Fortizar", defer_load=True)
+    dialog.fit._query.cancel()
+    rows = dialog.fit._fetch(conn)
+    assert [r["location_flag"] for r in rows] == [
+        r["location_flag"] for r in queries.fetch_structure_fit(conn, STRUCTURE)
+    ]

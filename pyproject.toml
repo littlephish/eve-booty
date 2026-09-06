@@ -46,6 +46,7 @@ ignore = ["E501", "UP017"]  # UP017 (datetime.UTC) is 3.11+; we support 3.10
 "src/evasset/ui/models.py" = ["B008"]
 "src/evasset/ui/structures_view.py" = ["B008"]
 "src/evasset/ui/stockpile_view.py" = ["B008"]
+"src/evasset/ui/structure_dialog.py" = ["B008"]
 # Tests set env vars and sys.path before importing the package.
 "tests/*" = ["E402"]
 
