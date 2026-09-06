@@ -73,11 +73,24 @@ class Syncer:
         if corp_id:
             corp = self.client.get(f"/corporations/{corp_id}", allow_404=True) or {}
             corp_name = corp.get("name")
+            # alliance_id was in this body all along and used to be dropped.
+            # Only the name costs a request, it is public, and it is worth one
+            # line on the structure Overview tab -- so a failure here leaves
+            # the name NULL rather than taking the registration down with it.
+            alliance_id = corp.get("alliance_id")
+            alliance_name = None
+            if alliance_id:
+                alliance = self.client.get(
+                    f"/alliances/{alliance_id}", allow_404=True
+                ) or {}
+                alliance_name = alliance.get("name")
             self.conn.execute(
-                "INSERT INTO corporations(corporation_id, name, ticker) VALUES(?,?,?) "
+                "INSERT INTO corporations(corporation_id, name, ticker, alliance_id,"
+                " alliance_name) VALUES(?,?,?,?,?) "
                 "ON CONFLICT(corporation_id) DO UPDATE SET name=excluded.name, "
-                "ticker=excluded.ticker",
-                (corp_id, corp_name, corp.get("ticker")),
+                "ticker=excluded.ticker, alliance_id=excluded.alliance_id, "
+                "alliance_name=excluded.alliance_name",
+                (corp_id, corp_name, corp.get("ticker"), alliance_id, alliance_name),
             )
         self.conn.execute(
             """INSERT INTO characters(character_id, name, corporation_id, corporation_name,

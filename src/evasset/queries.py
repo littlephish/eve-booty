@@ -1296,6 +1296,80 @@ def fetch_structures(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return list(conn.execute(STRUCTURES_SQL))
 
 
+# One structure, for the detail dialog's Overview tab. Everything
+# STRUCTURES_SQL has plus the two things only this screen shows: the owning
+# corporation's alliance, and first_seen.
+#
+# first_seen is a MIN over the change log rather than a column, because there
+# is no anchored-at to store. ESI does not report when a structure was
+# anchored and never did; the earliest thing ever recorded about it is the
+# closest honest answer, and for anything that predates the history feature
+# that is the day tracking started. Labelled "first seen" on screen for
+# exactly that reason.
+STRUCTURE_SQL = """
+SELECT    s.structure_id,
+          COALESCE(s.name, 'Structure ' || s.structure_id) AS name,
+          s.type_id,
+          ty.name        AS type_name,
+          sys.name       AS system_name,
+          sys.security   AS security,
+          reg.name       AS region_name,
+          co.name        AS owner_name,
+          co.ticker      AS owner_ticker,
+          co.alliance_id,
+          co.alliance_name,
+          s.state,
+          s.state_timer_start,
+          s.state_timer_end,
+          s.fuel_expires,
+          s.reinforce_hour,
+          s.next_reinforce_hour,
+          s.next_reinforce_apply,
+          s.unanchors_at,
+          s.services,
+          s.updated_at,
+          s.gone_at,
+          x.moon_id,
+          x.chunk_arrival_time,
+          x.natural_decay_time,
+          x.extraction_start_time,
+          (SELECT MIN(observed_at) FROM structure_changes c
+            WHERE c.structure_id = s.structure_id) AS first_seen
+FROM      structures s
+LEFT JOIN sde_types        ty  ON ty.type_id    = s.type_id
+LEFT JOIN sde_systems      sys ON sys.system_id = s.system_id
+LEFT JOIN sde_regions      reg ON reg.region_id = s.region_id
+LEFT JOIN corporations     co  ON co.corporation_id = s.owner_id
+LEFT JOIN moon_extractions x   ON x.structure_id    = s.structure_id
+WHERE     s.structure_id = ?
+"""
+
+
+def fetch_structure(conn: sqlite3.Connection, structure_id: int) -> sqlite3.Row | None:
+    """One structure with everything the Overview tab shows, or None.
+
+    None rather than an exception: the dialog can be open when a sync marks
+    the structure gone, and "it is not there any more" is a thing to render,
+    not a crash.
+    """
+    return conn.execute(STRUCTURE_SQL, (structure_id,)).fetchone()
+
+
+def fetch_structure_changes(conn: sqlite3.Connection, structure_id: int) -> list[sqlite3.Row]:
+    """Everything recorded about one structure, oldest first.
+
+    Raw rows: what they mean is structure_history.group_events' job, and it
+    wants them ungrouped and unworded. Ordered here only so the grouping is
+    deterministic, not because the tab shows them this way round -- it shows
+    the newest first.
+    """
+    return list(conn.execute(
+        "SELECT * FROM structure_changes WHERE structure_id=?"
+        " ORDER BY observed_at, change_id",
+        (structure_id,),
+    ))
+
+
 def structure_owners(conn: sqlite3.Connection) -> list[str]:
     rows = conn.execute(
         """SELECT DISTINCT c.name AS name
