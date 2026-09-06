@@ -11,9 +11,10 @@ Slot-rack lines carry the module's type icon and a background tint by rarity
 client's own colour language, see palette.RARITY_TINTS). Which lines get
 that treatment is decided by fitting.FitLine, not here: a line with a
 type_id is a slot line, a line without one is hold/bay/cargo text. Icons
-come from CCP's image service via evasset.icons, fetched off the GUI thread
-and cached on disk, so the dialog opens instantly with placeholders and the
-icons drop in when the fetch lands (immediately, once cached).
+come from CCP's image service via evasset.icons through type_icons'
+TypeIconLoader (shared with the comparison window), fetched off the GUI
+thread and cached on disk, so the dialog opens instantly with placeholders
+and the icons drop in when the fetch lands (immediately, once cached).
 """
 
 from __future__ import annotations
@@ -21,8 +22,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal, Slot
-from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -34,49 +34,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import icons, queries
+from .. import queries
 from ..fitting import group_fit, to_eft, to_esi_fitting
 from .async_query import AsyncQuery
 from .palette import SECONDARY_TEXT, rarity_hex
-
-_MODULE_ICON_PX = 24
-_SHIP_ICON_PX = 32
-
-
-class _IconSignals(QObject):
-    # Signal(object), not Signal(dict): dict maps to QVariantMap, whose keys
-    # must be strings -- an int-keyed {type_id: Path} fails the C++ conversion
-    # at emit time (silently, from a worker thread) and the slot never runs.
-    done = Signal(object)  # {type_id: Path}
-
-
-class _IconFetchJob(QRunnable):
-    """One batch fetch per dialog open. Same lifetime rules as every other
-    QRunnable in this app (see async_query.py's docstring for the long
-    version): the signals live on a QObject, and the dialog holds a strong
-    reference to the job until it reports back."""
-
-    def __init__(self, type_ids: list[int]):
-        super().__init__()
-        self.type_ids = type_ids
-        self.signals = _IconSignals()
-        self.setAutoDelete(False)
-
-    @Slot()
-    def run(self) -> None:
-        try:
-            paths = icons.fetch_icons(self.type_ids)
-        except Exception:  # noqa: BLE001 - icons are decoration; never kill the dialog
-            paths = {}
-        self.signals.done.emit(paths)
-
-
-def _placeholder(size: int) -> QPixmap:
-    """Reserves the icon's space so text does not jump when the real pixmap
-    lands, and reads as "loading" rather than as a broken image."""
-    pm = QPixmap(size, size)
-    pm.fill(QColor(127, 127, 127, 40))
-    return pm
+from .type_icons import MODULE_ICON_PX, SHIP_ICON_PX, TypeIconLoader, placeholder
 
 
 class FitDialog(QDialog):
@@ -91,10 +53,7 @@ class FitDialog(QDialog):
         self._ship_name = ship_name
         self._ship_type_id = ship_type_id
         self._rows: list[sqlite3.Row] = []
-        # {type_id: [(icon label, display px), ...]} -- filled as the header
-        # and rows are built, read when the fetch job reports back.
-        self._icon_labels: dict[int, list[tuple[QLabel, int]]] = {}
-        self._icon_job: _IconFetchJob | None = None
+        self._icons = TypeIconLoader()
         self.setWindowTitle(f"Fit - {ship_name}")
         self.resize(460, 600)
 
@@ -102,14 +61,14 @@ class FitDialog(QDialog):
 
         header = QHBoxLayout()
         self.ship_icon = QLabel()
-        self.ship_icon.setFixedSize(_SHIP_ICON_PX, _SHIP_ICON_PX)
-        self.ship_icon.setPixmap(_placeholder(_SHIP_ICON_PX))
+        self.ship_icon.setFixedSize(SHIP_ICON_PX, SHIP_ICON_PX)
+        self.ship_icon.setPixmap(placeholder(SHIP_ICON_PX))
         header.addWidget(self.ship_icon)
+        if ship_type_id is not None:
+            self._icons.register(self.ship_icon, ship_type_id, SHIP_ICON_PX)
         title = QLabel(f"<b>{ship_name}</b>")
         header.addWidget(title, 1)
         layout.addLayout(header)
-        if ship_type_id is not None:
-            self._icon_labels[ship_type_id] = [(self.ship_icon, _SHIP_ICON_PX)]
 
         self.status = QLabel("Loading…")
         self.status.setStyleSheet(f"color: {SECONDARY_TEXT};")
@@ -172,15 +131,10 @@ class FitDialog(QDialog):
         lay = QHBoxLayout(row)
         lay.setContentsMargins(12, 2, 8, 2)
         lay.setSpacing(8)
-        icon = QLabel()
-        icon.setFixedSize(_MODULE_ICON_PX, _MODULE_ICON_PX)
-        icon.setPixmap(_placeholder(_MODULE_ICON_PX))
-        lay.addWidget(icon)
+        lay.addWidget(self._icons.slot(line.type_id, MODULE_ICON_PX))
         text = QLabel(line.text)
         text.setWordWrap(True)
         lay.addWidget(text, 1)
-
-        self._icon_labels.setdefault(line.type_id, []).append((icon, _MODULE_ICON_PX))
         return row
 
     def _on_rows(self, rows: list[sqlite3.Row]) -> None:
@@ -193,7 +147,7 @@ class FitDialog(QDialog):
             empty = QLabel("Nothing fit, loaded or stowed on this ship.")
             empty.setStyleSheet(f"color: {SECONDARY_TEXT};")
             self._add_row(empty)
-            self._start_icon_fetch()
+            self._icons.start()
             return
         for label, lines in groups:
             header = QLabel(f"<b>{label}</b>")
@@ -206,36 +160,13 @@ class FitDialog(QDialog):
                     item_label.setContentsMargins(16, 0, 0, 4)
                     item_label.setWordWrap(True)
                     self._add_row(item_label)
-        self._start_icon_fetch()
-
-    def _start_icon_fetch(self) -> None:
-        wanted = list(self._icon_labels)
-        if not wanted:
-            return
-        job = _IconFetchJob(wanted)
-        self._icon_job = job  # strong ref until the signal lands; see _IconFetchJob
-        job.signals.done.connect(self._apply_icons)
-        QThreadPool.globalInstance().start(job)
-
-    def _apply_icons(self, paths: dict) -> None:
-        self._icon_job = None
-        for type_id, labels in self._icon_labels.items():
-            path = paths.get(type_id)
-            if path is None:
-                continue  # 404 or offline -- the placeholder stays
-            pm = QPixmap(str(path))
-            if pm.isNull():
-                continue
-            for label, px in labels:
-                label.setPixmap(
-                    pm.scaled(px, px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                )
+        self._icons.start()
 
     def _on_failed(self, message: str) -> None:
         self.status.setText(f"Could not load fit: {message}")
         # The ship's own icon does not depend on the fit query -- fetch it
         # anyway rather than leaving a permanent placeholder in the header.
-        self._start_icon_fetch()
+        self._icons.start()
 
     def _copy_esi(self) -> None:
         """ESI fitting JSON, which is what Pyfa's clipboard import actually

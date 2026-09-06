@@ -56,8 +56,11 @@ def _is_unknown_label(label: str) -> bool:
 
 
 # Sort keys as rail_rollups() spells them, with the segment-button captions.
-_SORT_LABELS = [("value", "ISK"), ("name", "A-Z"), ("volume", "m³")]
-_SORT_DISPLAY = dict(_SORT_LABELS)
+# The keys are also what a saved view stores as its rail_sort (views.py), so
+# renaming one is a migration, not a refactor.
+SORT_LABELS = [("value", "ISK"), ("name", "A-Z"), ("volume", "m³")]
+SORT_KEYS = tuple(key for key, _text in SORT_LABELS)
+_SORT_DISPLAY = dict(SORT_LABELS)
 
 _UNKNOWN_TOOLTIP = (
     "Stations or structures whose names have not been resolved yet. "
@@ -184,6 +187,91 @@ class _FlipRow(QWidget):
         layout.addWidget(self.quantity, 0)
 
 
+class LevelSortBar(QWidget):
+    """The rail's header row: the level combo and the three-way sort segment.
+
+    The combo runs over ROLLUP_LEVELS and the segment reads ISK · A-Z · m³.
+
+    Its own widget because the Save card draws the same row: a view stores
+    the rail's level and sort, and a card that let the user pick both while
+    saving had to look exactly like the header it was standing in for, or
+    the two would read as different controls. One construction keeps them
+    identical by definition rather than by hand.
+
+    The sort emits only on a real change through a click: clicking the
+    already-checked segment is a no-op rather than a re-query, and
+    set_sort() moves the segment silently so a host restoring a saved view
+    can set it without a round trip it is about to make anyway.
+    """
+
+    level_changed = Signal(str)  # level key
+    sort_changed = Signal(str)  # sort key, on a click that changed it
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        bar = QHBoxLayout(self)
+        bar.setContentsMargins(0, 0, 0, 0)
+        self.level = QComboBox()
+        for label, _key in queries.ROLLUP_LEVELS:
+            self.level.addItem(label)
+        bar.addWidget(self.level, 1)
+
+        self._sort = "value"
+        self.sort_buttons: dict[str, QToolButton] = {}
+        self._sort_group = QButtonGroup(self)
+        self._sort_group.setExclusive(True)
+        for key, text in SORT_LABELS:
+            button = QToolButton()
+            button.setText(text)
+            button.setCheckable(True)
+            button.setAutoRaise(True)
+            button.setToolTip(f"Sort by {text}")
+            self._sort_group.addButton(button)
+            self.sort_buttons[key] = button
+            bar.addWidget(button)
+        self.sort_buttons[self._sort].setChecked(True)
+
+        self.level.currentIndexChanged.connect(
+            lambda _index: self.level_changed.emit(self.current_level())
+        )
+        self._sort_group.buttonClicked.connect(self._on_sort_clicked)
+
+    def current_level(self) -> str:
+        return queries.ROLLUP_LEVELS[self.level.currentIndex()][1]
+
+    def set_level(self, key: str) -> None:
+        """Move the combo to `key` without emitting.
+
+        A key the table does not name leaves it where it is (an imported view
+        names none).
+        """
+        keys = [k for _label, k in queries.ROLLUP_LEVELS]
+        if key in keys:
+            self.level.blockSignals(True)
+            self.level.setCurrentIndex(keys.index(key))
+            self.level.blockSignals(False)
+
+    def current_sort(self) -> str:
+        return self._sort
+
+    def set_sort(self, key: str) -> None:
+        """Move the segment to `key` without emitting.
+
+        An unknown key leaves it where it is, for set_level's reason.
+        """
+        if key in self.sort_buttons and key != self._sort:
+            self._sort = key
+            self.sort_buttons[key].setChecked(True)
+
+    def _on_sort_clicked(self, button: QToolButton) -> None:
+        key = next(k for k, b in self.sort_buttons.items() if b is button)
+        # buttonClicked fires on a click of the already-checked button too;
+        # re-querying for an unchanged order would be pure waste.
+        if key != self._sort:
+            self._sort = key
+            self.sort_changed.emit(key)
+
+
 class Rail(QWidget):
     """Rollup rail: pick a level, see every label's stacks, volume and value,
     click one to add it as an omnibox chip.
@@ -205,27 +293,13 @@ class Rail(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
 
-        bar = QHBoxLayout()
-        self.level = QComboBox()
-        for label, _key in queries.ROLLUP_LEVELS:
-            self.level.addItem(label)
-        bar.addWidget(self.level, 1)
-
-        self._sort = "value"
-        self.sort_buttons: dict[str, QToolButton] = {}
-        self._sort_group = QButtonGroup(self)
-        self._sort_group.setExclusive(True)
-        for key, text in _SORT_LABELS:
-            button = QToolButton()
-            button.setText(text)
-            button.setCheckable(True)
-            button.setAutoRaise(True)
-            button.setToolTip(f"Sort by {text}")
-            self._sort_group.addButton(button)
-            self.sort_buttons[key] = button
-            bar.addWidget(button)
-        self.sort_buttons[self._sort].setChecked(True)
-        root.addLayout(bar)
+        self.header = LevelSortBar()
+        # The combo and the segment buttons stay reachable under their old
+        # names: the host restores a view through rail.level, and the tests
+        # click rail.sort_buttons.
+        self.level = self.header.level
+        self.sort_buttons = self.header.sort_buttons
+        root.addWidget(self.header)
 
         self.search = QLineEdit()
         self.search.setPlaceholderText("Filter…")
@@ -256,19 +330,24 @@ class Rail(QWidget):
         self._pinned: set[str] = set()
         self._flip: list | None = None
 
-        self.level.currentIndexChanged.connect(
-            lambda _index: self.level_changed.emit(self.current_level())
-        )
+        self.header.level_changed.connect(self.level_changed)
+        self.header.sort_changed.connect(lambda _key: self.refresh_needed.emit())
         self.search.textChanged.connect(lambda _text: self._apply_type_ahead())
-        self._sort_group.buttonClicked.connect(self._on_sort_clicked)
         self.rows_list.itemClicked.connect(self._on_item_clicked)
 
     # ------------------------------------------------------------- public API
     def current_level(self) -> str:
-        return queries.ROLLUP_LEVELS[self.level.currentIndex()][1]
+        return self.header.current_level()
 
     def current_sort(self) -> str:
-        return self._sort
+        return self.header.current_sort()
+
+    def set_sort(self, key: str) -> None:
+        """Move the sort segment silently; an unknown key changes nothing.
+
+        For a host restoring a saved view that is about to re-query anyway.
+        """
+        self.header.set_sort(key)
 
     def filter_text(self) -> str:
         return self.search.text()
@@ -322,7 +401,7 @@ class Rail(QWidget):
                 for row in pinned:
                     self._add_rollup_row(row, top, pinned=True)
             if rest:
-                self._add_caption(f"All · by {_SORT_DISPLAY[self._sort]}")
+                self._add_caption(f"All · by {_SORT_DISPLAY[self.current_sort()]}")
                 for row in rest:
                     self._add_rollup_row(row, top, pinned=False)
         lst.blockSignals(False)
@@ -456,14 +535,6 @@ class Rail(QWidget):
         return super().eventFilter(obj, event)
 
     # --------------------------------------------------------------- handlers
-    def _on_sort_clicked(self, button: QToolButton) -> None:
-        key = next(k for k, b in self.sort_buttons.items() if b is button)
-        # buttonClicked fires on a click of the already-checked button too;
-        # re-querying for an unchanged order would be pure waste.
-        if key != self._sort:
-            self._sort = key
-            self.refresh_needed.emit()
-
     def _on_item_clicked(self, item: QListWidgetItem) -> None:
         data = item.data(Qt.UserRole) or {}
         # Captions never get here (Qt.NoItemFlags disables them); the

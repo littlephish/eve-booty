@@ -12,18 +12,23 @@ Control System sample (docs/research/abyssal-stats.md section 1.4) and
 drives the inspector, the badge, the `stat:` and `is:abyssal` chips, the
 sync-time switch, the startup re-import and the per-item fetch button through
 the same wiring, with every expected number computed by hand in the test.
+
+The ship-scoped section after it seeds tests/fit_corpus.py -- eleven ships
+and three stored fits -- and drives the `holds:` and `fit:` chips, their two
+cards, the temporary count column and the inspector's fit diff through the
+same wiring, with every count read off the corpus by hand.
 """
 
 from __future__ import annotations
 
 import csv
-import json
 import re
 
+import fit_corpus
 import pytest
 from conftest import BCS_BODY, BCS_MUTATOR, BCS_SOURCE, BCS_TYPE, FakeESIClient, match_text
 
-from evasset import abyssal, db, omni, queries, sde
+from evasset import abyssal, db, fits, omni, queries, sde, views
 from evasset.config import Settings
 
 QtWidgets = pytest.importorskip("PySide6.QtWidgets")
@@ -37,6 +42,8 @@ from evasset.ui import grouped_model as gm  # noqa: E402
 from evasset.ui import palette, workers  # noqa: E402
 from evasset.ui.abyssal_card import AbyssalCard  # noqa: E402
 from evasset.ui.assets_view import AssetsView  # noqa: E402
+from evasset.ui.fit_card import FitCard  # noqa: E402
+from evasset.ui.holds_card import HoldsCard  # noqa: E402
 from evasset.ui.inspector import InspectorWindow, roll_text  # noqa: E402
 from evasset.ui.main_window import MainWindow  # noqa: E402
 
@@ -129,6 +136,8 @@ def _wired_view(conn):
         v._strip_query,
         v._rolls_query,
         v._window_rolls_query,
+        v._fit_query,
+        v._window_fit_query,
         v._card_query,
         v._card_count_query,
     ):
@@ -429,32 +438,94 @@ def test_copy_list_produces_aggregated_multibuy_lines(view):
 
 
 # ------------------------------------------------------------------ saved views
-def test_saved_views_round_trip_filter_group_by_and_rail_level(view):
+def library(view: AssetsView) -> list[str]:
+    """The names in the view library, in the order the Load card lists them."""
+    return [v.name for v in views.list_views(view.conn)]
+
+
+
+def save_to_slot(view: AssetsView, slot: int) -> views.View:
+    """Put the tab's current posture into the library under the slot's own
+    name, the way the retired Ctrl+digit binding used to; tests that need a
+    slotted view build it through the store now."""
+    with db.transaction(view.conn):
+        stored, _created = views.save_to_slot(view.conn, slot, view._current_state())
+    return stored
+
+def open_save_card(view: AssetsView, app):
+    """Open the Save card through its pill and hand it back.
+
+    The pending events are drained first for card_after_enter's reason: the
+    offscreen platform reports the previous test's destroyed window as the
+    application deactivating, which closes every popup.
+    """
+    app.processEvents()
+    view.save_btn.click()
+    app.processEvents()
+    card = view._cards.get(omni.SAVE_COMMAND)
+    assert card is not None and card.isVisible(), "the Save pill must open the Save card"
+    return card
+
+
+def open_load_card(view: AssetsView, app):
+    """Open the Load card through its pill and hand it back."""
+    app.processEvents()
+    view.load_btn.click()
+    app.processEvents()
+    card = view._cards.get(omni.LOAD_COMMAND)
+    assert card is not None and card.isVisible(), "the Load pill must open the Load card"
+    return card
+
+
+def load_rows(card) -> list:
+    """The row widgets of the Load card's list, top to bottom."""
+    return card.rows()
+
+
+def row_named(card, name: str):
+    rows = load_rows(card)
+    match = next((r for r in rows if r.name_label.text() == name), None)
+    assert match is not None, f"{name!r} is not in {[r.name_label.text() for r in rows]}"
+    return match
+
+
+def select_row(card, name: str) -> None:
+    card.view_list.setCurrentRow(load_rows(card).index(row_named(card, name)))
+
+
+def pill_texts(pills) -> list[str]:
+    return [p.prefix_label.text() + p.value_label.text() for p in pills]
+
+
+def test_saved_views_round_trip_filter_group_by_rail_level_and_rail_sort(view):
     """A saved view is the whole working posture -- filter, grouping, rail
-    level -- and recalling one must restore all three, not just the chips."""
+    level, rail sort -- and recalling one must restore all four, not only
+    the chips.
+
+    A slotted view lives in the named library now, so the digit is a handle
+    on a view called "Slot 2" rather than an anonymous row of its own; the
+    four things live in four columns where a JSON blob used to hold them."""
     view.omnibox.add_chip("owner", "Main")
     set_group(view, "group")
     view.rail.level.setCurrentIndex(LEVEL_KEYS.index("owner"))
-    view._save_view(2)
+    view.rail.sort_buttons["volume"].click()
+    save_to_slot(view, 2)
 
-    stored = view.conn.execute(
-        "SELECT state_json FROM saved_views WHERE slot=2"
-    ).fetchone()
-    assert json.loads(stored["state_json"]) == {
-        "filter": "owner:Main",
-        "group_by": "group",
-        "rail_level": "owner",
-    }
+    stored = views.view_in_slot(view.conn, 2)
+    assert stored is not None and stored.name == "Slot 2"
+    assert stored.state == views.ViewState("owner:Main", "group", "owner", "volume")
 
     view.omnibox.clear()
     set_group(view, "")
     view.rail.level.setCurrentIndex(LEVEL_KEYS.index("location"))
+    view.rail.sort_buttons["value"].click()
 
     view._recall_view(2)
 
     assert view.omnibox.spec().chips == [omni.Chip("owner", "Main")]
     assert view._current_group_key() == "group"
     assert view.rail.current_level() == "owner"
+    assert view.rail.current_sort() == "volume"
     assert len(view.model.rows()) == 3  # the recalled filter really applied
 
 
@@ -465,6 +536,519 @@ def test_recalling_an_empty_slot_changes_nothing(view):
 
     assert view.omnibox.spec().chips == [omni.Chip("owner", "Main")]
     assert "No saved view" in view.footer.text()
+
+
+def test_ctrl_digit_loads_the_view_in_that_slot_from_anywhere_on_the_tab(view, app):
+    """Ctrl+digit is read-only now: it used to save the current view into the
+    slot, so a slip of the hand overwrote a view. It loads instead, from the
+    table and from inside the omnibox alike, and an empty digit only reports."""
+    with db.transaction(view.conn):
+        stored, _ = views.save_view(view.conn, "Main kit", views.ViewState("owner:Main"))
+        views.set_slot(view.conn, stored.view_id, 3)
+    view.show()
+    app.processEvents()
+    view.tree.setFocus()
+    QTest.keyClick(view.tree, Qt.Key_3, Qt.ControlModifier)
+    assert view.omnibox.spec().chips == [omni.Chip("owner", "Main")]
+    assert view.footer.text() == "Loaded view 'Main kit' from slot 3."
+
+    view.omnibox.clear()
+    view.omnibox.edit.setFocus()
+    QTest.keyClick(view.omnibox.edit, Qt.Key_3, Qt.ControlModifier)
+    assert view.omnibox.spec().chips == [omni.Chip("owner", "Main")], "works from the omnibox too"
+
+    QTest.keyClick(view.tree, Qt.Key_7, Qt.ControlModifier)
+    assert view.omnibox.spec().chips == [omni.Chip("owner", "Main")], "an empty digit loads nothing"
+    assert "No saved view in slot 7" in view.footer.text()
+
+
+def test_ctrl_digit_inside_the_open_load_card_loads_through_the_card_and_closes_it(view, app):
+    """Qt's WidgetWithChildrenShortcut check walks up through a Qt.Popup to
+    its parent, so with the Load card up the tab's Ctrl+digit binding won
+    the key: the view loaded and the card stayed open over it showing a
+    diff against the filter that was. The card claims the key instead, and
+    the footer tells the two paths apart -- the card's load names no slot."""
+    with db.transaction(view.conn):
+        stored, _ = views.save_view(view.conn, "Main kit", views.ViewState("owner:Main"))
+        views.set_slot(view.conn, stored.view_id, 3)
+    view.show()
+    app.processEvents()
+    card = open_load_card(view, app)
+    assert card.hasFocus()
+
+    QTest.keyClick(card, Qt.Key_3, Qt.ControlModifier)
+
+    assert view.omnibox.spec().chips == [omni.Chip("owner", "Main")]
+    assert not card.isVisible(), "the card's own handler loaded and closed"
+    assert view.footer.text() == "Loaded view 'Main kit'."
+
+
+def test_saving_over_a_name_replaces_that_view_and_keeps_its_id_and_its_slot(view):
+    """Re-saving a refined view is the common act, so a name collision
+    replaces rather than prompting -- but only the state: the digit the view
+    sits on and its identity in the Load card's list have to survive, or
+    every refinement would knock the view off its own shortcut."""
+    commit_text(view, "owner:Main save:Jita")
+    first = views.find_view(view.conn, "Jita")
+    with db.transaction(view.conn):
+        views.set_slot(view.conn, first.view_id, 4)
+
+    view.omnibox.clear()
+    commit_text(view, "owner:Alt save:jita")
+
+    again = views.find_view(view.conn, "Jita")
+    assert again.view_id == first.view_id and again.slot == 4
+    assert again.name == "Jita", "the stored spelling outlives a lower-case save"
+    assert again.state.filter == "owner:Alt"
+    assert library(view) == ["Jita"], "a case-folded name is the same view, not a second"
+    assert view.footer.text() == "Saved view 'Jita' (replaced)."
+
+
+def test_the_load_command_restores_the_filter_the_grouping_and_the_rail(view):
+    """The whole posture comes back from a name, and it replaces what was
+    there rather than adding to it."""
+    view.omnibox.add_chip("owner", "Main")
+    set_group(view, "location")
+    view.rail.level.setCurrentIndex(LEVEL_KEYS.index("owner"))
+    commit_text(view, 'save:"Jita ships"')
+
+    commit_text(view, "clear")
+    view.omnibox.clear()
+    set_group(view, "")
+    view.rail.level.setCurrentIndex(LEVEL_KEYS.index("location"))
+    view.omnibox.add_chip("cat", "Module")
+
+    commit_text(view, 'load:"Jita ships"')
+
+    assert view.omnibox.spec().chips == [omni.Chip("owner", "Main")], "a load replaces"
+    assert view._current_group_key() == "location"
+    assert view.rail.current_level() == "owner"
+    assert len(view.model.rows()) == 3
+    assert view.footer.text() == "Loaded view 'Jita ships'."
+
+
+def test_an_unknown_load_name_reports_it_and_still_consumes_the_token(view):
+    """A typo must not leave a command in the field: it would fire again on
+    the next Enter, and the second firing would look like a bug in the
+    filter the user was actually typing."""
+    view.omnibox.add_chip("owner", "Main")
+
+    commit_text(view, "load:Nope")
+
+    assert view.footer.text() == "No saved view named 'Nope'."
+    assert view.omnibox.edit.text() == ""
+    assert view.omnibox.spec().chips == [omni.Chip("owner", "Main")], "nothing was loaded"
+
+
+def test_a_quoted_command_is_a_search_and_only_the_first_command_of_a_line_runs(view):
+    """The quotes are the escape hatch -- somebody looking for the literal
+    text "save:x" must not write to the library -- and a line with two
+    commands is a typo far more often than a batch API."""
+    commit_text(view, "save:One save:Two")
+
+    assert library(view) == ["One"], "the second command was consumed, not run"
+
+    commit_text(view, '"save:Three"')
+
+    assert library(view) == ["One"], "a quoted command is text"
+    assert view.omnibox.spec().chips == []
+
+
+# ---------------------------------------------------------------- the two cards
+def test_a_bare_save_command_opens_the_card_with_the_derived_name_selected(view, app):
+    """Enter on `save:` with no name is the empty-request branch: it opens
+    the card rather than saving a nameless view, and the derived label is
+    pre-selected so Enter alone is a whole save and the first keystroke
+    replaces it."""
+    app.processEvents()
+    view.omnibox.add_chip("owner", "Main")
+    commit_text(view, "save:")
+    card = view._cards.get(omni.SAVE_COMMAND)
+    assert card is not None and card.isVisible()
+    assert card.name_edit.text() == "owner Main"
+    assert card.name_edit.hasSelectedText()
+    assert pill_texts(card.pills()) == ["owner:Main"]
+    assert card.status_label.text() == "0 saved views"
+
+    saves = record(card.save_requested)
+    QTest.keyClick(card.name_edit, Qt.Key_Return)
+
+    assert saves == [("owner Main", "owner:Main", None, "", "location", "value")], (
+        "Enter in the name field saves once, with the tab's own posture"
+    )
+    assert not card.isVisible()
+    stored = views.find_view(view.conn, "owner Main")
+    assert stored.state == views.ViewState("owner:Main", "", "location", "value")
+    assert stored.slot is None
+    assert view.footer.text() == "Saved view 'owner Main'."
+
+
+def test_the_save_card_stores_the_trimmed_filter_on_the_chosen_key_and_leaves_the_omnibox(
+    view, app
+):
+    """The card's crosses and key cell are the two things the typed command
+    cannot say. What is stored is the well's line, not the field's; the
+    digit is assigned in the same transaction and comes off the view that
+    held it; and the omnibox itself keeps every chip, since the card was
+    only ever describing the view to save."""
+    with db.transaction(view.conn):
+        alt, _ = views.save_view(view.conn, "Alt kit", views.ViewState("owner:Alt"))
+        views.set_slot(view.conn, alt.view_id, 4)
+    view.omnibox.add_chip("owner", "Main")
+    view.omnibox.add_chip("category", "Module")
+    set_group(view, "group")
+
+    card = open_save_card(view, app)
+    assert pill_texts(card.pills()) == ["owner:Main", "cat:Module"]
+    assert card.status_label.text() == "1 saved view"
+    card.pills()[1].close_btn.click()
+    assert pill_texts(card.pills()) == ["owner:Main"]
+    card.key_cell.pick(4)
+    assert card.conflict_label.text() == "4 is currently “Alt kit” — saving moves it to this view"
+    card.name_edit.setText("Main kit")
+    card.done_btn.click()
+
+    stored = views.find_view(view.conn, "Main kit")
+    assert stored.state == views.ViewState("owner:Main", "group", "location", "value")
+    assert stored.slot == 4
+    assert views.find_view(view.conn, "Alt kit").slot is None, "the digit moved"
+    assert view.footer.text() == "Saved view 'Main kit' to slot 4."
+    assert view.omnibox.spec().chips == [
+        omni.Chip("owner", "Main"), omni.Chip("category", "Module"),
+    ], "the card never edits the live filter"
+
+    card = open_save_card(view, app)
+    assert pill_texts(card.pills()) == ["owner:Main", "cat:Module"], "a reopen starts afresh"
+    assert card.slot() is None
+    card.cancel_btn.click()
+
+
+def test_the_save_cards_posture_controls_store_a_posture_the_tab_is_not_in(view, app):
+    """The controls open on the tab's posture and edit only what the save
+    stores, the crosses' rule for the other three columns: the tab keeps
+    its flat table, location rail and ISK order while the view is saved
+    grouped by owner with the rail on region by volume -- and a load then
+    moves all three, which is the proof the columns travelled."""
+    view.omnibox.add_chip("owner", "Main")
+
+    card = open_save_card(view, app)
+    assert (card.group_by(), card.rail_level(), card.rail_sort()) == ("", "location", "value")
+    assert [card.group_combo.itemText(i) for i in range(card.group_combo.count())] == [
+        view.group_combo.itemText(i) for i in range(view.group_combo.count())
+    ], "the tab's own groupings"
+    card.group_combo.setCurrentIndex(card.group_combo.findData("owner"))
+    card.rail_bar.level.setCurrentIndex(LEVEL_KEYS.index("region"))
+    card.rail_bar.sort_buttons["volume"].click()
+    card.name_edit.setText("By owner")
+    card.done_btn.click()
+
+    stored = views.find_view(view.conn, "By owner")
+    assert stored.state == views.ViewState("owner:Main", "owner", "region", "volume")
+    assert view._current_group_key() is None, "the tab's own grouping is untouched"
+    assert view.rail.current_level() == "location" and view.rail.current_sort() == "value"
+
+    commit_text(view, "clear")
+    view.omnibox.clear()
+    assert view.omnibox.spec().chips == []
+    commit_text(view, 'load:"By owner"')
+
+    assert view.omnibox.spec().chips == [omni.Chip("owner", "Main")]
+    assert view._current_group_key() == "owner"
+    assert view.rail.current_level() == "region"
+    assert view.rail.current_sort() == "volume"
+    assert view.rail.sort_buttons["volume"].isChecked()
+    assert len(view.model.rows()) == 3
+
+
+def test_the_typed_save_command_keeps_saving_the_whole_current_posture(view):
+    """`save:Name` has no card and no controls, so what it stores is the tab
+    as it stands -- the rail's sort included now that a view has a column
+    for it."""
+    view.omnibox.add_chip("owner", "Alt")
+    set_group(view, "location")
+    view.rail.level.setCurrentIndex(LEVEL_KEYS.index("owner"))
+    view.rail.sort_buttons["name"].click()
+
+    commit_text(view, "save:Alphabetical")
+
+    stored = views.find_view(view.conn, "Alphabetical")
+    assert stored.state == views.ViewState("owner:Alt", "location", "owner", "name")
+
+
+def test_a_view_with_no_recorded_sort_leaves_the_rails_sort_alone(view):
+    """A view saved before v8, or imported from a shared line, carries ''
+    for its sort; loading it must not snap the rail back to ISK any more
+    than an empty rail level moves the level."""
+    with db.transaction(view.conn):
+        views.save_view(view.conn, "Old", views.ViewState("owner:Main", "group", "owner", ""))
+        views.import_text(view.conn, "owner:Alt", "Shared")
+    view.rail.sort_buttons["volume"].click()
+    view.rail.level.setCurrentIndex(LEVEL_KEYS.index("region"))
+
+    commit_text(view, "load:Old")
+    assert view.rail.current_level() == "owner", "a recorded level moves the rail"
+    assert view.rail.current_sort() == "volume", "an unrecorded sort does not"
+    assert view.rail.sort_buttons["volume"].isChecked()
+
+    commit_text(view, "load:Shared")
+    assert view.rail.current_level() == "owner" and view.rail.current_sort() == "volume"
+    assert view.omnibox.spec().chips == [omni.Chip("owner", "Alt")]
+
+
+def test_escape_from_the_save_card_writes_nothing(view, app):
+    """Esc is Cancel everywhere else in the tab, and a card that saved on the
+    way out would make Esc the one exception nobody expects."""
+    card = open_save_card(view, app)
+    card.name_edit.setText("Never stored")
+
+    QTest.keyClick(card, Qt.Key_Escape)
+
+    assert not card.isVisible()
+    assert library(view) == []
+
+
+def test_ctrl_s_and_ctrl_l_are_bound_once_and_open_their_cards_from_the_omnibox(
+    view, app
+):
+    """Both sequences must reach the cards from the field people type in, and
+    exactly one binding may exist anywhere: two with a child-covering context
+    made Ctrl+F ambiguous and Qt fired neither (the defect above)."""
+    from PySide6.QtGui import QKeySequence, QShortcut
+
+    for sequence in ("Ctrl+S", "Ctrl+L"):
+        bound = [s for s in view.findChildren(QShortcut) if s.key() == QKeySequence(sequence)]
+        assert len(bound) == 1, f"{sequence} is bound {len(bound)} times; two is a no-op"
+
+    view.show()
+    app.processEvents()
+    view.omnibox.edit.setFocus()
+    app.processEvents()
+    QTest.keyClick(view.omnibox.edit, Qt.Key_S, Qt.ControlModifier)
+    app.processEvents()
+    save_card = view._cards.get(omni.SAVE_COMMAND)
+    assert save_card is not None and save_card.isVisible()
+
+    QTest.keyClick(save_card, Qt.Key_Escape)
+    app.processEvents()
+    QTest.keyClick(view.omnibox.edit, Qt.Key_L, Qt.ControlModifier)
+    app.processEvents()
+    load_card = view._cards.get(omni.LOAD_COMMAND)
+    assert load_card is not None and load_card.isVisible()
+    assert not save_card.isVisible(), "one command card at a time"
+
+
+def test_the_load_card_lists_the_library_and_says_what_a_load_would_replace(view, app):
+    """A load throws the working filter away, so the pane diffs the picked
+    view against it -- and Load view stays disabled until a row is picked,
+    because a list that took focus would make row 0 current and that row
+    is not a choice."""
+    with db.transaction(view.conn):
+        jita, _ = views.save_view(
+            view.conn, "Jita ships", views.ViewState("owner:Main", "location", "owner")
+        )
+        views.set_slot(view.conn, jita.view_id, 1)
+        views.save_view(view.conn, "Alt kit", views.ViewState("owner:Alt"))
+    view.omnibox.add_chip("cat", "Ship")
+
+    card = open_load_card(view, app)
+
+    assert [r.name_label.text() for r in load_rows(card)] == ["Jita ships", "Alt kit"]
+    badges = [r.key_cell.label() for r in load_rows(card)]
+    assert badges == ["1", "–"], "the slotted view leads the list and wears its digit"
+    assert card.selected_view() is None and not card.done_btn.isEnabled()
+    assert card.pane.currentIndex() == 0, "nothing to preview yet"
+    assert card.first_focus() is card, "the list is never focused"
+
+    select_row(card, "Jita ships")
+    assert pill_texts(card.preview_pills()) == ["owner:Main"]
+    assert [(p.sign_label.text(), p.prefix_label.text() + p.value_label.text())
+            for p in card.diff_pills()] == [("-", "cat:Ship"), ("+", "owner:Main")]
+    assert card.hint_label.text() == "Press Ctrl+1 to load"
+    assert card.done_btn.isEnabled()
+
+
+def test_done_loads_the_selected_view_and_cancel_leaves_the_filter_alone(view, app):
+    """Done is the card's only writing exit; every other way out changes
+    nothing, which is what makes the list safe to browse with a filter up."""
+    with db.transaction(view.conn):
+        views.save_view(view.conn, "Alt kit", views.ViewState("owner:Alt", "group", ""))
+    view.omnibox.add_chip("owner", "Main")
+
+    card = open_load_card(view, app)
+    select_row(card, "Alt kit")
+    card.cancel_btn.click()
+
+    assert view.omnibox.spec().chips == [omni.Chip("owner", "Main")], "Cancel loaded nothing"
+
+    card = open_load_card(view, app)
+    select_row(card, "Alt kit")
+    assert card.done_btn.isEnabled()
+    card.done_btn.click()
+
+    assert view.omnibox.spec().chips == [omni.Chip("owner", "Alt")]
+    assert view._current_group_key() == "group"
+    assert items(view) == ["Damage Control II"], "the loaded filter really applied"
+    assert view.footer.text() == "Loaded view 'Alt kit'."
+
+
+def test_the_slot_menu_moves_a_digit_and_the_digit_key_recalls_its_new_holder(view, app):
+    """A digit holds one view, so assigning it takes it off whoever had it --
+    and the proof that the move is real is the key itself, not the badge."""
+    with db.transaction(view.conn):
+        main, _ = views.save_view(view.conn, "Main kit", views.ViewState("owner:Main"))
+        views.set_slot(view.conn, main.view_id, 2)
+        views.save_view(view.conn, "Alt kit", views.ViewState("owner:Alt"))
+
+    card = open_load_card(view, app)
+    cell = row_named(card, "Alt kit").key_cell
+    assert cell.label() == "–"
+    cell.open_menu()
+    assert cell.menu.buttons[2].toolTip() == "Take from “Main kit”"
+    cell.menu.buttons[2].click()
+
+    assert view.footer.text() == "Slot 2: 'Alt kit'."
+    holder = views.view_in_slot(view.conn, 2)
+    assert holder is not None and holder.name == "Alt kit"
+    assert [(r.name_label.text(), r.key_cell.label()) for r in load_rows(card)] == [
+        ("Alt kit", "2"),
+        ("Main kit", "–"),
+    ]
+    select_row(card, "Alt kit")
+    assert card.keycap.text() == "2"
+
+    card.cancel_btn.click()
+    view.show()
+    app.processEvents()
+    view.tree.setFocus()
+    app.processEvents()
+    QTest.keyClick(view.tree, Qt.Key_2, Qt.ControlModifier)
+
+    assert view.omnibox.spec().chips == [omni.Chip("owner", "Alt")]
+    assert view.footer.text() == "Loaded view 'Alt kit' from slot 2."
+
+
+def test_renaming_a_view_to_a_name_already_taken_reverts_the_row_and_says_so(view, app):
+    """The library keys on the name, so two views cannot share one -- and the
+    row has to go back to the stored name by itself, or the card would show a
+    name the database does not have."""
+    with db.transaction(view.conn):
+        views.save_view(view.conn, "Main kit", views.ViewState("owner:Main"))
+        views.save_view(view.conn, "Alt kit", views.ViewState("owner:Alt"))
+
+    card = open_load_card(view, app)
+    select_row(card, "Main kit")
+    card.rename_btn.click()
+    card.name_edit.setText("Alt kit")
+    QTest.keyClick(card.name_edit, Qt.Key_Return)
+
+    assert view.footer.text() == "A view named 'Alt kit' already exists."
+    assert sorted(library(view)) == ["Alt kit", "Main kit"]
+    assert sorted(r.name_label.text() for r in load_rows(card)) == ["Alt kit", "Main kit"]
+    assert card.name_label.text() == "Main kit", "the pane shows the stored name again"
+
+    card.begin_rename()
+    card.name_edit.setText("Home fleet")
+    QTest.keyClick(card.name_edit, Qt.Key_Return)
+
+    assert view.footer.text() == "Renamed to 'Home fleet'."
+    assert sorted(library(view)) == ["Alt kit", "Home fleet"]
+    assert card.name_label.text() == "Home fleet"
+    assert card.selected_view().name == "Home fleet", "the selection survives the re-list"
+    assert view.omnibox.spec().chips == [], "a rename is not a load"
+
+
+def test_the_cross_forgets_a_view_and_frees_the_digit_it_held(view, app):
+    """A slot is a column of the row, so forgetting the view is the only way
+    to free the digit -- and the digit has to report empty afterwards rather
+    than recalling a view that is gone."""
+    with db.transaction(view.conn):
+        kit, _ = views.save_view(view.conn, "Main kit", views.ViewState("owner:Main"))
+        views.set_slot(view.conn, kit.view_id, 5)
+
+    card = open_load_card(view, app)
+    select_row(card, "Main kit")
+    card.delete_btn.click()
+
+    assert view.footer.text() == "Forgot view 'Main kit'."
+    assert library(view) == [] and load_rows(card) == []
+    assert card.selected_view() is None and card.pane.currentIndex() == 0
+    assert views.view_in_slot(view.conn, 5) is None
+
+    view._recall_view(5)
+    assert view.footer.text() == "No saved view in slot 5."
+
+
+def test_the_paste_box_imports_a_shared_line_as_a_view_and_selects_it(view, app):
+    """The other end of Copy as text: a fleetmate's one line becomes a view,
+    named from the line itself and selected so Done loads what was just
+    added. Enter in the paste box adds -- it must never reach the card as
+    Done and load whatever row happened to be selected."""
+    with db.transaction(view.conn):
+        views.save_view(view.conn, "Main kit", views.ViewState("owner:Main"))
+
+    card = open_load_card(view, app)
+    select_row(card, "Main kit")
+    card.paste_edit.setText("cat:Ship -owner:Alt")
+    card.paste_edit.textEdited.emit("cat:Ship -owner:Alt")
+    assert card.import_name_edit.placeholderText() == "cat Ship · -owner Alt"
+    assert card.import_name_edit.text() == "", "the name is optional"
+
+    QTest.keyClick(card.paste_edit, Qt.Key_Return)
+
+    imported = views.find_view(view.conn, "cat Ship · -owner Alt")
+    assert imported is not None and imported.state.filter == "cat:Ship -owner:Alt"
+    assert imported.slot is None, "an import is unslotted"
+    assert view.footer.text() == "Imported view 'cat Ship · -owner Alt'."
+    assert card.selected_view().view_id == imported.view_id
+    assert view.omnibox.spec().chips == [], "Enter in the paste box is not Done"
+    assert card.isVisible(), "and the card stays up to be used"
+
+
+def test_both_pills_stay_visible_while_clear_all_follows_the_filter(view, app):
+    """An unfiltered table is a view worth loading one into, so neither pill
+    hides -- while Clear all keeps its own rule, since there is nothing to
+    clear until a chip exists."""
+    view.show()
+    app.processEvents()
+
+    assert view.save_btn.isVisible() and view.load_btn.isVisible()
+    assert not view.clear_all_btn.isVisible()
+
+    view.omnibox.add_chip("owner", "Main")
+
+    assert view.save_btn.isVisible() and view.load_btn.isVisible()
+    assert view.clear_all_btn.isVisible()
+
+    view.clear_all_btn.click()
+
+    assert view.save_btn.isVisible() and view.load_btn.isVisible()
+    assert not view.clear_all_btn.isVisible()
+
+
+def test_a_saved_filter_naming_an_unknown_chip_kind_recalls_as_bare_text(view, app):
+    """A view can outlive the build that wrote it -- an older release's
+    filter, or a line pasted from a newer one. An unknown prefix degrades to
+    the search it looks like rather than throwing, and nothing opens a card
+    for a kind this build has no card for."""
+    app.processEvents()
+    with db.transaction(view.conn):
+        stale, _ = views.save_view(
+            view.conn, "From the future", views.ViewState("wormhole:C5 owner:Main")
+        )
+        views.set_slot(view.conn, stale.view_id, 6)
+
+    view._recall_view(6)
+    app.processEvents()
+
+    assert view.omnibox.spec() == omni.FilterSpec(
+        text="wormhole:C5", chips=[omni.Chip("owner", "Main")]
+    )
+    # Not merely "no card is up": a recall builds no card at all, so an
+    # unknown prefix cannot reach _card_for and be answered with the wrong
+    # one either.
+    assert view._cards == {}
+    assert view.footer.text() == "Loaded view 'From the future' from slot 6."
+    assert view.state_label.text().endswith("2 filters"), "the text counts as a filter"
 
 
 # ------------------------------------------------------------------- keyboard
@@ -1458,9 +2042,9 @@ def record(signal) -> list:
 def open_card(view: AssetsView, app) -> AbyssalCard:
     """Click the abyssal chip's glyph and hand back the card it opened.
 
-    Qt closes a popup shown in the same event turn that inserted the chip
-    widget it is anchored to, so the pending events are drained first --
-    which is also what happens on a desktop between a keystroke and a click.
+    The pending events are drained first so the glyph is clicked on a chip
+    the layout has placed -- which is also what happens on a desktop between
+    a keystroke and a click.
     """
     app.processEvents()
     widget = next(w for c, w in view.omnibox._chips if c.kind == omni.ABYSSAL_KIND)
@@ -1938,15 +2522,12 @@ def test_a_saved_view_with_the_abyssal_chip_and_a_roll_range_recalls_identically
     assert item_ids(view) == {BCS_OK}
     assert len(view.model.columns()) == len(queries.ASSET_COLUMNS) + 4
 
-    view._save_view(4)
+    save_to_slot(view, 4)
 
-    stored = json.loads(
-        view.conn.execute("SELECT state_json FROM saved_views WHERE slot=4").fetchone()[
-            "state_json"
-        ]
-    )
-    assert stored["filter"] == f'abyssal:"{BCS_NAME}" roll:cpu=40..60'
-    assert omni.parse(stored["filter"]) == spec
+    stored = views.view_in_slot(view.conn, 4)
+    assert stored.name == "Slot 4"
+    assert stored.state.filter == f'abyssal:"{BCS_NAME}" roll:cpu=40..60'
+    assert omni.parse(stored.state.filter) == spec
 
     view.omnibox.clear()
     assert len(view.model.rows()) == 9
@@ -2259,4 +2840,1343 @@ def test_an_abyssal_chip_that_arrives_any_way_but_typing_opens_no_card(abyssal_v
     assert item_ids(view) == ORDINARY_ROWS
     assert requests == [] and view._card is None
 
+
+
+# --------------------------------------------------- ship holds and stored fits
+# The synthetic estate of tests/fit_corpus.py, driven through the same wiring:
+# eleven ships (ten assembled, one packaged stack), three stored fits, and one
+# consumable spread over every counting case. Every figure below is read off
+# that fixture by hand.
+#
+# Antimatter Charge M, per assembled ship, whole ship then cargo alone:
+#   SHIP_EXACT      100 cargo                                    -> 100 / 100
+#   SHIP_PERMUTED   300 cargo + 200 ammo hold + 100 fuel bay
+#                   + 50 loaded in a launcher; 1,000 more sit
+#                     in a crate in the cargo hold, uncounted    -> 650 / 300
+#   SHIP_NO_FIT      40 cargo                                    ->  40 /  40
+#   every other assembled ship                                   ->   0 /   0
+# The 5,000 loose in the hangar belong to no ship and count nowhere.
+AMMO_NAME, PASTE_NAME = fit_corpus.AMMO_NAME, fit_corpus.PASTE_NAME
+DRONE_NAME, FIGHTER_NAME = fit_corpus.DRONE_NAME, fit_corpus.FIGHTER_NAME
+FUEL_NAME = fit_corpus.FUEL_BLOCK_NAME
+# 77 asset rows, less everything sitting in a module slot -- the racks and
+# the charges loaded into them -- which the everyday view hides
+# (omni.hides_fitted).
+CORPUS_STACKS = 26
+AMMO_ABOARD = {
+    fit_corpus.SHIP_EXACT: 100,
+    fit_corpus.SHIP_PERMUTED: 650,
+    fit_corpus.SHIP_NO_FIT: 40,
+}
+# Under 500 rounds aboard: every assembled ship but the loaded Dominix.
+SHORT_OF_AMMO = fit_corpus.ASSEMBLED_SHIPS - {fit_corpus.SHIP_PERMUTED}
+
+# The Ratting fit is 7 modules; these match it, and these Dominixes deviate.
+RATTING_MATCHES = {fit_corpus.SHIP_EXACT, fit_corpus.SHIP_PERMUTED}
+RATTING_DEVIATES = fit_corpus.DOMINIXES - RATTING_MATCHES
+# is:fit reaches every hull that has a fit: the two Ratting Dominixes, the
+# Dominix matching the Solo fit, and the Charon matching Hauling.
+MATCHES_ANY_FIT = RATTING_MATCHES | {fit_corpus.SHIP_SOLO, fit_corpus.SHIP_CHARON}
+# -is:fit stays inside the hulls that have one, so the Solstice is in neither.
+DEVIATES_FROM_ALL = fit_corpus.DOMINIXES - MATCHES_ANY_FIT
+
+# A fit for the hull nobody had written one for: exactly the Solstice's rack,
+# so storing it moves that ship into is:fit.
+SKIRMISH_EFT = """[Solstice, Skirmish]
+
+Focused Pulse Laser
+
+Defensive Core Matrix
+"""
+UNKNOWN_EFT = """[Solstice, Broken]
+
+Quantum Whatsit
+"""
+
+
+@pytest.fixture
+def fit_conn(tmp_path):
+    """A database of its own for the fit corpus: the four-stack estate above
+    shares the Dominix type, and its unfitted hull would read as an eleventh
+    assembled ship in every count below."""
+    conn = db.init(tmp_path / "fits.sqlite")
+    fit_corpus.install(conn)
+    return conn
+
+
+@pytest.fixture
+def fit_view(app, fit_conn):
+    yield from _wired_view(fit_conn)
+
+
+def holds_key(value: str) -> str:
+    """The model key of the count column a holds chip value grows."""
+    term = omni.parse_holds(value)
+    assert term is not None, f"{value!r} does not parse as a holds term"
+    return omni.holds_column_key(term)
+
+
+def open_kind_card(view: AssetsView, app, kind: str):
+    """Click the glyph on the first chip of one kind and hand back its card.
+
+    The pending events are drained first for open_card's reason: the glyph
+    belongs to a chip the layout has placed.
+    """
+    app.processEvents()
+    widget = next(w for c, w in view.omnibox._chips if c.kind == kind)
+    widget.card_btn.click()
+    card = view._cards.get(kind)
+    assert card is not None and card.isVisible(), f"the {kind} glyph must open its card"
+    return card
+
+
+def open_new_card(view: AssetsView, app, kind: str):
+    """Open a card with no chip behind it, the way the Ctrl+F builder does."""
+    app.processEvents()
+    view.omnibox.open_draft()
+    view.omnibox._draft._enter_value_stage(kind, False)
+    card = view._cards.get(kind)
+    assert card is not None and card.isVisible(), f"the builder must open the {kind} card"
+    return card
+
+
+def card_after_enter(view: AssetsView, app, text: str, kind: str):
+    """Commit omnibox text and let the deferred card request run.
+
+    The leftovers of an earlier test's view are drained first: the offscreen
+    platform reports a destroyed window as the application deactivating,
+    which closes every popup (the abyssal Enter test's lesson).
+    """
+    app.processEvents()
+    commit_text(view, text)
+    app.processEvents()
+    card = view._cards.get(kind)
+    assert card is not None and card.isVisible(), f"Enter on {text!r} must open the {kind} card"
+    return card
+
+
+def settle_ship_count(view: AssetsView) -> str:
+    """Fire the open card's debounced count now and read its footer."""
+    view._card_count.flush()
+    assert view._active_card is not None
+    return match_text(view._active_card)
+
+
+def holds_picker(card: HoldsCard) -> list[tuple[str, str]]:
+    """(name, tooltip) per entry of the consumable dropdown; the rendered
+    text is the name itself."""
+    combo = card.type_combo
+    for i in range(combo.count()):
+        assert combo.itemText(i) == combo.itemData(i), "an entry shows its bare name"
+    return [(combo.itemData(i), combo.itemData(i, Qt.ToolTipRole)) for i in range(combo.count())]
+
+
+def fit_rows(card: FitCard) -> list[str]:
+    """The rendered text of each stored-fit line."""
+    return [
+        card.fit_list.itemWidget(card.fit_list.item(i)).findChild(QtWidgets.QLabel).text()
+        for i in range(card.fit_list.count())
+    ]
+
+
+def delete_fit_row(card: FitCard, name: str) -> None:
+    """Click the × on the stored-fit line with this name."""
+    for index in range(card.fit_list.count()):
+        widget = card.fit_list.itemWidget(card.fit_list.item(index))
+        if widget.findChild(QtWidgets.QLabel).text().startswith(f"{name} ·"):
+            widget.findChild(QtWidgets.QToolButton).click()
+            return
+    raise AssertionError(f"no stored fit named {name!r} in the card")
+
+
+def select_fit_row(card: FitCard, name: str) -> None:
+    for index in range(card.fit_list.count()):
+        if card.fit_list.item(index).data(Qt.UserRole + 1)["name"] == name:
+            card.fit_list.setCurrentRow(index)
+            return
+    raise AssertionError(f"no stored fit named {name!r} in the card")
+
+
+def paste_fit(card: FitCard, text: str) -> None:
+    """Type an EFT block into the paste box and let the debounced parse run."""
+    card.paste_edit.setPlainText(text)
+    card._parse_debounce.flush()
+
+
+def fit_lines(inspector) -> list[str]:
+    """The visible lines of the inspector's fit block, verdict first.
+
+    The block itself must be showing: a hidden box whose labels still carry
+    the last ship's verdict would otherwise read as a pass.
+    """
+    assert not inspector.fit_box.isHidden(), "the fit block is hidden"
+    return [inspector.fit_verdict.text()] + [
+        label.text()
+        for label in (inspector.fit_missing, inspector.fit_extra, inspector.fit_short)
+        if not label.isHidden()
+    ]
+
+
+def capture_fit_lookups(view: AssetsView) -> dict:
+    """Hold both hosts' fit-diff lookups so a test delivers each when it
+    chooses -- capture_rolls_lookups for the other pair of per-host streams."""
+    pending: dict[str, tuple] = {}
+
+    def hold(name):
+        return lambda fn, on_done, on_failed=None: pending.__setitem__(name, (fn, on_done))
+
+    view._fit_query.run = hold("panel")
+    view._window_fit_query.run = hold("window")
+    return pending
+
+
+def test_a_holds_chip_narrows_to_ships_and_grows_a_count_column_after_qty(fit_view):
+    """The whole point of the chip: the ships short of ammunition, and the
+    number saying how short. The column lands after Qty with every other
+    column keeping its order, and its cells are the hand-computed totals --
+    the loaded rounds and the specialised holds included, the crate's
+    thousand and the hangar's five thousand not. Nothing that is not an
+    assembled ship survives either polarity of the chip, so the packaged
+    Dominix stack and every module on every rack are gone."""
+    view = fit_view
+    commit_text(view, f'holds:"{AMMO_NAME}"<500')
+
+    assert item_ids(view) == SHORT_OF_AMMO
+    assert fit_corpus.SHIP_PACKAGED not in item_ids(view), "a packaged stack has no holds"
+    assert view.state_label.text() == f"9 of {CORPUS_STACKS} stacks · 1 filter"
+
+    key = holds_key(f"{AMMO_NAME}<500")
+    keys = column_keys(view)
+    base_keys = [k for k, _header in queries.ASSET_COLUMNS]
+    qty = base_keys.index("quantity")
+    assert keys[: qty + 1] == base_keys[: qty + 1]
+    assert keys[qty + 1] == key
+    assert keys[qty + 2 :] == base_keys[qty + 1 :]
+    assert view.model.columns()[qty + 1] == (key, AMMO_NAME)
+    assert view.model.columnCount() == len(queries.ASSET_COLUMNS) + 1
+
+    seen = 0
+    for ship in SHORT_OF_AMMO:
+        index = cell(view, ship, key)
+        expected = AMMO_ABOARD.get(ship, 0)
+        assert index.data(Qt.UserRole) == expected, ship
+        assert index.data(Qt.DisplayRole) == f"{expected:,}"
+        assert index.data(Qt.TextAlignmentRole) == int(Qt.AlignRight | Qt.AlignVCenter)
+        seen += 1
+    assert seen == 9, "every short ship was checked"
+    assert cell(view, fit_corpus.SHIP_EXACT, key).data(Qt.DisplayRole) == "100"
+    assert cell(view, fit_corpus.SHIP_EMPTY, key).data(Qt.DisplayRole) == "0", (
+        "a ship carrying none of it reads 0, not a blank"
+    )
+
+    # A count is nobody's chip kind, so the cell actions are a no-op on it
+    # rather than minting a filter on a key that is not a row column.
+    before = view.omnibox.spec()
+    view.tree.selectionModel().setCurrentIndex(
+        cell(view, fit_corpus.SHIP_EXACT, key), QItemSelectionModel.NoUpdate
+    )
+    view._filter_current_cell(negated=False)
+    view._filter_current_cell(negated=True)
+    assert view.omnibox.spec() == before
+
+    # The column belongs to the chip: taking the chip away takes it too.
+    view.omnibox.clear()
+    assert view.model.columns() == queries.ASSET_COLUMNS
+
+
+def test_the_bay_forms_count_only_their_own_holds(fit_view):
+    """Each bay form is a different question about the same rounds. Cargo
+    sees 300 of the loaded Dominix's 650; fuel sees the ammo hold and the
+    fuel bay together (200 + 100); the 50 loaded in its launcher answer to
+    the whole ship and to no bay at all. The drone bay, the fighter tubes
+    and the fleet hangar are three forms, so the five drones in the bay,
+    the two fighters in a tube and the three drones in the fleet hangar
+    each count once, under their own bay and no other."""
+    view = fit_view
+
+    commit_text(view, f'holds:"cargo/{AMMO_NAME}">=100')
+    cargo_key = holds_key(f"cargo/{AMMO_NAME}>=100")
+    assert item_ids(view) == {fit_corpus.SHIP_EXACT, fit_corpus.SHIP_PERMUTED}
+    assert view.model.columns()[4] == (cargo_key, f"{AMMO_NAME} · cargo")
+    assert cell(view, fit_corpus.SHIP_PERMUTED, cargo_key).data(Qt.UserRole) == 300
+
+    view.omnibox.set_spec(omni.parse(f'holds:"fuel/{AMMO_NAME}">=1'))
+    fuel_key = holds_key(f"fuel/{AMMO_NAME}>=1")
+    assert item_ids(view) == {fit_corpus.SHIP_PERMUTED}
+    assert cell(view, fit_corpus.SHIP_PERMUTED, fuel_key).data(Qt.UserRole) == 300
+
+    view.omnibox.set_spec(omni.parse(f'holds:"drones/{DRONE_NAME}">=1'))
+    drone_key = holds_key(f"drones/{DRONE_NAME}>=1")
+    assert item_ids(view) == {fit_corpus.SHIP_EXACT}
+    assert cell(view, fit_corpus.SHIP_EXACT, drone_key).data(Qt.UserRole) == 5
+
+    view.omnibox.set_spec(omni.parse(f'holds:"drones/{FIGHTER_NAME}">=1'))
+    assert item_ids(view) == set(), "a fighter in a tube is not in the drone bay"
+
+    view.omnibox.set_spec(omni.parse(f'holds:"fighters/{FIGHTER_NAME}">=1'))
+    fighter_key = holds_key(f"fighters/{FIGHTER_NAME}>=1")
+    assert item_ids(view) == {fit_corpus.SHIP_EXACT}, "FighterTube2 rides with the fighter bay"
+    assert view.model.columns()[4] == (fighter_key, f"{FIGHTER_NAME} · fighters")
+    assert cell(view, fit_corpus.SHIP_EXACT, fighter_key).data(Qt.UserRole) == 2
+
+    view.omnibox.set_spec(omni.parse(f'holds:"fleet/{DRONE_NAME}">=1'))
+    fleet_key = holds_key(f"fleet/{DRONE_NAME}>=1")
+    assert item_ids(view) == {fit_corpus.SHIP_EXACT}
+    assert view.model.columns()[4] == (fleet_key, f"{DRONE_NAME} · fleet")
+    assert cell(view, fit_corpus.SHIP_EXACT, fleet_key).data(Qt.UserRole) == 3
+
+    # Several positive holds chips AND, and each keeps a column of its own.
+    view.omnibox.set_spec(
+        omni.parse(f'holds:"{AMMO_NAME}"<500 holds:"cargo/{AMMO_NAME}">=100')
+    )
+    assert item_ids(view) == {fit_corpus.SHIP_EXACT}
+    assert column_keys(view)[4:6] == [holds_key(f"{AMMO_NAME}<500"), cargo_key]
+
+
+def test_a_negated_holds_chip_lists_the_ships_short_and_nothing_else(fit_view):
+    """The complement is taken within the assembled ships, not within the
+    estate: `-holds:"X">=500` answers "which of my ships are short" -- the
+    empty hull among them, since a ship with none of the type counts 0 --
+    and never lets a module, a crate or the loose hangar stack through the
+    way a NOT EXISTS negation would."""
+    view = fit_view
+    commit_text(view, f'-holds:"{AMMO_NAME}">=500')
+
+    assert item_ids(view) == SHORT_OF_AMMO
+    assert fit_corpus.SHIP_EMPTY in item_ids(view), "an empty hull is short of everything"
+    assert fit_corpus.LOOSE_STACK not in item_ids(view)
+    assert fit_corpus.CRATE_ITEM not in item_ids(view)
+    # A negated chip grows no column: the rows are the whole answer.
+    assert view.model.columns() == queries.ASSET_COLUMNS
+
+
+def test_sorting_the_holds_column_orders_by_count_survives_a_reload_and_clears_with_it(
+    fit_view,
+):
+    """The counts sort numerically, not as the text they paint ("40" sorts
+    after "100" alphabetically), the sort is remembered by key so it outlives
+    a reload, and it clears when the chip that grew the column goes rather
+    than landing on whatever column now sits at that index."""
+    view = fit_view
+    commit_text(view, f'holds:"{AMMO_NAME}"<1000')
+    key = holds_key(f"{AMMO_NAME}<1000")
+    column = column_keys(view).index(key)
+    assert item_ids(view) == fit_corpus.ASSEMBLED_SHIPS
+
+    view.tree.header().sectionClicked.emit(column)
+    counts = [view.model.holds_count(r, key) for r in view.model.rows()]
+    assert len(counts) == 10 and counts == sorted(counts), f"ascending by count: {counts}"
+    assert counts[-3:] == [40, 100, 650]
+    assert (view.sorter.key, view.sorter.column) == (key, column)
+
+    view.tree.header().sectionClicked.emit(column)
+    assert [view.model.holds_count(r, key) for r in view.model.rows()][:3] == [650, 100, 40]
+
+    view.reload()
+    assert view.sorter.key == key
+    assert [view.model.holds_count(r, key) for r in view.model.rows()][:3] == [650, 100, 40]
+
+    view.omnibox.clear()
+    assert view.model.columns() == queries.ASSET_COLUMNS
+    assert view.sorter.key is None and view.sorter.column == -1
+    assert view.tree.header().sortIndicatorSection() == -1
+    assert len(view.model.rows()) == CORPUS_STACKS, "the table carries on"
+
+
+def test_export_csv_carries_the_holds_column_and_its_counts(fit_view, tmp_path, monkeypatch):
+    """The export reads the model's live columns, so the count goes out under
+    the consumable's name with the number the cell shows -- the zeroes
+    included, since a ship carrying none of it is an answer, not a blank."""
+    view = fit_view
+    commit_text(view, f'holds:"{AMMO_NAME}"<500')
+    key = holds_key(f"{AMMO_NAME}<500")
+    target = tmp_path / "holds.csv"
+    monkeypatch.setattr(
+        assets_view_module.QFileDialog,
+        "getSaveFileName",
+        staticmethod(lambda *args, **kwargs: (str(target), "CSV files (*.csv)")),
+    )
+
+    view.export_csv()
+
+    with open(target, newline="", encoding="utf-8") as fh:
+        header, *body = list(csv.reader(fh))
+    assert header == [h for _k, h in view.model.columns()]
+    assert header[4] == AMMO_NAME
+    assert len(body) == len(SHORT_OF_AMMO)
+    column = column_keys(view).index(key)
+    exported = {
+        int(body[row_position(view, ship)][column]): ship for ship in SHORT_OF_AMMO
+    }
+    assert sorted(exported) == [0, 40, 100], "the zeroes, the Solstice and the exact match"
+    assert body[row_position(view, fit_corpus.SHIP_EXACT)][column] == "100"
+
+
+def test_holds_columns_are_sized_from_the_text_they_paint_not_the_count_repr(
+    fit_view, monkeypatch
+):
+    """The twin of the roll columns' float-repr test above. A holds cell
+    paints "12,400" and exports 12400, so the sizing pass has to measure
+    holds_cell_text; sized from cell_value the column is a comma short of
+    the number it shows. Unlike the roll case the width alone cannot prove
+    which was measured -- every SDE consumable name is wider than any count
+    that fits a cargo bay, so the header sets the width either way -- so the
+    assertion is on what the pass asked the model for, with the divergence
+    it would otherwise miss pinned alongside it."""
+    view = fit_view
+    commit_text(view, f'holds:"{AMMO_NAME}"<500')
+    key = holds_key(f"{AMMO_NAME}<500")
+    rows = view.model.rows()
+
+    # A four-figure hold is where the two disagree; the corpus' own counts
+    # are all under a thousand, so the divergence is arranged here.
+    view.model.set_holds_counts({key: {fit_corpus.SHIP_EXACT: 12400}})
+    loaded = next(r for r in rows if r["item_id"] == fit_corpus.SHIP_EXACT)
+    assert view.model.holds_cell_text(loaded, key) == "12,400"
+    assert str(view.model.cell_value(loaded, key)) == "12400", "the export's narrower repr"
+
+    asked: list[tuple[str, str]] = []
+    painted, raw = view.model.holds_cell_text, view.model.cell_value
+
+    def record_painted(row, k):
+        asked.append(("painted", k))
+        return painted(row, k)
+
+    def record_raw(row, k):
+        asked.append(("raw", k))
+        return raw(row, k)
+
+    monkeypatch.setattr(view.model, "holds_cell_text", record_painted)
+    monkeypatch.setattr(view.model, "cell_value", record_raw)
+
+    view._size_columns(rows, {key})
+
+    assert asked, "the sizing pass measured something"
+    assert {kind for kind, k in asked if k == key} == {"painted"}
+    assert [k for _kind, k in asked if k != key] == [], "only the fresh column was measured"
+
+    metrics = view.tree.fontMetrics()
+    column = column_keys(view).index(key)
+    widest = max(metrics.horizontalAdvance(painted(row, key)) for row in rows)
+    assert view.tree.header().sectionSize(column) == (
+        max(metrics.horizontalAdvance(AMMO_NAME), widest) + 24
+    )
+
+
+def test_the_holds_card_opens_from_enter_and_from_the_glyph_with_the_estates_consumables(
+    fit_view, app
+):
+    """Typing the chip and pressing Enter is the natural way in, so the card
+    opens on it one turn later, seeded from the chip -- and the glyph reopens
+    it afterwards. The picker is the seeded bay's list: the chip names the
+    cargo hold, so it offers what the cargo holds carry, by name, with the
+    count on the tooltip, the fitted modules absent (a launcher is not a
+    consumable) and the crystal held only in a laser absent too."""
+    view = fit_view
+    card = card_after_enter(view, app, f'holds:"cargo/{AMMO_NAME}"<500', omni.HOLDS_KIND)
+
+    assert isinstance(card, HoldsCard)
+    assert card.type_name() == AMMO_NAME
+    assert card.bay() == "cargo"
+    assert card.op_combo.currentData() == "<"
+    assert card.low_spin.value() == 500
+    assert card.high_spin.isHidden(), "the high field belongs to the range form alone"
+    assert holds_picker(card) == [
+        (AMMO_NAME, "440 in 3 ships"),
+        (PASTE_NAME, "5 in 1 ships"),
+        ("Reinforced Cargo Crate", "1 in 1 ships"),
+        (DRONE_NAME, "2 in 1 ships"),
+    ]
+    listed = [name for name, _tip in holds_picker(card)]
+    assert "Focused Pulse Laser" not in listed and fit_corpus.CRYSTAL_NAME not in listed
+    # The denominator is ships, not assets: every one of the ten assembled
+    # ships carries under 500 rounds in its cargo hold.
+    assert settle_ship_count(view) == "10 of 10 match"
+
+    card.cancel_btn.click()
+    reopened = open_kind_card(view, app, omni.HOLDS_KIND)
+    assert reopened is card and reopened.type_name() == AMMO_NAME
+    card.cancel_btn.click()
+
+
+def test_the_holds_picker_follows_the_bay_and_the_fuel_list_offers_every_fuel(fit_view, app):
+    """A blank card opens on the whole ship, busiest first; each bay click
+    refetches the list for that bay. Fuel, drones and fighters offer what
+    the estate does not hold -- the SDE's fuel blocks and ice products, its
+    drones, its fighters -- since each question is usually "which ship has
+    none", with the held ones leading and the rest by name; picking one of
+    those writes the very chip the grammar would parse from typed text. A
+    name typed before the click stays in the edit across the refill."""
+    view = fit_view
+    card = open_new_card(view, app, omni.HOLDS_KIND)
+    assert card.bay() is None
+    assert [name for name, _tip in holds_picker(card)] == [
+        AMMO_NAME, FUEL_NAME, DRONE_NAME, PASTE_NAME, "Reinforced Cargo Crate",
+        FIGHTER_NAME, fit_corpus.CRYSTAL_NAME,
+    ]
+
+    card.bay_buttons["fuel"].click()
+    assert holds_picker(card) == [
+        (AMMO_NAME, "300 in 1 ships"),
+        (FUEL_NAME, "40 in 1 ships"),
+        (fit_corpus.HEAVY_WATER_NAME, "None aboard the ships in scope"),
+        (fit_corpus.STRONTIUM_NAME, "None aboard the ships in scope"),
+    ]
+    card.bay_buttons["drones"].click()
+    assert holds_picker(card) == [
+        (DRONE_NAME, "5 in 1 ships"),
+        (fit_corpus.SPARE_DRONE_NAME, "None aboard the ships in scope"),
+    ], "the bay's drones, then the SDE's; the fighter in its tube is in neither half"
+    card.bay_buttons["cargo"].click()
+    assert [name for name, _tip in holds_picker(card)] == [
+        AMMO_NAME, PASTE_NAME, "Reinforced Cargo Crate", DRONE_NAME,
+    ]
+
+    card.type_edit.setText(FUEL_NAME)
+    card.bay_buttons["fuel"].click()
+    assert card.type_name() == FUEL_NAME
+    assert card.type_combo.currentIndex() == 1, "re-selected from the fuel list"
+    # The count follows the bay too: the one Solstice burns fuel.
+    assert settle_ship_count(view) == "1 of 10 match"
+
+    card.done_btn.click()
+    assert view.omnibox.spec().chips == [omni.Chip(omni.HOLDS_KIND, f"fuel/{FUEL_NAME}>=1")]
+    assert item_ids(view) == {fit_corpus.SHIP_NO_FIT}
+
+
+def test_the_fighters_and_fleet_bays_list_their_own_holds_and_done_writes_the_bay(
+    fit_view, app
+):
+    """The two bays the drone form used to swallow. Fighters offers the
+    fighter in its tube first and the SDE's other fighter after it, and a
+    pick plus Done writes the fighters/ chip that lists the one carrier;
+    Fleet offers whatever the fleet hangars hold -- the crate and the drones
+    -- because a fleet hangar is a general hold, not a drone bay."""
+    view = fit_view
+    card = open_new_card(view, app, omni.HOLDS_KIND)
+    card.bay_buttons["fighters"].click()
+    assert holds_picker(card) == [
+        (FIGHTER_NAME, "2 in 1 ships"),
+        (fit_corpus.SPARE_FIGHTER_NAME, "None aboard the ships in scope"),
+    ]
+    card.type_combo.setCurrentIndex(0)
+    assert card.type_name() == FIGHTER_NAME
+    assert settle_ship_count(view) == "1 of 10 match"
+    card.done_btn.click()
+    assert view.omnibox.spec().chips == [
+        omni.Chip(omni.HOLDS_KIND, f"fighters/{FIGHTER_NAME}>=1")
+    ]
+    assert item_ids(view) == {fit_corpus.SHIP_EXACT}
+    key = holds_key(f"fighters/{FIGHTER_NAME}>=1")
+    assert view.model.columns()[4] == (key, f"{FIGHTER_NAME} · fighters")
+
+    card = open_kind_card(view, app, omni.HOLDS_KIND)
+    assert card.bay() == "fighters", "seeded from the chip it wrote"
+    card.bay_buttons["fleet"].click()
+    assert holds_picker(card) == [
+        ("Reinforced Cargo Crate", "1 in 1 ships"),
+        (DRONE_NAME, "3 in 1 ships"),
+    ]
+    card.type_combo.setCurrentIndex(1)
+    card.done_btn.click()
+    assert view.omnibox.spec().chips == [omni.Chip(omni.HOLDS_KIND, f"fleet/{DRONE_NAME}>=1")]
+    assert item_ids(view) == {fit_corpus.SHIP_EXACT}
+
+
+def test_holds_card_done_writes_the_exact_chip_and_replaces_only_the_holds_one(fit_view, app):
+    """Done is the one path that applies. The chip it writes is the one the
+    grammar would have parsed from typed text, so a saved view of either
+    recalls the same; a chip of another kind stays exactly where it was, and
+    a second Done replaces the card's own chip rather than ANDing another on.
+    Free text the picker never offered is a valid consumable name, unlike the
+    abyssal card's list."""
+    view = fit_view
+    view.omnibox.set_spec(omni.parse(f'sys:Jita holds:"{AMMO_NAME}"<500'))
+    assert item_ids(view) == SHORT_OF_AMMO
+
+    card = open_kind_card(view, app, omni.HOLDS_KIND)
+    done = record(card.done)
+    card.bay_buttons["cargo"].click()
+    card.op_combo.setCurrentIndex(
+        next(i for i in range(card.op_combo.count()) if card.op_combo.itemData(i) == ">=")
+    )
+    card.low_spin.setValue(100)
+    card.done_btn.click()
+
+    assert done == [([omni.Chip(omni.HOLDS_KIND, f"cargo/{AMMO_NAME}>=100")],)]
+    assert view.omnibox.spec() == omni.FilterSpec(
+        chips=[
+            omni.Chip("system", "Jita"),
+            omni.Chip(omni.HOLDS_KIND, f"cargo/{AMMO_NAME}>=100"),
+        ]
+    )
+    assert item_ids(view) == {fit_corpus.SHIP_EXACT, fit_corpus.SHIP_PERMUTED}
+    assert not card.isVisible()
+
+    card = open_kind_card(view, app, omni.HOLDS_KIND)
+    card.bay_buttons[None].click()
+    card.type_edit.setText(PASTE_NAME)
+    QTest.keyClick(card.type_edit, Qt.Key_Return)
+    assert card.isVisible(), "Enter in the type edit commits the text; it is not Done"
+    card.op_combo.setCurrentIndex(
+        next(i for i in range(card.op_combo.count()) if card.op_combo.itemData(i) == "..")
+    )
+    card.low_spin.setValue(1)
+    card.high_spin.setValue(9)
+    card.done_btn.click()
+
+    assert view.omnibox.spec().chips == [
+        omni.Chip("system", "Jita"),
+        omni.Chip(omni.HOLDS_KIND, f"{PASTE_NAME}=1..9"),
+    ]
+    assert item_ids(view) == {fit_corpus.SHIP_CHARON}, "the only ship carrying paste"
+
+
+def test_a_negated_holds_chip_and_other_kinds_ride_through_the_cards_done(fit_view, app):
+    """The card has no polarity control, so a negated holds chip is not its to
+    rewrite: it seeds from the positive one and Done puts the negated chip
+    back untouched, beside every chip of another kind -- the way a typed
+    `roll:` chip rides through the abyssal card's Done."""
+    view = fit_view
+    view.omnibox.set_spec(
+        omni.parse(f'sys:Jita -holds:"{PASTE_NAME}">=1 holds:"{AMMO_NAME}"<500')
+    )
+    assert item_ids(view) == SHORT_OF_AMMO - {fit_corpus.SHIP_CHARON}
+
+    card = open_kind_card(view, app, omni.HOLDS_KIND)
+    assert card.type_name() == AMMO_NAME, "seeded from the positive chip, not the negated one"
+    card.low_spin.setValue(50)
+    card.done_btn.click()
+
+    assert view.omnibox.spec().chips == [
+        omni.Chip("system", "Jita"),
+        omni.Chip(omni.HOLDS_KIND, f"{PASTE_NAME}>=1", negated=True),
+        omni.Chip(omni.HOLDS_KIND, f"{AMMO_NAME}<50"),
+    ]
+    assert item_ids(view) == SHORT_OF_AMMO - {
+        fit_corpus.SHIP_CHARON, fit_corpus.SHIP_EXACT
+    }
+
+
+def test_cancel_escape_and_an_outside_open_leave_the_holds_filter_as_it_was(fit_view, app):
+    """Every way out but Done reads as Cancel, and opening a second card is
+    one of them: a Qt.Popup closes on the click that opens the next, so the
+    registry hands the count and the writes to the new card while the first
+    changes nothing."""
+    view = fit_view
+    view.omnibox.set_spec(omni.parse(f'holds:"{AMMO_NAME}"<500 fit:"Ratting"'))
+    before = view.omnibox.spec()
+    changes = record(view.omnibox.changed)
+
+    card = open_kind_card(view, app, omni.HOLDS_KIND)
+    cancelled = record(card.cancelled)
+    card.low_spin.setValue(42)
+    card.cancel_btn.click()
+    assert cancelled == [()] and view.omnibox.spec() == before
+
+    card = open_kind_card(view, app, omni.HOLDS_KIND)
+    card.low_spin.setValue(7)
+    QTest.keyClick(card, Qt.Key_Escape)
+    assert cancelled == [(), ()] and view.omnibox.spec() == before
+
+    card = open_kind_card(view, app, omni.HOLDS_KIND)
+    card.low_spin.setValue(3)
+    fit_card = open_kind_card(view, app, omni.FIT_KIND)
+    assert not card.isVisible(), "opening the fit card cancels the holds card"
+    assert cancelled == [(), (), ()]
+    assert view._active_card is fit_card
+    fit_card.cancel_btn.click()
+
+    assert view.omnibox.spec() == before
+    assert changes == [], "nothing on the Cancel paths touched the omnibox"
+
+
+def test_the_draft_builders_holds_and_fit_kinds_open_a_card_without_minting_a_chip(
+    fit_view, app
+):
+    """Neither chip has a bare form worth inserting -- an empty holds chip
+    compares nothing and an empty fit chip names no fit -- so the builder's
+    kind stage hands the request straight to the card and puts nothing in the
+    omnibox until Done."""
+    view = fit_view
+
+    seen = []
+    for kind, klass in ((omni.HOLDS_KIND, HoldsCard), (omni.FIT_KIND, FitCard)):
+        card = open_new_card(view, app, kind)
+        assert isinstance(card, klass)
+        assert view.omnibox.spec().chips == [], f"the {kind} draft minted a chip"
+        assert view.omnibox._draft is None, "the builder closed behind the card"
+        card.cancel_btn.click()
+        seen.append(kind)
+    assert seen == [omni.HOLDS_KIND, omni.FIT_KIND]
+
+    # Seeded blank, the holds card knows no consumable, so Done is unavailable
+    # -- applying an empty chip list would silently delete the user's chip.
+    card = view._cards[omni.HOLDS_KIND]
+    assert card.term() is None and not card.done_btn.isEnabled()
+
+
+def test_a_fit_card_opened_with_no_chip_behind_it_selects_no_fit(fit_view, app):
+    """Pins the contract: `chips()` is empty and Done disabled until a fit is
+    picked. A card that pre-selects on the user's behalf turns "let me look at
+    my stored fits" into a filter on whichever one sorts first."""
+    view = fit_view
+    card = open_new_card(view, app, omni.FIT_KIND)
+
+    assert card.selected_fit() is None
+    assert card.chips() == []
+    assert not card.done_btn.isEnabled()
+
+
+def test_typing_three_card_chips_and_pressing_enter_opens_exactly_one_card(fit_view, app):
+    """Three cards fighting over one Enter would each close the last as an
+    outside click and only the survivor would be seen, so one commit asks for
+    one card: the first card-kind chip in the text. Every chip is still
+    minted."""
+    view = fit_view
+    requests = record(view.omnibox.card_requested)
+    app.processEvents()
+
+    commit_text(view, f'abyssal holds:"{AMMO_NAME}"<5 fit:"Ratting"')
+    app.processEvents()
+
+    assert len(requests) == 1
+    assert requests[0][0] == omni.Chip(omni.ABYSSAL_KIND, "")
+    assert [k for k, c in view._cards.items() if c.isVisible()] == [omni.ABYSSAL_KIND]
+    assert [c.kind for c in view.omnibox.spec().chips] == [
+        omni.ABYSSAL_KIND,
+        omni.HOLDS_KIND,
+        omni.FIT_KIND,
+    ]
+    view._cards[omni.ABYSSAL_KIND].cancel_btn.click()
+
+
+def test_the_fit_card_lists_the_stored_fits_parses_a_paste_refuses_unknowns_and_saves(
+    fit_view, app
+):
+    """The card is the whole store's editor. It lists what is stored, hull
+    first; a paste naming an item the SDE does not know reports it and cannot
+    be saved, because a fit missing a line would call every ship carrying
+    that module deviating; a clean paste saves, appears in the list, and the
+    fit it stores really does decide the chip -- the Solstice nobody had a
+    fit for joins is:fit the moment its rack is stored."""
+    view = fit_view
+    view.omnibox.set_spec(omni.parse("is:fit"))
+    assert item_ids(view) == MATCHES_ANY_FIT
+    assert fit_corpus.SHIP_NO_FIT not in item_ids(view)
+
+    card = open_new_card(view, app, omni.FIT_KIND)
+    assert isinstance(card, FitCard)
+    assert fit_rows(card) == [
+        "Hauling · Charon · 2 modules",
+        "Ratting · Dominix · 7 modules",
+        "Solo · Dominix · 3 modules",
+    ]
+
+    paste_fit(card, UNKNOWN_EFT)
+    assert card.status_label.text() == "Unknown: Quantum Whatsit"
+    assert not card.save_btn.isEnabled(), "an unknown name cannot be stored"
+
+    paste_fit(card, "not a fit at all")
+    assert card.status_label.text() == "No [Hull, Name] header"
+    assert not card.save_btn.isEnabled()
+
+    paste_fit(card, SKIRMISH_EFT)
+    assert card.status_label.text() == "Solstice · 1 module · 1 subsystem"
+    assert card.name_edit.text() == "Skirmish", "the header names the fit"
+    assert card.save_btn.isEnabled()
+
+    card.save_btn.click()
+
+    assert view.footer.text() == "Stored the fit Skirmish."
+    assert fit_rows(card)[-1] == "Skirmish · Solstice · 2 modules"
+    assert card.selected_fit()["name"] == "Skirmish", "the fit just saved is the selection"
+    assert [r["name"] for r in fits.list_fits(view.conn)] == [
+        "Hauling", "Ratting", "Solo", "Skirmish",
+    ]
+
+    card.cancel_btn.click()
+    view.reload()
+    assert item_ids(view) == MATCHES_ANY_FIT | {fit_corpus.SHIP_NO_FIT}
+
+
+def test_the_fit_card_deletes_a_fit_and_the_chip_naming_it_then_matches_nothing(fit_view, app):
+    """Forgetting a fit is one click on its line. The chip that named it is
+    left standing on purpose -- it now matches nothing, which is the honest
+    answer, and removing the user's chip behind their back would be worse."""
+    view = fit_view
+    commit_text(view, 'fit:"Ratting"')
+    assert item_ids(view) == RATTING_MATCHES
+
+    card = open_kind_card(view, app, omni.FIT_KIND)
+    assert card.selected_fit()["name"] == "Ratting", "the chip seeded the selection"
+    delete_fit_row(card, "Ratting")
+
+    assert [r["name"] for r in fits.list_fits(view.conn)] == ["Hauling", "Solo"]
+    assert fit_rows(card) == ["Hauling · Charon · 2 modules", "Solo · Dominix · 3 modules"]
+    assert card.selected_fit() is None and not card.done_btn.isEnabled()
+
+    card.cancel_btn.click()
+    view.reload()
+    assert view.omnibox.spec().chips == [omni.Chip(omni.FIT_KIND, "Ratting")]
+    assert item_ids(view) == set()
+
+
+def test_a_fit_saved_or_deleted_in_the_card_moves_the_rows_without_a_manual_reload(fit_view, app):
+    """The rows answer to the store as much as to the filter. Under
+    fit:"Ratting", pasting a different rack under that name changes which
+    ships match, and forgetting the fit leaves the chip matching nothing;
+    both used to re-list the card and leave the table showing the answer
+    the store no longer gave until something else happened to reload it."""
+    view = fit_view
+    commit_text(view, 'fit:"Ratting"')
+    assert item_ids(view) == RATTING_MATCHES
+
+    card = open_kind_card(view, app, omni.FIT_KIND)
+    paste_fit(card, fit_corpus.SOLO_EFT)
+    card.name_edit.setText("Ratting")
+    card.name_edit.textEdited.emit("Ratting")
+    card.save_btn.click()
+    assert view.footer.text() == "Stored the fit Ratting."
+    assert "Ratting · Dominix · 3 modules" in fit_rows(card), "an edit, not a second Ratting"
+    card.cancel_btn.click()
+
+    assert item_ids(view) == {fit_corpus.SHIP_SOLO}, "the rows followed the replacement rack"
+
+    card = open_kind_card(view, app, omni.FIT_KIND)
+    delete_fit_row(card, "Ratting")
+    card.cancel_btn.click()
+
+    assert view.omnibox.spec().chips == [omni.Chip(omni.FIT_KIND, "Ratting")]
+    assert item_ids(view) == set(), "the chip stands and the rows say it matches nothing"
+
+
+def test_the_inspectors_fit_block_follows_a_fit_deleted_in_the_card(fit_view, app):
+    """The block is diffed against a stored fit, so forgetting that fit has
+    to re-render it at once: the reload the delete now runs re-inspects the
+    open row (_on_rows), and the verdict moves to the closest fit left."""
+    view = fit_view
+    open_inspector(view, fit_corpus.SHIP_EXACT)
+    assert fit_lines(view.inspector) == ["Matches Ratting"]
+
+    card = open_new_card(view, app, omni.FIT_KIND)
+    delete_fit_row(card, "Ratting")
+    card.cancel_btn.click()
+
+    assert panel_open(view) and view._panel_host.row["item_id"] == fit_corpus.SHIP_EXACT
+    assert fit_lines(view.inspector)[0] == "Closest stored fit: Solo"
+    assert view.inspector.fit_note.text() == "Solo · Dominix"
+
+
+def test_fit_card_done_writes_the_polarity_the_radios_show(fit_view, app):
+    """One radio pair rather than two chips: both questions are asked of the
+    same fit and the hull scope is the same either way, so the card owns both
+    polarities and Done rewrites whichever was there."""
+    view = fit_view
+    card = card_after_enter(view, app, 'fit:"Ratting"', omni.FIT_KIND)
+    assert card.match_radio.isChecked() and item_ids(view) == RATTING_MATCHES
+
+    card.deviate_radio.setChecked(True)
+    card.done_btn.click()
+
+    assert view.omnibox.spec().chips == [omni.Chip(omni.FIT_KIND, "Ratting", negated=True)]
+    assert item_ids(view) == RATTING_DEVIATES
+    assert fit_corpus.SHIP_CHARON not in item_ids(view), "a fit says nothing of other hulls"
+    assert fit_corpus.SHIP_PACKAGED not in item_ids(view)
+
+    card = open_kind_card(view, app, omni.FIT_KIND)
+    assert card.deviate_radio.isChecked(), "the negation seeded the radios"
+    assert card.selected_fit()["name"] == "Ratting"
+    card.match_radio.setChecked(True)
+    card.done_btn.click()
+
+    assert view.omnibox.spec().chips == [omni.Chip(omni.FIT_KIND, "Ratting")]
+    assert item_ids(view) == RATTING_MATCHES
+
+
+def test_is_fit_and_its_negation_only_speak_about_hulls_with_a_stored_fit(fit_view):
+    """`is:fit` is "fitted the way some stored fit of this hull says", and the
+    negation is its complement *within the hulls that have one*: the Solstice,
+    which nobody has written a fit for, is in neither answer, and the packaged
+    stack is in neither either."""
+    view = fit_view
+
+    commit_text(view, "is:fit")
+    assert item_ids(view) == MATCHES_ANY_FIT
+    assert fit_corpus.SHIP_SOLO in item_ids(view), "matching a hull's second fit counts"
+
+    view.omnibox.set_spec(omni.parse("-is:fit"))
+    assert item_ids(view) == DEVIATES_FROM_ALL
+    assert fit_corpus.SHIP_NO_FIT not in item_ids(view)
+    assert fit_corpus.SHIP_PACKAGED not in item_ids(view)
+    assert item_ids(view) & MATCHES_ANY_FIT == set(), "the polarities never overlap"
+
+    # Two positive fit chips OR, unlike the ANDing holds ones.
+    view.omnibox.set_spec(omni.parse('fit:"Ratting" fit:"Solo"'))
+    assert item_ids(view) == RATTING_MATCHES | {fit_corpus.SHIP_SOLO}
+
+
+def test_the_inspector_shows_the_fit_diff_for_a_ship_and_hides_it_for_everything_else(
+    fit_view,
+):
+    """The block is for assembled ships whose hull has a stored fit, and for
+    nothing else. A deviating Dominix reports the closest fit by name with the
+    modules missing and the consumables it is short of; a matching one says so
+    with no lines under it; a hull nobody has a fit for, a packaged stack and
+    an ordinary module get no block at all."""
+    view = fit_view
+    inspector = view.inspector
+
+    open_inspector(view, fit_corpus.SHIP_MISSING)
+    assert not inspector.fit_box.isHidden()
+    assert fit_lines(inspector) == [
+        "Closest stored fit: Ratting",
+        "Missing: 1 × Auxiliary Nano Pump",
+        f"Short: {AMMO_NAME} 0 of 100, {DRONE_NAME} 0 of 5",
+    ]
+    assert inspector.fit_extra.isHidden(), "nothing extra on this rack"
+    assert inspector.fit_note.text() == "Ratting · Dominix"
+
+    open_inspector(view, fit_corpus.SHIP_NULL_CATEGORY)
+    assert "Extra: 1 × Unlisted Widget" in fit_lines(inspector), (
+        "a module whose SDE category row is missing is a module, not a vanishing act"
+    )
+
+    open_inspector(view, fit_corpus.SHIP_EXACT)
+    assert fit_lines(inspector) == ["Matches Ratting"], "loaded charges are not modules"
+    assert inspector.fit_missing.isHidden() and inspector.fit_short.isHidden()
+
+    open_inspector(view, fit_corpus.SHIP_NO_FIT)
+    assert inspector.fit_box.isHidden(), "no stored fit for this hull, nothing to say"
+
+    open_inspector(view, fit_corpus.SHIP_PACKAGED)
+    assert inspector.fit_box.isHidden(), "a packaged stack has no rack"
+
+    # The launcher fitted to the exact match is hidden from the everyday
+    # view; is:fitted lists it, and even then a module gets no fit block.
+    view.omnibox.set_spec(omni.parse("is:fitted"))
+    open_inspector(view, 5_100_005)
+    assert inspector.fit_box.isHidden()
+
+
+def test_a_fit_chip_makes_the_inspector_diff_against_the_fit_it_names(fit_view):
+    """Without a chip the block reports the closest fit, which for the Solo
+    Dominix is the Solo fit it matches. A positive `fit:` chip is the user
+    saying which fit they are asking about, so the verdict switches to that
+    one -- and says "Deviates from", a claim the closest-fit wording is not
+    allowed to make. A negated chip names the same fit: the user is looking
+    at the ships that deviate from Ratting, so each is measured against
+    Ratting rather than against whichever stored fit sits closest."""
+    view = fit_view
+    inspector = view.inspector
+
+    open_inspector(view, fit_corpus.SHIP_SOLO)
+    assert fit_lines(inspector) == ["Matches Solo"]
+
+    view.omnibox.set_spec(omni.parse('-fit:"Ratting"'))
+    assert fit_corpus.SHIP_SOLO in item_ids(view)
+    open_inspector(view, fit_corpus.SHIP_SOLO)
+    assert fit_lines(inspector)[0] == "Deviates from Ratting", "a negated chip names its fit"
+
+    # Two positive fit chips OR, so the Solo Dominix is on the table while
+    # the first of them, Ratting, is what the inspector is asked about.
+    view.omnibox.set_spec(omni.parse('fit:"Ratting" fit:"Solo"'))
+    open_inspector(view, fit_corpus.SHIP_SOLO)
+    assert fit_lines(inspector) == [
+        "Deviates from Ratting",
+        "Missing: 3 × Magnetic Field Amplifier, 1 × Medium Armor Repair Unit, "
+        "1 × Rocket Launcher Array",
+        "Extra: 1 × Focused Pulse Laser",
+        f"Short: {AMMO_NAME} 0 of 100, {DRONE_NAME} 0 of 5",
+    ]
+    assert inspector.fit_note.text() == "Ratting · Dominix"
+
+
+def test_a_fit_diff_for_one_host_never_paints_into_the_other(fit_view, fit_conn):
+    """Two ships open at once, each with a lookup in flight. Each result must
+    land in the host that asked, whichever order they arrive in; one shared
+    guard would paint the exact match's verdict under the deviating ship. The
+    same guard drops a result whose host has closed in the meantime."""
+    view = fit_view
+    pending = capture_fit_lookups(view)
+    inspect_in_window(view, row_position(view, fit_corpus.SHIP_EXACT))
+    open_inspector(view, fit_corpus.SHIP_MISSING)
+    panel, window = view.inspector, view.inspector_window.inspector
+    assert set(pending) == {"panel", "window"}
+    loading = "Comparing with the stored fits…"
+    assert panel.fit_verdict.text() == window.fit_verdict.text() == loading
+
+    fetch, deliver = pending["window"]
+    deliver(fetch(fit_conn))
+    assert fit_lines(window) == ["Matches Ratting"]
+    assert panel.fit_verdict.text() == loading, "the panel is still waiting"
+
+    fetch, deliver = pending["panel"]
+    deliver(fetch(fit_conn))
+    assert panel.fit_verdict.text() == "Closest stored fit: Ratting"
+    assert fit_lines(window) == ["Matches Ratting"], "the window kept its own answer"
+
+    open_inspector(view, fit_corpus.SHIP_DUPES)
+    assert panel.fit_verdict.text() == loading
+    fetch, deliver = pending["panel"]
+    view._close_inspector(view._panel_host)
+    deliver(fetch(fit_conn))
+
+    assert not panel_open(view) and view._panel_host.row is None
+    assert panel.fit_verdict.text() == loading, "nothing was painted"
+    assert window_open(view), "closing the panel left the window alone"
+
+
+def compare_action(view: AssetsView, item_id: int):
+    """The row menu's "Compare deviation…" action, or None when the row has
+    no such entry. Read after "View fit…" so the test also pins where the
+    entry sits: right under the action a user already knows."""
+    menu = view._build_context_menu(view.model.index(row_position(view, item_id), COLUMN["item"]))
+    texts = [a.text() for a in menu.actions() if not a.isSeparator()]
+    if "Compare deviation…" not in texts:
+        return None
+    assert texts.index("Compare deviation…") == texts.index("View fit…") + 1
+    return next(a for a in menu.actions() if a.text() == "Compare deviation…")
+
+
+@pytest.fixture
+def inline_compare_queries(fit_conn, monkeypatch):
+    """Run every AsyncQuery created from now on inline on the corpus
+    connection. The comparison window builds its own query after
+    _wired_view has patched the view's, so the class is patched for the
+    windows the tests open; the view's instance-level patches still win."""
+    from evasset.ui.async_query import AsyncQuery
+
+    monkeypatch.setattr(
+        AsyncQuery, "run", lambda self, fn, on_done, on_failed=None: on_done(fn(fit_conn))
+    )
+
+
+def test_compare_deviation_opens_the_window_for_a_deviating_ship(fit_view, inline_compare_queries):
+    """Right-click a Dominix listed under `-fit:"Ratting"` and the action is
+    there, enabled, and opens the window against Ratting -- the closest fit,
+    since a negated chip names nothing -- with the one missing rig and the
+    two stacks the empty hull has none of counted in the headline. Those
+    stacks are drawn under the racks as the Drones and Cargo sections, the
+    ship's zero in red opposite the fit's figure in green, in place of the
+    "Short:" paragraph the window used to end with."""
+    view = fit_view
+    view.omnibox.set_spec(omni.parse('-fit:"Ratting"'))
+    assert fit_corpus.SHIP_MISSING in item_ids(view)
+    action = compare_action(view, fit_corpus.SHIP_MISSING)
+    assert action is not None and action.isEnabled()
+    action.trigger()
+    dialog = view._compare_dialogs[fit_corpus.SHIP_MISSING]
+    assert dialog.isVisible()
+    assert dialog.windowTitle() == "Compare with Ratting"
+    assert dialog.comparison.fit_name == fit_corpus.RATTING and dialog.comparison.named
+    assert dialog.verdict.text() == "1 missing · 2 short"
+    assert dialog.note.text() == "compared with Ratting · Dominix"
+    assert dialog.captions[-2:] == ["Drones", "Cargo"]
+    ship_cargo = [(line, label) for c, line, label in dialog.ship_labels if c == "Cargo"]
+    fit_cargo = [(line, label) for c, line, label in dialog.fit_labels if c == "Cargo"]
+    assert [(line.status, label.text()) for line, label in ship_cargo] == [
+        (fits.SHORT, f"0 × {AMMO_NAME} (of 100)")
+    ]
+    assert [(line.status, label.text()) for line, label in fit_cargo] == [
+        (fits.MISSING, f"100 × {AMMO_NAME}")
+    ]
+    assert palette.delta_hex(False, dialog.palette()) in ship_cargo[0][1].styleSheet()
+    assert palette.delta_hex(True, dialog.palette()) in fit_cargo[0][1].styleSheet()
+    assert not hasattr(dialog, "short_label")
+    dialog.reject()
+
+
+def test_compare_deviation_is_offered_only_while_a_deviation_filter_is_active(fit_view):
+    """The entry answers "how does this ship deviate from the fit I am
+    filtering on", so it belongs to that filter: absent with no fit filter
+    and under a positive `fit:` chip (those rows match, there is nothing to
+    compare), present on the assembled ships listed under `-fit:"…"` and
+    under `-is:fit`, and never on a packaged stack."""
+    view = fit_view
+    assert compare_action(view, fit_corpus.SHIP_MISSING) is None, "no fit filter"
+
+    view.omnibox.set_spec(omni.parse('fit:"Ratting"'))
+    assert fit_corpus.SHIP_EXACT in item_ids(view)
+    assert compare_action(view, fit_corpus.SHIP_EXACT) is None, "a positive chip lists matches"
+
+    view.omnibox.set_spec(omni.parse('-fit:"Ratting"'))
+    assert fit_corpus.SHIP_MISSING in item_ids(view)
+    action = compare_action(view, fit_corpus.SHIP_MISSING)
+    assert action is not None and action.isEnabled()
+    assert fit_corpus.SHIP_PACKAGED not in item_ids(view), "a packaged stack is under neither polarity"
+
+    view.omnibox.set_spec(omni.parse("-is:fit"))
+    assert fit_corpus.SHIP_EXTRA in item_ids(view)
+    action = compare_action(view, fit_corpus.SHIP_EXTRA)
+    assert action is not None and action.isEnabled()
+
+
+def test_the_named_fit_wins_over_the_closest_when_a_fit_chip_is_active(
+    fit_view, inline_compare_queries
+):
+    """Under `-fit:"Ratting"` the Solo Dominix -- which matches Solo, the
+    fit closest to it -- is measured against Ratting, the fit the user is
+    filtering deviations from; the inspector's own Compare… button, which
+    needs no filter, falls back to the closest fit and reports the match.
+    Both go through one window per ship, re-run rather than re-opened."""
+    view = fit_view
+    view.omnibox.set_spec(omni.parse('-fit:"Ratting"'))
+    assert fit_corpus.SHIP_SOLO in item_ids(view)
+    compare_action(view, fit_corpus.SHIP_SOLO).trigger()
+    dialog = view._compare_dialogs[fit_corpus.SHIP_SOLO]
+    assert dialog.windowTitle() == "Compare with Ratting"
+    assert dialog.comparison.named and dialog.verdict.text() == "5 missing · 1 extra · 2 short"
+
+    view.omnibox.set_spec(omni.parse("cat:Ship"))
+    view._open_compare_dialog(view.model.rows()[row_position(view, fit_corpus.SHIP_SOLO)])
+    assert view._compare_dialogs[fit_corpus.SHIP_SOLO] is dialog, "one window per ship"
+    assert dialog.windowTitle() == "Compare with Solo" and dialog.verdict.text() == "Matches"
+    dialog.reject()
+
+
+def test_a_second_compare_reuses_the_window_and_closing_it_forgets_it(
+    fit_view, inline_compare_queries
+):
+    """Two right-clicks on one ship are one window; a right-click on another
+    ship is another. Closing a window takes it out of the registry, so the
+    next compare on that ship builds a fresh one rather than showing a
+    dialog Qt has already torn down."""
+    view = fit_view
+    view.omnibox.set_spec(omni.parse('-fit:"Ratting"'))
+    compare_action(view, fit_corpus.SHIP_MISSING).trigger()
+    compare_action(view, fit_corpus.SHIP_MISSING).trigger()
+    compare_action(view, fit_corpus.SHIP_EXTRA).trigger()
+    assert set(view._compare_dialogs) == {fit_corpus.SHIP_MISSING, fit_corpus.SHIP_EXTRA}
+    first = view._compare_dialogs[fit_corpus.SHIP_MISSING]
+    assert first.isVisible()
+
+    first.reject()
+    assert set(view._compare_dialogs) == {fit_corpus.SHIP_EXTRA}
+    compare_action(view, fit_corpus.SHIP_MISSING).trigger()
+    assert view._compare_dialogs[fit_corpus.SHIP_MISSING] is not first
+    for dialog in list(view._compare_dialogs.values()):
+        dialog.reject()
+    assert view._compare_dialogs == {}
+
+
+def test_the_inspectors_compare_button_opens_the_same_window(fit_view, fit_conn, inline_compare_queries):
+    """The Fit block's button is the second door to the one window: hidden
+    while the block is still comparing and for rows with no block, shown
+    with the verdict, and opening through it registers the same dialog the
+    menu would."""
+    view = fit_view
+    pending = capture_fit_lookups(view)
+    open_inspector(view, fit_corpus.SHIP_MISSING)
+    inspector = view.inspector
+    assert inspector.fit_compare_btn.isHidden(), "nothing to lay side by side yet"
+    fetch, deliver = pending["panel"]
+    deliver(fetch(fit_conn))
+    assert not inspector.fit_compare_btn.isHidden()
+
+    inspector.fit_compare_btn.click()
+    dialog = view._compare_dialogs[fit_corpus.SHIP_MISSING]
+    assert dialog.isVisible() and dialog.windowTitle() == "Compare with Ratting"
+    dialog.reject()
+
+    open_inspector(view, fit_corpus.SHIP_NO_FIT)
+    fetch, deliver = pending["panel"]
+    deliver(fetch(fit_conn))
+    assert inspector.fit_box.isHidden() and inspector.fit_compare_btn.isHidden()
+
+
+def test_a_saved_view_with_a_holds_and_a_negated_fit_chip_recalls_identically(fit_view):
+    """Saved views are grammar text, so the new chips are covered only if
+    to_text writes what parse reads: the bay prefix inside the quotes, the
+    comparison, the negated fit name and `is:fit` all round-trip, and the
+    recalled view filters and grows its column like the original."""
+    view = fit_view
+    spec = omni.parse(f'holds:"cargo/{AMMO_NAME}<500" -fit:"Ratting"')
+    view.omnibox.set_spec(spec)
+    key = holds_key(f"cargo/{AMMO_NAME}<500")
+    assert item_ids(view) == RATTING_DEVIATES
+    assert column_keys(view)[4] == key
+
+    save_to_slot(view, 3)
+
+    stored = views.view_in_slot(view.conn, 3)
+    assert stored.name == "Slot 3"
+    assert stored.state.filter == f'holds:"cargo/{AMMO_NAME}<500" -fit:Ratting'
+    assert omni.parse(stored.state.filter) == spec
+
+    view.omnibox.clear()
+    assert len(view.model.rows()) == CORPUS_STACKS
+    assert view.model.columns() == queries.ASSET_COLUMNS
+
+    view._recall_view(3)
+
+    assert view.omnibox.spec() == spec
+    assert item_ids(view) == RATTING_DEVIATES
+    assert column_keys(view)[4] == key
+
+    flag = omni.FilterSpec(chips=[omni.Chip("is", "fit")])
+    assert flag.to_text() == "is:fit"
+    assert omni.parse(flag.to_text()) == flag
+
+
+def test_the_fit_cards_footer_counts_the_ships_of_the_selected_fits_hull(fit_view, app):
+    """A fit says nothing about any other hull, so "N of TOTAL" counts the
+    assembled ships of the selection's hull: two of the eight Dominixes match
+    Ratting, six deviate, and switching to the Charon's fit switches the
+    denominator to that hull's one ship."""
+    view = fit_view
+    card = card_after_enter(view, app, 'fit:"Ratting"', omni.FIT_KIND)
+    assert settle_ship_count(view) == "2 of 8 match"
+
+    card.deviate_radio.setChecked(True)
+    assert settle_ship_count(view) == "6 of 8 match"
+
+    select_fit_row(card, "Hauling")
+    card.match_radio.setChecked(True)
+    assert settle_ship_count(view) == "1 of 1 match"
+    card.cancel_btn.click()
+
+
+def test_a_card_chip_typed_after_another_chip_on_one_line_still_opens_its_card(fit_view, app):
+    """`cat:Ship abyssal` and `owner:Main save:` once opened nothing: the
+    prefixed chip's label flashed a stray top-level window whose focus round
+    trip Qt read as the application deactivating, and closeAllPopups took
+    the card with it one turn later. Pinned through the real commit path,
+    with the chip and the card request in the same turn, for a filter chip
+    and for a command."""
+    view = fit_view
+    card = card_after_enter(view, app, "cat:Ship abyssal", omni.ABYSSAL_KIND)
+    for _ in range(5):
+        app.processEvents()
+    assert card.isVisible(), "the abyssal card must outlive the chip insertion beside it"
+    card.hide()
+    app.processEvents()
+    save = card_after_enter(view, app, "owner:Main save:", omni.SAVE_COMMAND)
+    for _ in range(5):
+        app.processEvents()
+    assert save.isVisible(), "the Save card must outlive the chip insertion beside it"
+    assert [c.kind for c in view.omnibox.spec().chips] == ["category", "abyssal", "owner"]
+    save.hide()
+
+
+def test_fitted_rows_are_hidden_until_the_filter_is_about_ships_fits_or_that_kind(fit_view):
+    """The corpus's permuted Dominix carries a launcher in a high slot with
+    50 rounds loaded and 300 more in its cargo hold. The everyday view lists
+    the cargo stack and neither the launcher nor the loaded rounds -- fifty
+    fitted ships would otherwise put fifty racks between the hangar rows --
+    and the count agrees with the rows. A filter naming the kind of thing,
+    or is:fitted, brings the fitted rows back, since then they are the
+    answer."""
+    view = fit_view
+    launcher, loaded, cargo = 5_200_005, 5_200_006, 5_200_009
+    shown = item_ids(view)
+    assert cargo in shown and launcher not in shown and loaded not in shown
+    assert view._total_stacks == len(view.model.rows()), "the count is of the rows shown"
+
+    view.omnibox.set_spec(omni.parse(f'owner:"{fit_corpus.PILOT_NAME}"'))
+    shown = item_ids(view)
+    assert cargo in shown and launcher not in shown, "an owner is an everyday filter"
+
+    # A fit: or cat:Ship filter lists ship rows only, so the rule's answer
+    # for those never reaches a fitted row; the filters below can show one.
+    for text, wanted in (
+        ("cat:Charge", loaded), (f'item:"{fit_corpus.AMMO_NAME}"', loaded),
+        ("cat:Module", launcher), ("is:fitted", launcher), ("is:fitted", loaded),
+    ):
+        view.omnibox.set_spec(omni.parse(text))
+        assert wanted in item_ids(view), text
+
+
+def test_the_rail_and_the_empty_hint_follow_the_hide_rule_for_a_bare_word(fit_view):
+    """Typing a word that names only fitted modules once left "0 of N stacks"
+    with no explanation while the rail still counted six hits it had run
+    without the hide rule. Both surfaces read the same query now, and the
+    empty state says what was hidden and how to see it."""
+    view = fit_view
+    view.omnibox.set_spec(omni.parse("Launcher"))
+    assert view.model.rows() == []
+    assert not view.empty_hint.isHidden()
+    assert "fitted row" in view.empty_hint.text() and "is:fitted" in view.empty_hint.text()
+    kinds = [r.get("kind") for r in rail_rows_as_dicts(view)]
+    assert "flip" not in kinds and "row" not in kinds, (
+        "the rail must not list hits the table hides: " + repr(kinds)
+    )
+
+    view.omnibox.set_spec(omni.parse("Launcher is:fitted"))
+    assert view.model.rows(), "is:fitted reveals the launchers the word names"
+    assert view.empty_hint.isHidden()
+    kinds = [r.get("kind") for r in rail_rows_as_dicts(view)]
+    assert "flip" in kinds or "row" in kinds, "and the rail lists where they are"
+
+
+def rail_rows_as_dicts(view) -> list[dict]:
+    """The rail's rows as plain dicts, tolerant of the row shape."""
+    rows = []
+    for index in range(view.rail.rows_list.count()):
+        item = view.rail.rows_list.item(index)
+        data = item.data(Qt.UserRole)
+        if isinstance(data, dict):
+            rows.append(data)
+        else:
+            try:
+                rows.append(dict(data))
+            except Exception:  # noqa: BLE001 - the row payload shape is the rail's own
+                rows.append({})
+    return rows
+
+
+def test_is_unpriced_from_the_strip_lists_the_same_rows_the_badge_counts(fit_view):
+    """The strip's unpriced badge counts the whole estate, fitted modules
+    included; its SHOW button adds is:unpriced, so that chip must not hide
+    the fitted rows or the badge says one number and the table another."""
+    view = fit_view
+    view.omnibox.set_spec(omni.parse("is:unpriced"))
+    shown = item_ids(view)
+    where, params = omni.parse("is:unpriced").where()
+    plain = {r["item_id"] for r in queries.fetch_assets(view.conn, where, params)}
+    assert shown == plain, "no unpriced row is hidden under is:unpriced"
+    assert 5_200_005 in shown, "the unpriced launcher in a slot is listed"
+
+
+def test_done_from_the_second_holds_chips_glyph_keeps_the_first(fit_view, app):
+    """Two holds chips AND. Opening the card from the second chip's glyph
+    once seeded it from the first and Done then dropped the second, so the
+    table widened without anyone asking. The clicked chip seeds its card
+    and Done replaces only that chip."""
+    view = fit_view
+    first = f'holds:"cargo/{fit_corpus.AMMO_NAME}<500"'
+    second = f'holds:"{fit_corpus.AMMO_NAME}<500"'
+    view.omnibox.set_spec(omni.parse(f"{first} {second}"))
+    before = item_ids(view)
+    app.processEvents()
+    chip, widget = [(c, w) for c, w in view.omnibox._chips if c.kind == omni.HOLDS_KIND][1]
+    widget.card_btn.click()
+    card = view._cards[omni.HOLDS_KIND]
+    assert card.isVisible() and card.term().bay is None, "seeded from the clicked chip"
+    card.apply()
+    assert view.omnibox.spec().to_text() == f"{first} {second}"
+    assert item_ids(view) == before
+
+
+def test_a_quoted_command_word_stays_quoted_when_the_field_is_rewritten(fit_view):
+    """`"save:x"` typed in quotes is a search for that text. The commit once
+    wrote the remaining text back bare, so a second Enter saved a view
+    named x. The write-back goes through to_text, which keeps the quotes."""
+    view = fit_view
+    commit_text(view, f'owner:"{fit_corpus.PILOT_NAME}" "save:x"')
+    assert view.omnibox.edit.text() == '"save:x"'
+    commit_text(view, view.omnibox.edit.text())
+    assert views.find_view(view.conn, "x") is None, "the second Enter searched; it did not save"
+
+
+def test_a_footer_notice_outlives_the_reload_it_triggered(fit_view):
+    """A confirmation written before reload() was replaced by the selection
+    sum when the rows landed, so "Loaded view 'X'." was gone before it was
+    read. The notice now holds through exactly one footer refresh."""
+    view = fit_view
+    view._notice("Loaded view 'Probe'.")
+    view._update_footer()
+    assert view.footer.text() == "Loaded view 'Probe'."
+    view._update_footer()
+    assert view.footer.text() != "Loaded view 'Probe'."
 

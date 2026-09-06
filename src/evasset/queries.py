@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from . import abyssal
+from . import abyssal, fitting
 from .config import ASSET_SAFETY_LOCATION_ID
 
 # The station/structure/system a root-level item is sitting in, or the fixed
@@ -20,8 +20,10 @@ LOCATION_EXPR = f"""CASE WHEN a.root_location_id = {ASSET_SAFETY_LOCATION_ID} TH
                         'Unknown location ' || a.root_location_id)
     END"""
 
-# Every asset row, already joined to names, location and price.
-ASSET_ROWS = f"""
+# The container-path CTE ASSET_ROWS prepends. Kept apart from the column
+# list so ASSET_ROWS_LEAN below can be assembled from the same pieces without
+# it.
+_CONTAINER_PATH_CTE = """
 WITH RECURSIVE
 -- Every ancestor of a row that is itself an asset, outermost first, as
 -- "Asset Safety Wrap > L2 HMS Dragoon". The station is deliberately not in it
@@ -74,7 +76,11 @@ container_path(owner_type, owner_id, item_id, path) AS (
         FROM container_walk WHERE path <> ''
     ) WHERE rank = 1
 )
-SELECT
+"""
+
+# The output columns every asset row carries, split around the one column the
+# CTE feeds so the two row sources below share everything else verbatim.
+_ASSET_COLUMNS_HEAD = """
     a.owner_type,
     a.owner_id,
     COALESCE(ch.name, co.name, a.owner_type || ' ' || a.owner_id)          AS owner,
@@ -86,7 +92,11 @@ SELECT
     cat.name                                                               AS category,
     mg.name                                                                AS meta,
     a.quantity,
-    a.location_flag,
+    a.location_flag,"""
+
+# The Container column and the reasoning behind it. Only the full ASSET_ROWS
+# carries it; see ASSET_ROWS_LEAN.
+_CONTAINER_COLUMN = """
     -- What the row is directly inside: a can, a ship, an asset safety wrap.
     -- NULL when it sits in the location itself, so the column is blank for
     -- the common case rather than repeating the station on every row.
@@ -99,7 +109,9 @@ SELECT
     --
     -- The container's custom name wins: "in Ore Can 3" beats "in Station
     -- Container" for anyone trying to find the thing again.
-    cp.path                                                                AS container,
+    cp.path                                                                AS container,"""
+
+_ASSET_COLUMNS_TAIL = f"""
     a.is_singleton,
     a.is_blueprint_copy,
     t.is_dynamic_type                                                      AS is_dynamic_type,
@@ -116,11 +128,18 @@ SELECT
     a.quantity * COALESCE(p.sell_price, 0)                                 AS sell_value,
     COALESCE(t.volume, 0)                                                  AS unit_volume,
     a.quantity * COALESCE(t.volume, 0)                                     AS volume
+"""
+
+_ASSET_JOINS_HEAD = """
 FROM assets a
-JOIN      sde_types      t    ON t.type_id      = a.type_id
+JOIN      sde_types      t    ON t.type_id      = a.type_id"""
+
+_CONTAINER_JOIN = """
 LEFT JOIN container_path cp   ON cp.owner_type  = a.owner_type
                              AND cp.owner_id    = a.owner_id
-                             AND cp.item_id     = a.item_id
+                             AND cp.item_id     = a.item_id"""
+
+_ASSET_JOINS_TAIL = """
 LEFT JOIN sde_groups     g    ON g.group_id     = t.group_id
 LEFT JOIN sde_categories cat  ON cat.category_id = g.category_id
 LEFT JOIN sde_meta_groups mg  ON mg.meta_group_id = t.meta_group_id
@@ -133,6 +152,33 @@ LEFT JOIN sde_regions    reg  ON reg.region_id  = a.region_id
 LEFT JOIN characters     ch   ON a.owner_type = 'character'   AND ch.character_id   = a.owner_id
 LEFT JOIN corporations   co   ON a.owner_type = 'corporation' AND co.corporation_id = a.owner_id
 """
+
+# Every asset row, already joined to names, location, container path and
+# price: what the table fetches.
+ASSET_ROWS = (
+    _CONTAINER_PATH_CTE
+    + "SELECT" + _ASSET_COLUMNS_HEAD + _CONTAINER_COLUMN + _ASSET_COLUMNS_TAIL
+    + _ASSET_JOINS_HEAD + _CONTAINER_JOIN + _ASSET_JOINS_TAIL
+)
+
+# ASSET_ROWS without the container path: the same inner aliases (a, t, g,
+# cat, mg, p, st, sr, rsys, sys, reg, ch, co), so every WHERE the omnibox
+# writes composes with it unchanged, and every output column except
+# `container`. It exists because SQLite materialises the recursive CTE over
+# the whole assets table before the outer WHERE runs, whatever the statement
+# then reads, so a COUNT(*) wrapped around ASSET_ROWS paid for a column it
+# discarded. Measured on 2026-09-05 over a 24k-row synthetic estate, the
+# unfiltered count took 101 ms around ASSET_ROWS and 9 ms around this, a
+# `cat:Ship` count 113 ms against 5 ms, the holds picker's ship-id subquery
+# 112 ms against 15 ms and a rail rollup 125 ms against 25 ms (an audit
+# measured 178-207 ms against 7-20 ms per count at 46k rows), and the holds
+# card runs two such counts per keystroke. The column is left out rather
+# than aliased to NULL so a caller that does read it fails loudly instead of
+# silently showing blanks.
+ASSET_ROWS_LEAN = (
+    "SELECT" + _ASSET_COLUMNS_HEAD + _ASSET_COLUMNS_TAIL
+    + _ASSET_JOINS_HEAD + _ASSET_JOINS_TAIL
+)
 
 ASSET_COLUMNS = [
     ("owner", "Owner"),
@@ -209,6 +255,11 @@ def fetch_assets(conn: sqlite3.Connection, where: str = "", params: tuple = ()) 
     return list(conn.execute(sql, params))
 
 
+def count_assets_sql(where: str = "") -> str:
+    """The statement count_assets runs, exposed so a test can EXPLAIN it."""
+    return f"SELECT COUNT(*) FROM ({ASSET_ROWS_LEAN}{f' WHERE {where}' if where else ''})"
+
+
 def count_assets(conn: sqlite3.Connection, where: str = "", params: tuple = ()) -> int:
     """How many rows fetch_assets would return for the same WHERE.
 
@@ -216,12 +267,14 @@ def count_assets(conn: sqlite3.Connection, where: str = "", params: tuple = ()) 
     move, so it is a COUNT over the same joins rather than a fetch whose
     rows are thrown away: the answer is one integer, and the fetch would
     build the owner, station and price columns of every matching row only
-    to discard them. Wrapping ASSET_ROWS whole, rather than rewriting its
-    joins, keeps the count honest against the table -- the WHERE is the
-    same one the omnibox hands fetch_assets.
+    to discard them. It wraps ASSET_ROWS_LEAN rather than ASSET_ROWS: the
+    joins and aliases are the same, so the WHERE the omnibox hands
+    fetch_assets composes unchanged and the count stays honest against the
+    table, and the only thing left out is the container-path CTE, which a
+    COUNT never reads and which cost more than the rest of the statement
+    put together (see ASSET_ROWS_LEAN).
     """
-    sql = f"SELECT COUNT(*) FROM ({ASSET_ROWS}{f' WHERE {where}' if where else ''})"
-    return int(conn.execute(sql, params).fetchone()[0])
+    return int(conn.execute(count_assets_sql(where), params).fetchone()[0])
 
 
 # Everything sitting directly on a ship: fitted modules and charges, drones,
@@ -255,6 +308,334 @@ def fetch_fit(conn: sqlite3.Connection, ship_item_id: int) -> list[sqlite3.Row]:
     return list(conn.execute(FIT_ROWS, (ship_item_id,)))
 
 
+# ------------------------------------------------------- ship-scoped filters
+# One assembled ship: a singleton row of the SDE's Ship category. The single
+# definition of what the `holds:` and `fit:` chips are about, written against
+# ASSET_ROWS' inner aliases so it composes with everything else the omnibox
+# builds. Both chips carry it in BOTH polarities -- the complement of "ships
+# holding 100 paste" is "ships holding fewer", not "every asset in the
+# estate" -- so it is imported by omni rather than reproduced there.
+SHIP_ROWS_CLAUSE = "(a.is_singleton = 1 AND cat.name = 'Ship')"
+
+
+def count_ships(
+    conn: sqlite3.Connection,
+    where: str = "",
+    params: tuple = (),
+    hull_type_id: int | None = None,
+) -> int:
+    """How many assembled ships a filter leaves -- the holds and fit cards' TOTAL.
+
+    The cards' footer reads "N of TOTAL match", and for a ship-scoped chip
+    the honest denominator is the ships in scope, not every asset row: a
+    card offering to filter 4 of 7,000 assets when the estate holds 12 ships
+    tells the user nothing. The ship clause is ANDed inside the same
+    subquery as the caller's WHERE because both are written against
+    ASSET_ROWS' inner aliases.
+    """
+    clauses = [SHIP_ROWS_CLAUSE]
+    extra: list = []
+    if hull_type_id is not None:
+        clauses.append("a.type_id = ?")
+        extra.append(int(hull_type_id))
+    if where:
+        clauses.append(f"({where})")
+    return count_assets(conn, " AND ".join(clauses), (*extra, *params))
+
+
+def _sql_flags(flags) -> str:
+    """A location_flag tuple as an SQL `IN` list.
+
+    Only fitting.py's own constants ever pass through here -- they are code,
+    not user input -- so quoting them into the statement text is safe and
+    keeps the clause a constant SQLite can plan once.
+    """
+    return ",".join("'" + str(f).replace("'", "''") + "'" for f in flags)
+
+
+# Anything sitting in a module slot -- the fitted modules, rigs and
+# subsystems and the charges loaded into them -- is a row of the assets table
+# like any other, so an estate with fifty fitted ships lists fifty racks of
+# launchers and fifty stacks of ammunition that are not in any hangar and
+# cannot be moved without unfitting. The Assets tab hides them unless the
+# filter is about ships, fits or that very kind of item (omni.hides_fitted);
+# the cargo-hold stacks beside them stay, since those are what a restock
+# reads. "In a slot" is the location flag, the same test fitting.fitted_modules
+# keys on.
+HIDE_FITTED_CLAUSE = f"a.location_flag NOT IN ({_sql_flags(fitting.FITTED_FLAGS)})"
+
+
+# The types a `holds:` chip counts, as an uncorrelated subquery: SQLite
+# evaluates it once per statement rather than once per asset row (the same
+# shape as the display-name subselect in omni's stat: clause). This one
+# string is the seam the later group form swaps -- `holds:"group/Frequency
+# Crystals"` replaces it with an sde_groups lookup and nothing else moves.
+# The case-folded equality is served by idx_types_name_nocase (db.SCHEMA);
+# the BINARY idx_types_name cannot serve it, and without the second index
+# every evaluation was a full scan of sde_types.
+HOLDS_TYPE_IDS = "(SELECT type_id FROM sde_types WHERE name = ? COLLATE NOCASE)"
+
+
+def holds_count_sql(bay: str | None = None) -> str:
+    """A scalar subquery: how many of the named type sit inside this ship.
+
+    Correlated on a.item_id, which idx_assets_direct_loc serves, so the
+    clause costs one index probe per candidate row. Exactly one level deep
+    by decision: a container in the cargo hold has its own item_id as its
+    contents' location_id, so those contents are not counted. That is the
+    honest answer to "can I undock with enough X" -- ammo inside a
+    container is not loadable in space either -- and counting the tree
+    would mean a recursive CTE per row.
+
+    bay is None for the whole ship (every location_flag: cargo, loaded
+    charges on slot flags, the fuel and ammo holds, the drone and fighter
+    bays, the fleet hangar and every specialised hold) or one of
+    fitting.HOLD_BAYS' keys.
+    """
+    bay_filter = ""
+    if bay:
+        bay_filter = f" AND h.location_flag IN ({_sql_flags(fitting.HOLD_BAYS[bay])})"
+    return (
+        "(SELECT COALESCE(SUM(h.quantity), 0) FROM assets h\n"
+        f" WHERE h.location_id = a.item_id AND h.type_id IN {HOLDS_TYPE_IDS}{bay_filter})"
+    )
+
+
+def holds_counts_sql(n_ids: int, bay: str | None = None) -> str:
+    """The grouped statement holds_counts runs per chunk, exposed for its EXPLAIN test.
+
+    The `+` on h.type_id is SQLite's "do not index this term", the same
+    steer FIT_EQUAL documents. Without it, on a database with no
+    sqlite_stat1 rows -- the app runs ANALYZE only after an SDE import, so
+    that is every database between imports -- the planner walked
+    idx_assets_type over the type's every asset and filtered by the ship
+    list afterwards, which is backwards: the visible ships are a few
+    hundred keyed rows while a popular charge sits in thousands of hangar
+    stacks. Measured on 2026-09-05 over 24k rows with 16k stacks of the
+    consumable: 300 visible ships took 1.30 ms without the steer and 0.39
+    ms with it, 1,000 ships 2.91 ms against 1.30 ms (an audit measured 4.3
+    ms against 2.0 ms on its estate). With statistics present the planner
+    already chooses idx_assets_direct_loc and the `+` changes nothing, so
+    its real job is making the plan the same whenever ANALYZE last ran.
+    The column is refreshed on every filter change.
+    """
+    bay_filter = ""
+    if bay:
+        bay_filter = f" AND h.location_flag IN ({_sql_flags(fitting.HOLD_BAYS[bay])})"
+    marks = ",".join("?" * int(n_ids))
+    return f"""SELECT h.location_id AS ship, SUM(h.quantity) AS units
+                FROM assets h
+                WHERE h.location_id IN ({marks})
+                  AND +h.type_id IN {HOLDS_TYPE_IDS}{bay_filter}
+                GROUP BY h.location_id"""
+
+
+def holds_counts(
+    conn: sqlite3.Connection,
+    ship_item_ids,
+    type_name: str,
+    bay: str | None = None,
+) -> dict[int, int]:
+    """{ship item_id: units of type_name aboard} for the temporary count column.
+
+    One grouped query per chunk of ids rather than one scalar subquery per
+    visible row, the same idiom _abyssal_roll_rows uses for the roll cells,
+    and chunked at 900 for the same reason: SQLite's bound-parameter limit
+    is 999 on older builds. A ship with none of the type is absent from the
+    result and reads 0 in the model, so the dictionary stays small on an
+    estate where one consumable sits in three ships out of forty.
+    """
+    ids = sorted({int(i) for i in ship_item_ids})
+    out: dict[int, int] = {}
+    for start in range(0, len(ids), 900):
+        chunk = ids[start:start + 900]
+        rows = conn.execute(holds_counts_sql(len(chunk), bay), (*chunk, type_name))
+        for r in rows:
+            out[int(r["ship"])] = int(r["units"] or 0)
+    return out
+
+
+# The SDE category each SDE-wide bay list is drawn from: Drone (18) for the
+# drone bay and Fighter (87) for the fighter bay. Keyed on the category id
+# rather than the name for the same reason the `holds:` chip keys on flags
+# -- the ids are CCP constants, the names are the SDE's English strings.
+HOLDS_SDE_CATEGORIES: dict[str, int] = {"drones": 18, "fighters": 87}
+
+# The SDE groups every fuel a ship can burn is filed under, by name: "Fuel
+# Block" (the four racial blocks) and "Ice Product" (the isotopes, heavy
+# water, liquid ozone and strontium clathrates). Looked up in the imported
+# SDE at query time rather than pinned to group ids, because the two ids
+# were never verified against a live import and one wrong constant would
+# silently list nothing.
+HOLDS_FUEL_GROUPS: tuple[str, ...] = ("Fuel Block", "Ice Product")
+
+
+def held_type_counts(
+    conn: sqlite3.Connection,
+    where: str = "",
+    params: tuple = (),
+    bay: str | None = None,
+) -> list[sqlite3.Row]:
+    """The types the holds picker offers for one bay, faceted by the filter.
+
+    Rows of (type_id, name, units, ships, owned). bay is None for the whole
+    ship or one of fitting.HOLD_BAYS' keys, and each answers a different
+    question:
+
+    - None lists every consumable sitting anywhere directly inside the
+      filtered assembled ships, busiest first. "Consumable" is everything
+      that is not a fitted module: a row on a hold flag, or one on a slot
+      flag whose category is Charge -- ammo loaded in a launcher is exactly
+      the thing someone counts before undocking, while the launcher is not.
+    - "cargo" lists the types on the cargo flag alone: the ammo, paste and
+      boosters in the cargo holds. A charge held only in a launcher is not
+      there, and neither is the fuel.
+    - "fuel" lists every fuel there is to choose from, owned or not -- the
+      SDE's fuel blocks and ice products (HOLDS_FUEL_GROUPS) -- plus
+      whatever actually sits on the fuel bay and ammo hold flags. The
+      question a fuel chip asks is most often about a ship holding none,
+      so a list drawn from the estate alone would leave out the very fuel
+      the pilot is about to look for.
+    - "drones" and "fighters" follow the fuel rule for the same reason:
+      every published type of the SDE category (HOLDS_SDE_CATEGORIES), plus
+      whatever actually sits in the drone bay, or in the fighter bay and
+      tubes. A drone in a cargo hold is in neither list, matching how the
+      two forms count.
+    - "fleet" lists whatever sits in the fleet hangar, of any category: a
+      fleet hangar is a general hold, so a crate there is as fair a question
+      as a drone.
+
+    The three lists that mix the estate with the SDE (fuel, drones,
+    fighters) put the types the ships in scope actually hold first, busiest
+    first, and every other SDE type after them in name order -- a picker
+    over a few hundred drones would otherwise bury the five the estate flies
+    among the ones it never has. `owned` tells the two halves apart: 1 for a
+    type at least one ship in scope holds in that bay, 0 for an SDE entry
+    nobody holds. The other lists are ordered by name (cargo, fleet) or by
+    units held (the whole ship), and every row of them is owned.
+
+    The WHERE is written against ASSET_ROWS' inner aliases and injected
+    inside the subquery like abyssal_type_counts does, so the picker
+    facets by every filter except the holds chip the card is about to
+    rewrite; the SDE halves are unfaceted by nature, and no facet may ever
+    drop a published type from them.
+
+    Contents of a container inside a ship are excluded by construction:
+    their location_id is the container's, not the ship's -- the same
+    one-level scope holds_count_sql counts by.
+    """
+    ship_where = SHIP_ROWS_CLAUSE + (f" AND ({where})" if where else "")
+    if bay is None:
+        aboard = (
+            f"(COALESCE(h.location_flag, '') NOT IN ({_sql_flags(fitting.FITTED_FLAGS)})"
+            f" OR COALESCE(hc.name, '') = '{fitting.CHARGE_CATEGORY}')"
+        )
+    else:
+        aboard = f"h.location_flag IN ({_sql_flags(fitting.HOLD_BAYS[bay])})"
+    held = f"""
+        SELECT h.type_id                      AS type_id,
+               ht.name                        AS name,
+               SUM(h.quantity)                AS units,
+               COUNT(DISTINCT h.location_id)  AS ships,
+               1                              AS owned
+        FROM assets h
+        JOIN      sde_types      ht ON ht.type_id      = h.type_id
+        LEFT JOIN sde_groups     hg ON hg.group_id     = ht.group_id
+        LEFT JOIN sde_categories hc ON hc.category_id  = hg.category_id
+        WHERE h.location_id IN (SELECT r.item_id
+                                FROM ({ASSET_ROWS_LEAN} WHERE {ship_where}) r)
+          AND {aboard}
+        GROUP BY h.type_id, ht.name
+    """
+    if bay is None:
+        return list(conn.execute(f"{held} ORDER BY units DESC, name COLLATE NOCASE", params))
+    params = tuple(params)
+    sde_half = ""
+    if bay == "fuel":
+        marks = ",".join("?" * len(HOLDS_FUEL_GROUPS))
+        sde_half = f"g.name IN ({marks})"
+        params = (*params, *HOLDS_FUEL_GROUPS)
+    elif bay in HOLDS_SDE_CATEGORIES:
+        sde_half = "g.category_id = ?"
+        params = (*params, HOLDS_SDE_CATEGORIES[bay])
+    if not sde_half:
+        return list(conn.execute(f"SELECT * FROM ({held}) ORDER BY name COLLATE NOCASE", params))
+    # A type can arrive from both halves (held, and in the SDE category); the
+    # GROUP BY folds the pair into one row that keeps the held count and the
+    # owned flag.
+    merged = f"""
+        SELECT type_id, name, SUM(units) AS units, SUM(ships) AS ships,
+               MAX(owned) AS owned
+        FROM ({held}
+              UNION ALL
+              SELECT t.type_id, t.name, 0, 0, 0
+              FROM sde_types t
+              JOIN sde_groups g ON g.group_id = t.group_id
+              WHERE {sde_half} AND t.published = 1)
+        GROUP BY type_id, name
+    """
+    return list(conn.execute(
+        f"SELECT * FROM ({merged}) ORDER BY owned DESC, units DESC, name COLLATE NOCASE",
+        params,
+    ))
+
+
+# The hull scope of a `fit:` chip: a fit only ever speaks about ships of its
+# own hull, in both polarities, so `-fit:"Ratting"` lists the deviating
+# Dominixes and says nothing about anything else afloat.
+FIT_HULL = "f.hull_type_id = a.type_id"
+
+# Does this ship's fitted rack equal this fit's module multiset? Written as
+# two NOT EXISTS rather than one comparison because SQL has no multiset
+# equality: the first direction walks the ship's own types and catches
+# extras and wrong counts, the second walks the fit's and catches the ones
+# missing entirely. Loaded charges share their module's slot flag and are
+# excluded by category; a row whose category row is missing counts as a
+# module (COALESCE to ''), because silently dropping it would let an
+# unimportable SDE turn a deviating ship into a matching one.
+#
+# Every inner reference is keyed: fm on idx_assets_direct_loc, fi on
+# fit_items' primary key. Pinned by an EXPLAIN test, because the clause is
+# correlated per (ship, fit) pair and one scan inside it would be a scan per
+# ship.
+#
+# This departs from the plan's FIT_EQUAL text, which has no `+` on
+# fm.type_id. The `+` on fm.type_id in the second direction is not a typo: it is
+# SQLite's "do not use an index for this term". Without it the planner
+# preferred idx_assets_type there and probed every asset of the module's
+# type once per (ship, fit item) pair -- measured 1,583 ms against a 64 ms
+# unfiltered fetch over 24k rows and 2,500 hulls on 2026-09-05, versus 30 ms
+# with the `+` forcing the location_id probe the correlation actually wants.
+# The alternative, a compound assets(location_id, type_id) index, measured
+# the same 26 ms but costs an index on the estate's busiest table for one
+# clause.
+FIT_EQUAL = f"""(NOT EXISTS (
+    SELECT 1 FROM assets fm
+    JOIN sde_types fmt ON fmt.type_id = fm.type_id
+    LEFT JOIN sde_groups fmg ON fmg.group_id = fmt.group_id
+    LEFT JOIN sde_categories fmc ON fmc.category_id = fmg.category_id
+    WHERE fm.location_id = a.item_id
+      AND fm.location_flag IN ({_sql_flags(fitting.FITTED_FLAGS)})
+      AND COALESCE(fmc.name, '') <> '{fitting.CHARGE_CATEGORY}'
+    GROUP BY fm.type_id
+    HAVING SUM(fm.quantity) <> COALESCE((
+        SELECT SUM(fi.quantity) FROM fit_items fi
+        WHERE fi.fit_id = f.fit_id AND fi.type_id = fm.type_id
+          AND fi.slot_kind IN ('module','rig','subsystem')), 0))
+ AND NOT EXISTS (
+    SELECT 1 FROM fit_items fi
+    WHERE fi.fit_id = f.fit_id AND fi.slot_kind IN ('module','rig','subsystem')
+    GROUP BY fi.type_id
+    HAVING SUM(fi.quantity) <> COALESCE((
+        SELECT SUM(fm.quantity) FROM assets fm
+        JOIN sde_types fmt ON fmt.type_id = fm.type_id
+        LEFT JOIN sde_groups fmg ON fmg.group_id = fmt.group_id
+        LEFT JOIN sde_categories fmc ON fmc.category_id = fmg.category_id
+        WHERE fm.location_id = a.item_id AND +fm.type_id = fi.type_id
+          AND fm.location_flag IN ({_sql_flags(fitting.FITTED_FLAGS)})
+          AND COALESCE(fmc.name, '') <> '{fitting.CHARGE_CATEGORY}'), 0)))"""
+
+
 def group_names(
     conn: sqlite3.Connection, level: str, where: str = "", params: tuple = ()
 ) -> list[str]:
@@ -272,7 +653,7 @@ def group_names(
     col = _LEVEL_COLUMN.get(level, "location")
     sql = f"""
         SELECT DISTINCT {col} AS label
-        FROM ({ASSET_ROWS} {f"WHERE {where}" if where else ""})
+        FROM ({ASSET_ROWS_LEAN} {f"WHERE {where}" if where else ""})
         WHERE label IS NOT NULL
         ORDER BY label COLLATE NOCASE
     """
@@ -281,7 +662,9 @@ def group_names(
 
 # Level key -> ASSET_ROWS output column, shared by group_names, rail_rollups
 # and where_is_item so all three agree on what each level is labelled by.
-# "group" maps to "grp" because ASSET_ROWS has to dodge the SQL keyword.
+# "group" maps to "grp" because ASSET_ROWS has to dodge the SQL keyword. None
+# of the levels is the container path, which is what lets all three run on
+# ASSET_ROWS_LEAN.
 _LEVEL_COLUMN = {
     "location": "location",
     "system": "system",
@@ -329,7 +712,7 @@ def rail_rollups(
                SUM(volume)   AS volume,
                SUM(buy_value)  AS buy_value,
                SUM(sell_value) AS sell_value
-        FROM ({ASSET_ROWS} {f"WHERE {where}" if where else ""})
+        FROM ({ASSET_ROWS_LEAN} {f"WHERE {where}" if where else ""})
         WHERE label IS NOT NULL
         GROUP BY label
         ORDER BY {order}
@@ -349,7 +732,7 @@ def where_is_item(
     col = _LEVEL_COLUMN.get(level, "location")
     sql = f"""
         SELECT {col} AS label, SUM(quantity) AS quantity
-        FROM ({ASSET_ROWS} {f"WHERE {where}" if where else ""})
+        FROM ({ASSET_ROWS_LEAN} {f"WHERE {where}" if where else ""})
         WHERE label IS NOT NULL
         GROUP BY label
         ORDER BY quantity DESC
@@ -991,7 +1374,7 @@ def abyssal_type_counts(
                r.item                                              AS name,
                COUNT(*)                                            AS items,
                SUM(CASE WHEN i.status = '{abyssal.STATUS_OK}' THEN 1 ELSE 0 END) AS fetched
-        FROM ({ASSET_ROWS} {f"WHERE {where}" if where else ""}) r
+        FROM ({ASSET_ROWS_LEAN} {f"WHERE {where}" if where else ""}) r
         LEFT JOIN abyssal_items i ON i.item_id = r.item_id
         WHERE r.is_dynamic_type = 1
         GROUP BY r.type_id, r.item

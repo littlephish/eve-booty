@@ -52,6 +52,13 @@ ROLL_QUALITY_ROLE = Qt.UserRole + 7
 ROLL_MEAN_KEY = "roll"
 _ROLL_PREFIX = "roll:"
 
+# The dynamic holds columns, on the same footing: one per positive holds
+# chip, keyed ``holds:<bay>/<type name>`` by omni.holds_column_key, with the
+# counts fed in by set_holds_counts. A count is not a row column either --
+# it is a per-ship number the view queried alongside the rows -- so the model
+# serves it from its own cache exactly as it does a roll cell.
+HOLDS_PREFIX = "holds:"
+
 
 def roll_key(attribute_id: int) -> str:
     return f"{_ROLL_PREFIX}{attribute_id}"
@@ -59,6 +66,10 @@ def roll_key(attribute_id: int) -> str:
 
 def is_roll_key(key: str) -> bool:
     return key == ROLL_MEAN_KEY or key.startswith(_ROLL_PREFIX)
+
+
+def is_holds_key(key: str) -> bool:
+    return key.startswith(HOLDS_PREFIX)
 
 
 # The two columns that carry heat tint, staleness and price badges.
@@ -173,6 +184,10 @@ class GroupedAssetsModel(QAbstractItemModel):
         # rule as the summaries: survives set_rows, replaced per reload.
         self._cells: dict[int, dict[int, tuple]] = {}
         self._units: dict[int, tuple[int | None, str | None]] = {}
+        # column key -> {ship item_id: count} behind the holds columns. Same
+        # lifetime rule as the roll cells: replaced per reload, survives the
+        # regroup that re-buckets the same rows.
+        self._holds: dict[str, dict[int, int]] = {}
 
     # ---- data plumbing
     def set_abyssal_summaries(self, summaries: dict[int, str]) -> None:
@@ -199,6 +214,16 @@ class GroupedAssetsModel(QAbstractItemModel):
             self._units = {
                 int(a["attribute_id"]): (a.get("unit_id"), a.get("unit")) for a in attributes
             }
+
+    def set_holds_counts(self, counts: dict[str, dict[int, int]]) -> None:
+        """Replace the holds columns' counts.
+
+        Keyed by column key then by the ship's item_id (queries.holds_counts'
+        shape). Called before set_rows on every reload like the roll cells; a
+        ship the query did not name holds none of the type and reads 0, which
+        is a real answer rather than a blank.
+        """
+        self._holds = {key: dict(rows) for key, rows in counts.items()}
 
     def columns(self) -> list[tuple[str, str]]:
         """The (key, header) columns currently served, extras included. The
@@ -339,6 +364,9 @@ class GroupedAssetsModel(QAbstractItemModel):
         if is_roll_key(key):
             return self._roll_data(row, key, role)
 
+        if is_holds_key(key):
+            return self._holds_data(row, key, role)
+
         if role in (
             HEAT_ROLE, PRICE_AGE_ROLE, PRICE_BADGE_ROLE, ABYSSAL_SUMMARY_ROLE,
             Qt.BackgroundRole, Qt.ToolTipRole,
@@ -401,11 +429,41 @@ class GroupedAssetsModel(QAbstractItemModel):
             return None, None
         return pair[0], pair[1]
 
+    def holds_count(self, row, key: str) -> int:
+        """How many of the column's consumable this ship carries.
+
+        0 for a ship the query did not name, and for every non-ship row,
+        since the chip that grows the column already restricts the table to
+        ships.
+        """
+        return self._holds.get(key, {}).get(_row_get(row, "item_id"), 0)
+
+    def holds_cell_text(self, row, key: str) -> str:
+        """The text a holds column shows, which is what column sizing must measure.
+
+        A bare int is narrower than the grouped "12,400" painted.
+        """
+        return self._holds_data(row, key, Qt.DisplayRole)
+
+    def _holds_data(self, row, key: str, role):
+        if role == Qt.DisplayRole:
+            return fmt_num(self.holds_count(row, key))
+        if role == Qt.UserRole:
+            return self.holds_count(row, key)
+        if role == Qt.TextAlignmentRole:
+            return int(Qt.AlignRight | Qt.AlignVCenter)
+        return None
+
     def cell_value(self, row, key: str):
-        """The raw value a column holds for a row, roll columns included --
-        what a CSV export writes, since a roll cell is not a row column. The
-        Roll column exports as the percent it displays (80.4), not the 0..1
-        fraction it sorts by, so the spreadsheet reads like the table."""
+        """The raw value a column holds for a row, the dynamic columns included.
+
+        What a CSV export writes, since neither a roll cell nor a holds count
+        is a row column. The Roll column exports as the percent it displays
+        (80.4), not the 0..1 fraction it sorts by, so the spreadsheet reads
+        like the table.
+        """
+        if is_holds_key(key):
+            return self.holds_count(row, key)
         if key == ROLL_MEAN_KEY:
             mean = self.roll_cell(row, key)[0]
             return None if mean is None else round(mean * 100, 1)
@@ -520,6 +578,16 @@ class GroupedAssetsModel(QAbstractItemModel):
                 return [r for _v, r in ranked] + [r for v, r in keyed if v is None]
 
             self._reorder(arrange)
+            return
+        if is_holds_key(key):
+            # Numeric, with no unranked tail: every ship has a count, and a
+            # ship carrying none of the type is a 0 that belongs at the
+            # bottom of an ascending sort rather than after it.
+            self._reorder(
+                lambda rows: sorted(
+                    rows, key=lambda r: self.holds_count(r, key), reverse=reverse
+                )
+            )
             return
         if key in NUMERIC_COLUMNS:
             def sort_key(row):

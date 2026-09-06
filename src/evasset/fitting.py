@@ -68,6 +68,73 @@ _FLAG_TO_GROUP = {flag: label for label, flags in _ALL_GROUPS for flag in flags}
 _GROUP_ORDER = [label for label, _ in _ALL_GROUPS]
 _SLOT_LABELS = {label for label, _ in _SLOT_GROUPS}
 
+# The five racks in the order the fit dialog and the comparison window show
+# them, high to low, and the rack a fitted row's flag belongs to -- the
+# comparison in fits.compare groups a ship's modules by these labels so its
+# racks line up with the ones read out of a stored fit's EFT text.
+RACK_ORDER: tuple[str, ...] = tuple(label for label, _ in _SLOT_GROUPS)
+RACK_OF_FLAG: dict[str, str] = {
+    flag: label for label, flags in _SLOT_GROUPS for flag in flags
+}
+
+
+def _group_flags(*labels: str) -> tuple[str, ...]:
+    """The location_flag values of the named groups above, in their order.
+
+    Derived rather than retyped so the constants below and the dialog's own
+    grouping can never disagree about which flag belongs where -- a fighter
+    tube added to "Fighter bay" reaches the `holds:fighters/` form for free.
+    """
+    by_label = dict(_ALL_GROUPS)
+    return tuple(flag for label in labels for flag in by_label[label])
+
+
+# The flags a fitted module or rig sits on: the whole slot-rack vocabulary,
+# and the one definition of "fitted" shared between fitted_modules here and
+# the multiset equality in queries.FIT_EQUAL. A charge loaded into a module
+# shares the module's slot flag, so both sides also have to exclude the
+# Charge category -- see CHARGE_CATEGORY below.
+FITTED_FLAGS: tuple[str, ...] = _group_flags(*(label for label, _ in _SLOT_GROUPS))
+
+# The five bay forms of the `holds:` chip. Loaded charges are deliberately
+# in none of them: they sit on a slot flag, so they count towards the
+# whole-ship total and towards no bay. The ammo hold rides with the fuel bay
+# and the fighter tubes with the fighter bay because that is how a pilot
+# thinks of them, and because _HOLD_GROUPS already groups the tubes there.
+# The drone bay, the fighter bay and the fleet hangar are three bays rather
+# than one because they are three different questions: "which carriers have
+# fighters loaded" and "which ships have a fleet hangar full of drones" both
+# went unanswerable while the drone form summed all three.
+CARGO_FLAGS: tuple[str, ...] = _group_flags("Cargo hold")
+FUEL_FLAGS: tuple[str, ...] = _group_flags("Fuel bay", "Ammo hold")
+DRONE_BAY_FLAGS: tuple[str, ...] = _group_flags("Drone bay")
+FIGHTER_FLAGS: tuple[str, ...] = _group_flags("Fighter bay")
+FLEET_HANGAR_FLAGS: tuple[str, ...] = _group_flags("Fleet hangar")
+
+# Everything that launches from anywhere: what carried() and the fit
+# comparison count a stored fit's drone line against. A fit that says "5 x
+# Hobgoblin II" is satisfied by hobgoblins in the drone bay, the fighter bay
+# or the fleet hangar alike -- a pilot can launch from all three -- so this
+# stays the wide set on purpose while the `holds:` grammar's bays above are
+# the narrow ones. It is not a HOLD_BAYS value and must not become one.
+DRONE_FLAGS: tuple[str, ...] = _group_flags("Drone bay", "Fighter bay", "Fleet hangar")
+
+# Insertion order is the card's bay selector order, after "All".
+HOLD_BAYS: dict[str, tuple[str, ...]] = {
+    "cargo": CARGO_FLAGS,
+    "fuel": FUEL_FLAGS,
+    "drones": DRONE_BAY_FLAGS,
+    "fighters": FIGHTER_FLAGS,
+    "fleet": FLEET_HANGAR_FLAGS,
+}
+
+# The SDE category that tells a loaded charge apart from the module it is
+# loaded into, both sharing one slot flag. A row whose category is missing
+# entirely (an SDE import that has not caught up with a new group) is not a
+# charge and counts as a module: dropping it would silently shrink a ship's
+# rack and turn a deviating fit into a matching one.
+CHARGE_CATEGORY = "Charge"
+
 
 @dataclass
 class FitLine:
@@ -115,8 +182,8 @@ def _render_slots(items: list[sqlite3.Row]) -> list[FitLine]:
     lines = []
     for flag in sorted(by_flag, key=_slot_number):
         occupants = by_flag[flag]
-        modules = [r for r in occupants if (r["category"] or "") != "Charge"]
-        charges = [r for r in occupants if (r["category"] or "") == "Charge"]
+        modules = [r for r in occupants if (r["category"] or "") != CHARGE_CATEGORY]
+        charges = [r for r in occupants if (r["category"] or "") == CHARGE_CATEGORY]
         if not modules and not charges:
             continue
         type_id = meta_group_id = None
@@ -135,6 +202,86 @@ def _render_slots(items: list[sqlite3.Row]) -> list[FitLine]:
             line += f"  -  loaded: {loaded}"
         lines.append(FitLine(text=line, type_id=type_id, meta_group_id=meta_group_id))
     return lines
+
+
+def fitted_modules(rows: list[sqlite3.Row]) -> dict[int, int]:
+    """{type_id: count} of the modules and rigs a ship has fitted.
+
+    The Python twin of the multiset the `fit:` chip compares in SQL
+    (queries.FIT_EQUAL), used by fits.diff to say which modules are missing
+    and which are extra. Both sides read the same three rules off the same
+    fetch_fit rows -- a slot flag from FITTED_FLAGS, a category that is not
+    Charge, quantities summed -- and a test pins them equal over every ship
+    in the corpus, because a diff that disagreed with the verdict would
+    show an empty difference beside a "Deviates" line.
+
+    Quantities are summed rather than counted per row: a numbered slot holds
+    one module, but the same type occupies several slots and each is its own
+    row, and nothing in the data model actually forbids a quantity above one.
+    """
+    counts: dict[int, int] = {}
+    fitted = set(FITTED_FLAGS)
+    for r in rows:
+        if (r["location_flag"] or "") not in fitted:
+            continue
+        if (r["category"] or "") == CHARGE_CATEGORY:
+            continue
+        type_id = int(r["type_id"])
+        counts[type_id] = counts.get(type_id, 0) + int(r["quantity"] or 0)
+    return counts
+
+
+@dataclass
+class Carried:
+    """What a ship carries outside its fitted racks.
+
+    These are the consumables a stored fit's drone and cargo lines are held
+    against. drones is the count per type on DRONE_FLAGS -- the drone bay,
+    the fighter bay and tubes, the fleet hangar, deliberately wider than the
+    `holds:drones/` bay because a fit's drone line is met by anything that
+    can be launched -- and cargo the count per type on every other non-slot
+    flag (the cargo hold and each specialised hold) plus the charges loaded
+    into slots, because a pilot asking whether they have 2,000 rounds does
+    not care that 50 of them are already in the launcher. names carries a
+    display name per type for the lines a fit does not list. Both dicts key
+    on type_id like fitted_modules.
+    """
+
+    drones: dict[int, int]
+    cargo: dict[int, int]
+    names: dict[int, str]
+
+    def have(self, slot_kind: str) -> dict[int, int]:
+        """The bucket a fit line of one consumable kind is counted against."""
+        return self.drones if slot_kind == "drone" else self.cargo
+
+
+def carried(rows: list[sqlite3.Row]) -> Carried:
+    """Sum a ship's drones and cargo per type from its fetch_fit rows.
+
+    The one definition shared by fits.diff's short list and the comparison
+    window's Drones and Cargo sections, so the inspector's "0 of 825" and
+    the window's red line can never count differently. Only rows directly
+    inside the ship are ever passed in (fetch_fit is one level deep), so a
+    container's contents stay out of every bucket by construction.
+    """
+    fitted = set(FITTED_FLAGS)
+    drone_flags = set(DRONE_FLAGS)
+    drones: dict[int, int] = {}
+    cargo: dict[int, int] = {}
+    names: dict[int, str] = {}
+    for r in rows:
+        flag = r["location_flag"] or ""
+        if flag in fitted:
+            if (r["category"] or "") != CHARGE_CATEGORY:
+                continue
+            bucket = cargo
+        else:
+            bucket = drones if flag in drone_flags else cargo
+        type_id = int(r["type_id"])
+        bucket[type_id] = bucket.get(type_id, 0) + int(r["quantity"] or 0)
+        names.setdefault(type_id, r["item"])
+    return Carried(drones, cargo, names)
 
 
 def group_fit(rows: list[sqlite3.Row]) -> list[tuple[str, list[FitLine]]]:
@@ -183,6 +330,12 @@ _EFT_DRONE_FLAG = "DroneBay"
 _EFT_FIGHTER_FLAGS = ["FighterBay", *[f"FighterTube{i}" for i in range(5)]]
 _EFT_CARGO_FLAG = "Cargo"
 
+# The rack each EFT module section stands for, in the order Pyfa writes
+# them: low, mid, high, rig, subsystem. Derived from the export's own flag
+# table so the reader in fits.compare and the writer above cannot disagree
+# about which blank-line section is which rack.
+EFT_RACK_ORDER: tuple[str, ...] = tuple(RACK_OF_FLAG[flags[0]] for flags in _EFT_SLOT_FLAGS)
+
 
 def _eft_stack(row: sqlite3.Row) -> str:
     return f"{_name(row)} x{row['quantity']}"
@@ -208,8 +361,8 @@ def to_eft(ship_name: str, rows: list[sqlite3.Row]) -> str:
             occupants = by_flag.get(flag)
             if not occupants:
                 continue
-            modules = [r for r in occupants if (r["category"] or "") != "Charge"]
-            charges = [r for r in occupants if (r["category"] or "") == "Charge"]
+            modules = [r for r in occupants if (r["category"] or "") != CHARGE_CATEGORY]
+            charges = [r for r in occupants if (r["category"] or "") == CHARGE_CATEGORY]
             if not modules:
                 continue
             line = _name(modules[0])
@@ -320,7 +473,7 @@ def to_esi_fitting(
         flag_name = r["location_flag"] or ""
         slot_flag = _esi_slot_flag(flag_name)
         if slot_flag is not None:
-            if (r["category"] or "") == "Charge":
+            if (r["category"] or "") == CHARGE_CATEGORY:
                 stack(cargo, r)
             else:
                 # One module per numbered slot, hence quantity 1 -- Pyfa's

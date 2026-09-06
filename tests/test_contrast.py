@@ -194,6 +194,7 @@ def test_every_chip_kind_has_its_own_wash_and_none_collide():
 
     minted_kinds = {
         *omni.LEVEL_KINDS, "item", "is", "val", omni.STAT_KIND, omni.ROLL_KIND, omni.ABYSSAL_KIND,
+        omni.HOLDS_KIND, omni.FIT_KIND,
     }
     assert set(pal.CHIP_KIND_TINTS) == minted_kinds
     assert pal.CHIP_KIND_TINTS["location"] == pal.CHIP_ACCENT

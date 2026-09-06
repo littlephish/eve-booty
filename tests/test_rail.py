@@ -259,6 +259,28 @@ def test_changing_sort_emits_refresh_needed_and_current_sort_tracks_it(rail):
     assert len(refreshes) == 2
 
 
+def test_set_sort_moves_the_segment_without_a_refresh_and_ignores_an_unknown_key(rail):
+    """A saved view restores the sort through set_sort just before the
+    omnibox's set_spec re-queries everything anyway; a refresh here would be
+    a second identical round trip. A view saved before the sort was recorded
+    ('') or by a build with a key this one lacks leaves the rail as it was."""
+    refreshes: list[bool] = []
+    rail.refresh_needed.connect(lambda: refreshes.append(True))
+
+    rail.set_sort("name")
+    assert rail.current_sort() == "name"
+    assert rail.sort_buttons["name"].isChecked() and not rail.sort_buttons["value"].isChecked()
+    assert refreshes == []
+
+    for stale in ("", "price"):
+        rail.set_sort(stale)
+        assert rail.current_sort() == "name"
+    rail.set_rollups(rollup_rows(), set())
+    assert any(
+        d["kind"] == "caption" and d["label"] == "All · by A-Z" for d in listed(rail)
+    ), "the caption follows the segment set silently"
+
+
 # ------------------------------------------------------------------- levels
 def test_the_level_combo_announces_the_key_not_the_label(rail):
     """The host re-queries rollups keyed by the level key; a display label

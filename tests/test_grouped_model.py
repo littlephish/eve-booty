@@ -603,3 +603,82 @@ def test_roll_cells_survive_a_regroup_and_are_replaced_by_the_next_reload(app, c
     assert model.index(idx.row(), col, gidx).data() == "27 tf"
     model.set_abyssal_cells({})
     assert model.index(idx.row(), col, gidx).data() == ""
+
+
+# ------------------------------------------------------------ holds columns
+# The key omni.holds_column_key writes for `holds:"Antimatter Charge M"<500`,
+# and the header that goes over it. The counts are the view's, fetched per
+# ship alongside the rows.
+HOLDS_KEY = f"{gm.HOLDS_PREFIX}all/antimatter charge m"
+HOLDS_EXTRA = [(HOLDS_KEY, "Antimatter Charge M")]
+
+
+def holds_model(counts: dict, rows, group_key=None):
+    model = gm.GroupedAssetsModel()
+    model.set_holds_counts({HOLDS_KEY: counts})
+    model.set_rows(rows, group_key, HOLDS_EXTRA)
+    return model
+
+
+def test_one_holds_column_slots_in_after_qty_like_a_roll_column(app, rows):
+    """The count is what the chip is about, so it belongs beside the ship's
+    name rather than past the price columns off the right edge."""
+    model = holds_model({}, rows)
+    keys = [k for k, _h in model.columns()]
+    qty = keys.index("quantity")
+    assert keys[qty + 1] == HOLDS_KEY
+    assert keys[:qty + 1] + keys[qty + 2:] == [k for k, _h in queries.ASSET_COLUMNS]
+    # Derived like the roll columns' pin above: a column added to
+    # ASSET_COLUMNS is a normal change and must not fail this test.
+    assert model.columnCount() == len(queries.ASSET_COLUMNS) + 1
+    assert model.headerData(qty + 1, Qt.Horizontal) == "Antimatter Charge M"
+    assert model.key_at(qty + 1) == HOLDS_KEY and gm.is_holds_key(HOLDS_KEY)
+    assert not gm.is_holds_key("quantity") and not gm.is_holds_key(gm.roll_key(50))
+    # And the next set_rows without extras takes the column away again.
+    model.set_rows(rows, None)
+    assert model.columns() == list(queries.ASSET_COLUMNS)
+
+
+def test_a_holds_cell_shows_the_grouped_count_and_a_ship_with_none_reads_zero(app, rows):
+    """A ship the query did not name carries none of the type, which is a
+    real answer -- and the answer the `<N` form is usually looking for -- so
+    it must read 0 rather than blank."""
+    model = holds_model({1001: 12400}, rows)
+    counted = flat_cell(model, 1001, HOLDS_KEY)
+    assert counted.data() == "12,400"
+    assert counted.data(Qt.UserRole) == 12400
+    assert counted.data(Qt.TextAlignmentRole) == int(Qt.AlignRight | Qt.AlignVCenter)
+    empty = flat_cell(model, 1002, HOLDS_KEY)
+    assert empty.data() == "0" and empty.data(Qt.UserRole) == 0
+    # Export and column sizing read the same cell two ways: the number, and
+    # the text as painted.
+    row = model.row_for_index(counted)
+    assert model.cell_value(row, HOLDS_KEY) == 12400
+    assert model.holds_cell_text(row, HOLDS_KEY) == "12,400"
+    assert model.cell_value(model.row_for_index(empty), HOLDS_KEY) == 0
+
+
+def test_holds_columns_sort_numerically_with_no_unranked_tail(app, rows):
+    """Every ship has a count, so unlike a roll column there is nothing to
+    keep at the bottom: a 0 is the smallest number, not the absence of one."""
+    model = holds_model({1001: 500, 1002: 12400, 1004: 20}, rows)
+    model.sort_by(HOLDS_KEY, Qt.AscendingOrder)
+    assert [r["item_id"] for r in model.rows()] == [1003, 1005, 1004, 1001, 1002]
+    model.sort_by(HOLDS_KEY, Qt.DescendingOrder)
+    assert [r["item_id"] for r in model.rows()] == [1002, 1001, 1004, 1003, 1005]
+    model.reset_sort()
+    assert [r["item_id"] for r in model.rows()] == [1001, 1002, 1003, 1004, 1005]
+
+
+def test_holds_counts_survive_a_regroup_and_are_replaced_by_the_next_reload(app, rows):
+    """Same lifetime rule as the roll cells: the group-by combo re-buckets
+    the same rows without re-querying, and a reload hands in a fresh dict."""
+    model = holds_model({1001: 7}, rows, group_key="location")
+    gidx, idx = find_leaf(model, 1001)
+    col = [k for k, _h in model.columns()].index(HOLDS_KEY)
+    assert model.index(idx.row(), col, gidx).data() == "7"
+    model.set_rows(rows, "owner", HOLDS_EXTRA)
+    gidx, idx = find_leaf(model, 1001)
+    assert model.index(idx.row(), col, gidx).data() == "7"
+    model.set_holds_counts({})
+    assert model.index(idx.row(), col, gidx).data() == "0"
