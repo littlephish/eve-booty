@@ -11,6 +11,10 @@ character is worth over time.
 
 ![Filtering to abyssal modules, inspecting one, then narrowing Heat Sinks by three rolled stats](docs/abyssal-search.gif)
 
+**Build complex searches, save them, and load them**
+
+![Building a five-chip filter from the rail, the field, the completion popup, a cell menu and the + builder, saving it with the save: command, clearing, then loading it back from the Load pill](docs/save-load-views.gif)
+
 Python 3.10+, PySide6, SQLite. Runs from source with `uv`, and ships for Windows
 as a portable program folder built with Nuitka.
 

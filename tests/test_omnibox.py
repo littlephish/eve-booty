@@ -1061,3 +1061,23 @@ def test_a_chip_prefix_label_is_parented_before_it_is_ever_shown(box, monkeypatc
     box.add_chip("category", "Ship")
     assert [c for c, _w in box._chips] == [omni.Chip("owner", "Main"), omni.Chip("category", "Ship")]
     assert shown_orphans == []
+
+
+def test_cleared_and_removed_chips_are_hidden_before_they_are_deleted(box):
+    """Clear all once left every chip painted in the field until the event
+    loop ran the deferred deletes, which a hand-driven loop never does: a
+    recording of the feature showed five chips still standing over an
+    unfiltered table. The widgets are hidden the moment they leave."""
+    box.add_chip("owner", "A")
+    box.add_chip("owner", "B")
+    widgets = [w for _c, w in box._chips]
+    assert len(widgets) == 2
+    box.remove_chip(omni.Chip("owner", "A"))
+    assert widgets[0].isHidden()
+    box.clear()
+    assert all(w.isHidden() for w in widgets)
+    box.open_draft()
+    draft = box._draft
+    box._close_draft()
+    assert draft.isHidden(), "the draft builder leaves the same way"
+

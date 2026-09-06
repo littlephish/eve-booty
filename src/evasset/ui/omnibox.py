@@ -915,6 +915,11 @@ class Omnibox(QWidget):
             if existing == chip:
                 del self._chips[position]
                 self._row.removeWidget(widget)
+                # Hidden before the deferred delete: a widget out of its layout
+                # but still shown stays painted where it was until the event
+                # loop gets round to deleting it, and a caller that drives the
+                # loop by hand (a recording harness, a test) never gets there.
+                widget.hide()
                 widget.deleteLater()
                 self._emit_changed_now()
                 return
@@ -1011,6 +1016,7 @@ class Omnibox(QWidget):
         self._pending_completion = None
         self._complete_debounce.stop()
         self._row.removeWidget(draft)
+        draft.hide()  # see remove_chip
         draft.deleteLater()
         self.edit.setFocus(Qt.ShortcutFocusReason)
 
@@ -1058,6 +1064,7 @@ class Omnibox(QWidget):
     def _remove_all_chip_widgets(self) -> None:
         for _chip, widget in self._chips:
             self._row.removeWidget(widget)
+            widget.hide()  # see remove_chip
             widget.deleteLater()
 
     def _emit_changed_now(self) -> None:
