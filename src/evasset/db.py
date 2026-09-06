@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .config import DB_PATH
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -196,6 +196,45 @@ CREATE TABLE IF NOT EXISTS structures (
     gone_at              TEXT
 );
 
+-- ------------------------------------------------------- structure history
+-- What changed about a structure, and when a sync noticed. One row per
+-- changed field, holding the raw ESI values on both sides and no opinion
+-- about what any of it means.
+--
+-- Raw facts rather than finished sentences, because the wording is a
+-- judgement call and judgement calls get revised. "fuel_expires moved
+-- forward" is durably true; whether that is worth calling "Refuelled" is a
+-- rule that lives in evasset.structure_history and can change without a
+-- migration -- and when it changes, every row already here re-renders under
+-- the new rule. Storing the sentence instead would freeze today's opinion
+-- into the database permanently.
+--
+-- observed_at is when a sync saw the change, NOT when it happened in game. A
+-- structure reinforced at 03:00 and synced at 09:00 is recorded at 09:00.
+-- ESI does hand back the real time for some of these (state_timer_start,
+-- extraction_start_time), but recording two kinds of timestamp and keeping
+-- them straight on screen was judged not worth it -- so there is exactly one
+-- kind here, and the History tab has to say plainly that it means "noticed".
+--
+-- Nothing before the first sync after this table appeared can ever be
+-- recovered: ESI has no structure event log, and both writers upstream of
+-- this (INSERT OR REPLACE on structures, DELETE-and-reinsert on
+-- moon_extractions) overwrote the previous value every sync. History starts
+-- the day it is installed, which is why a structure's first sighting is
+-- recorded as "tracking started" rather than as an anchor.
+CREATE TABLE IF NOT EXISTS structure_changes (
+    change_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    structure_id INTEGER NOT NULL,
+    observed_at  TEXT    NOT NULL,
+    field        TEXT    NOT NULL,
+    old_value    TEXT,
+    new_value    TEXT
+);
+
+-- The only read there is: one structure's changes, oldest to newest.
+CREATE INDEX IF NOT EXISTS idx_structure_changes
+    ON structure_changes(structure_id, observed_at);
+
 -- Moon drill extractions, one row per drill. ESI only ever reports the
 -- current cycle, so this is a snapshot rather than history.
 CREATE TABLE IF NOT EXISTS moon_extractions (
@@ -262,6 +301,11 @@ CREATE TABLE IF NOT EXISTS corporations (
     corporation_id INTEGER PRIMARY KEY,
     name           TEXT,
     ticker         TEXT,
+    -- alliance_id arrives in the /corporations/{id} response the character
+    -- sync already makes; only the name costs a call of its own, and that
+    -- one is public.
+    alliance_id    INTEGER,
+    alliance_name  TEXT,
     -- character whose token is used to read this corp's data
     via_character_id INTEGER,
     last_sync_at   TEXT
@@ -768,6 +812,41 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_types_name  ON sde_types(name)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_types_group ON sde_types(group_id)")
         done.append("sde_types: added is_dynamic_type (table rebuilt)")
+
+    # v5 -> v6: corporations learned to name an alliance.
+    #
+    # The Structures tab's Overview shows the owning corp's alliance, and
+    # alliance_id was in the /corporations/{id} response the character sync
+    # already makes -- it was simply dropped. Both columns are nullable and
+    # left NULL here: an existing row has no alliance recorded and will not
+    # have one until the next sync, and inventing one from the corp id would
+    # mean a lookup this migration has no network to make.
+    #
+    # structure_changes needs nothing in here -- it is a brand new table and
+    # CREATE TABLE IF NOT EXISTS in SCHEMA covers it. It also cannot be
+    # backfilled: every value it would have recorded was overwritten by the
+    # sync that replaced it.
+    if _table_exists(conn, "corporations") and "alliance_id" not in columns(
+        conn, "corporations"
+    ):
+        _rebuild_table(
+            conn,
+            "corporations",
+            """CREATE TABLE corporations (
+                   corporation_id   INTEGER PRIMARY KEY,
+                   name             TEXT,
+                   ticker           TEXT,
+                   alliance_id      INTEGER,
+                   alliance_name    TEXT,
+                   via_character_id INTEGER,
+                   last_sync_at     TEXT
+               )""",
+            """INSERT INTO corporations
+                   (corporation_id, name, ticker, via_character_id, last_sync_at)
+               SELECT corporation_id, name, ticker, via_character_id, last_sync_at
+               FROM {old}""",
+        )
+        done.append("corporations: added alliance_id and alliance_name (table rebuilt)")
 
     if done:
         set_meta(conn, "migrated_at", str(SCHEMA_VERSION))
