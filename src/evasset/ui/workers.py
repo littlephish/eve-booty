@@ -43,8 +43,36 @@ class Job(QRunnable):
     def cancelled(self) -> bool:
         return self._cancelled
 
+    @staticmethod
+    def _emit(signal, *args) -> None:
+        """Report something, unless there is no longer anybody to report to.
+
+        Nothing waits for in-flight jobs at shutdown: app.exec() returns and
+        Qt destroys its objects while a pool thread is still running. Once
+        WorkerSignals' C++ half is gone every emit through it raises
+
+            RuntimeError: Signal source has been deleted
+
+        from a thread with nothing to catch it. That is harmless in itself --
+        the window that wanted the answer is gone -- but unguarded it took
+        run() with it: the except branch below emits too, so the *reporting*
+        of a failure raised a second RuntimeError, and the whole thing
+        escaped QRunnable::run() as a printed traceback over a clean exit.
+
+        Swallowed rather than logged, for the reason async_query.py's _emit
+        gives: a traceback nobody can act on trains people to ignore
+        tracebacks.
+        """
+        try:
+            signal.emit(*args)
+        except RuntimeError:
+            pass
+
     def _progress(self, msg: str, pct: int) -> None:
-        self.signals.progress.emit(msg, pct)
+        self._emit(self.signals.progress, msg, pct)
+
+    def _warn(self, message: str) -> None:
+        self._emit(self.signals.warning, message)
 
     def run_job(self):  # override
         raise NotImplementedError
@@ -54,10 +82,10 @@ class Job(QRunnable):
         try:
             result = self.run_job()
         except Exception as exc:  # noqa: BLE001 - surfaced in the UI
-            self.signals.failed.emit(f"{type(exc).__name__}: {exc}")
+            self._emit(self.signals.failed, f"{type(exc).__name__}: {exc}")
             traceback.print_exc()
         else:
-            self.signals.finished.emit(result)
+            self._emit(self.signals.finished, result)
 
 
 class AppraiseJob(Job):
@@ -237,7 +265,7 @@ class SyncJob(Job):
             if self.cancelled:
                 self._progress("Cancelled", 100)
                 for w in warnings:
-                    self.signals.warning.emit(w)
+                    self._warn(w)
                 return {"cancelled": True, "characters": done_count, "warnings": warnings}
 
             if self.reprice:
@@ -268,7 +296,7 @@ class SyncJob(Job):
 
             self._progress("Sync complete", 100)
             for w in warnings:
-                self.signals.warning.emit(w)
+                self._warn(w)
             result = {"characters": len(chars), "prices": stats, "warnings": warnings}
             if rolls is not None:
                 result["abyssal"] = rolls
