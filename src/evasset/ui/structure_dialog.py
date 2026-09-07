@@ -2,7 +2,9 @@
 
 Opened from the Structures tab. The Fit tab is the same FitPane the Assets
 tab puts in a window of its own -- a structure's fit is a different query
-(see queries.fetch_structure_fit) but the same widget.
+(see queries.fetch_structure_fit) but the same widget. Its type id is handed
+over in show_structure rather than to the constructor, because the query that
+knows it has not run yet when the tabs are built.
 
 Two things on the Overview are worked out here rather than reported by ESI,
 and both are labelled as such on screen:
@@ -262,6 +264,10 @@ class StructureDialog(QDialog):
             if value:
                 self.form.addRow(f"{label}:", QLabel(str(value)))
         self._load_render(row["type_id"])
+        # The Fit tab was built before this query landed, so it has been
+        # sitting there without a type id: no header icon and no Pyfa export.
+        # This is the first moment the structure's type is known.
+        self.fit.set_ship_type_id(row["type_id"])
 
     def _overview_fields(self, row) -> list[tuple[str, str]]:
         moon = ""

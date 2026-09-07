@@ -109,7 +109,10 @@ class FitPane(QWidget):
         # {type_id: [(icon label, display px), ...]} -- filled as the header
         # and rows are built, read when the fetch job reports back.
         self._icon_labels: dict[int, list[tuple[QLabel, int]]] = {}
-        self._icon_job: _IconFetchJob | None = None
+        # A set rather than one slot: set_ship_type_id can start a second
+        # fetch while the first is still running, and a single attribute
+        # would drop the strong reference to a job the pool is mid-run on.
+        self._icon_jobs: set[_IconFetchJob] = set()
         layout = QVBoxLayout(self)
 
         header = QHBoxLayout()
@@ -199,6 +202,25 @@ class FitPane(QWidget):
         self._icon_labels.setdefault(line.type_id, []).append((icon, _MODULE_ICON_PX))
         return row
 
+    def set_ship_type_id(self, type_id: int | None) -> None:
+        """Name the hull after the fact.
+
+        The Assets tab knows a ship's type when it builds the pane and passes
+        it to __init__. The Structures tab cannot: a structure's type_id
+        arrives with its own detail query, which lands after the tab exists.
+        Without this the header icon stays a placeholder for the life of the
+        dialog and "Copy for Pyfa" reports no type id -- for a structure
+        whose type is sitting on the Overview tab next to it.
+        """
+        if type_id is None or type_id == self._ship_type_id:
+            return
+        self._ship_type_id = type_id
+        labels = self._icon_labels.setdefault(type_id, [])
+        entry = (self.ship_icon, _SHIP_ICON_PX)
+        if entry not in labels:
+            labels.append(entry)
+        self._start_icon_fetch()
+
     def _on_rows(self, rows: list[sqlite3.Row]) -> None:
         self._rows = rows
         self.copy_btn.setEnabled(bool(rows))
@@ -229,12 +251,12 @@ class FitPane(QWidget):
         if not wanted:
             return
         job = _IconFetchJob(wanted)
-        self._icon_job = job  # strong ref until the signal lands; see _IconFetchJob
-        job.signals.done.connect(self._apply_icons)
+        self._icon_jobs.add(job)  # strong ref until the signal lands
+        job.signals.done.connect(lambda paths, j=job: self._apply_icons(paths, j))
         QThreadPool.globalInstance().start(job)
 
-    def _apply_icons(self, paths: dict) -> None:
-        self._icon_job = None
+    def _apply_icons(self, paths: dict, job: _IconFetchJob | None = None) -> None:
+        self._icon_jobs.discard(job)
         for type_id, labels in self._icon_labels.items():
             path = paths.get(type_id)
             if path is None:

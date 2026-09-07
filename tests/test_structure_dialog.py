@@ -85,8 +85,9 @@ def test_it_opens_on_the_overview(dialog):
 
 
 def test_it_can_be_asked_to_open_on_the_fit(qapp_or_skip):
-    """The Structures tab keeps a "View fit" entry, and it should land where
-    it says it will rather than making you find the tab."""
+    """Nothing in the UI asks for this today -- the Structures menu opens
+    the Overview -- but the dialog takes a tab and has to honour it, so a
+    caller that asks for the Fit lands on it rather than on the Overview."""
     d = StructureDialog(SID, "x", defer_load=True, tab="Fit")
     assert d.tabs.tabText(d.tabs.currentIndex()) == "Fit"
 

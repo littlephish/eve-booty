@@ -459,16 +459,15 @@ class StructuresView(QWidget):
         treemap_view.menu_for_tile."""
         menu = QMenu(self)
         menu.addAction("Open structure…", lambda: self.open_structure(row))
-        menu.addAction("View fit…", lambda: self.open_structure(row, tab="Fit"))
         return menu
 
     def open_structure(self, row, tab: str = "Overview") -> None:
         """The detail dialog: Overview, Fit and History for one structure.
 
-        "View fit" opens that same window on its Fit tab rather than a
-        separate one. There is one place everything about a structure lives,
-        and the menu entry is a shortcut into it rather than a second feature
-        that happens to show the same data.
+        There is one window for a structure and the fit is a tab of it, so
+        the menu offers one entry rather than a second that opens the same
+        dialog a tab along. tab is kept because the dialog takes it and a
+        caller may want to land somewhere other than the Overview.
         """
         StructureDialog(row["structure_id"], row["name"], parent=self, tab=tab).exec()
 

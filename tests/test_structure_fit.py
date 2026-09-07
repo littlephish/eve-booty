@@ -15,6 +15,8 @@ they rename a division.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from evasset import db, fitting, queries
@@ -239,13 +241,16 @@ def test_the_dialog_says_what_is_empty_in_its_own_words(qapp_or_skip, conn):
 # Built as a menu rather than exec'd in one step, the same way
 # treemap_view.menu_for_tile is, so the entries can be asserted without a
 # modal event loop.
-def test_the_structures_table_offers_view_fit(qapp_or_skip, conn):
+def test_the_structures_menu_offers_one_way_in(qapp_or_skip, conn):
+    """No separate "View fit" entry. It opened the same dialog one tab
+    along, which is a second door into one room -- the fit is a tab of the
+    structure window, and that window is what the menu opens."""
     from evasset.ui.structures_view import StructuresView
 
     view = StructuresView(defer_load=True)
     row = queries.fetch_structures(conn)[0]
     menu = view.menu_for_structure(row)
-    assert "View fit…" in [a.text() for a in menu.actions()]
+    assert [a.text() for a in menu.actions()] == ["Open structure…"]
 
 
 def test_view_fit_opens_the_structure_that_was_clicked(qapp_or_skip, conn, monkeypatch):
@@ -298,3 +303,88 @@ def test_the_fit_tab_is_given_the_structure_query_not_the_ship_one(qapp_or_skip,
     assert [r["location_flag"] for r in rows] == [
         r["location_flag"] for r in queries.fetch_structure_fit(conn, STRUCTURE)
     ]
+
+
+# ------------------------------------------------- the header thumbnail
+# The pane draws the hull's icon beside the name, from the type id it was
+# given. A ship's comes from the Assets row that opened it, so it is known
+# before the pane exists. A structure's is not: it arrives with
+# fetch_structure, which runs after the tabs are built. The pane was
+# therefore built with no type id at all and nothing ever gave it one, so
+# the placeholder never resolved and "Copy for Pyfa" had no hull to name.
+#
+# _start_icon_fetch is stubbed throughout: it would reach CCP's image
+# service, and what is being asserted is what the pane asks for, not what
+# comes back.
+@pytest.fixture()
+def no_icon_fetch(monkeypatch):
+    from evasset.ui.fit_dialog import FitPane
+
+    calls = []
+    monkeypatch.setattr(FitPane, "_start_icon_fetch", lambda self: calls.append(self))
+    return calls
+
+
+def structure_dialog(monkeypatch):
+    """Built with the query cancelled, then fed the row by hand -- the same
+    row reload() would have handed it, without an event loop."""
+    from evasset.ui.structure_dialog import StructureDialog
+
+    dialog = StructureDialog(STRUCTURE, "Jita Fortizar", defer_load=True)
+    dialog.fit._query.cancel()
+    monkeypatch.setattr(dialog, "_load_render", lambda type_id: None)
+    return dialog
+
+
+def test_the_fit_tab_has_no_hull_until_the_overview_lands(qapp_or_skip, conn, no_icon_fetch):
+    """Not a wish, a fact about the ordering: nothing knows the type yet."""
+    from evasset.ui.structure_dialog import StructureDialog
+
+    dialog = StructureDialog(STRUCTURE, "Jita Fortizar", defer_load=True)
+    dialog.fit._query.cancel()
+    assert dialog.fit._ship_type_id is None
+
+
+def test_the_overview_query_gives_the_fit_tab_its_hull(
+    qapp_or_skip, conn, monkeypatch, no_icon_fetch
+):
+    """The regression: the structure's type reaches the Fit tab, so the
+    header icon has something to fetch instead of staying a placeholder."""
+    dialog = structure_dialog(monkeypatch)
+    dialog.show_structure(queries.fetch_structure(conn, STRUCTURE))
+
+    assert dialog.fit._ship_type_id == FORTIZAR
+    assert (dialog.fit.ship_icon, 32) in dialog.fit._icon_labels[FORTIZAR]
+    assert no_icon_fetch, "learning the type should start a fetch for it"
+
+
+def test_the_hull_icon_is_not_registered_twice(
+    qapp_or_skip, conn, monkeypatch, no_icon_fetch
+):
+    """show_structure runs again on every reload, and a duplicate entry would
+    have the same label rescaled once per copy."""
+    dialog = structure_dialog(monkeypatch)
+    row = queries.fetch_structure(conn, STRUCTURE)
+    dialog.show_structure(row)
+    dialog.show_structure(row)
+    assert dialog.fit._icon_labels[FORTIZAR] == [(dialog.fit.ship_icon, 32)]
+
+
+def test_copy_for_pyfa_works_on_a_structure_once_the_overview_lands(
+    qapp_or_skip, conn, monkeypatch, no_icon_fetch
+):
+    """Same root cause, second symptom: without a type id the button
+    answered "No type id for this hull" for a structure whose type is
+    written on the tab beside it."""
+    dialog = structure_dialog(monkeypatch)
+    dialog.show_structure(queries.fetch_structure(conn, STRUCTURE))
+    dialog.fit._on_rows(queries.fetch_structure_fit(conn, STRUCTURE))
+
+    copied = {}
+    monkeypatch.setattr(
+        "evasset.ui.fit_dialog.QApplication.clipboard",
+        staticmethod(lambda: type("C", (), {"setText": lambda _s, t: copied.update(t=t)})()),
+    )
+    dialog.fit._copy_esi()
+    assert "No type id" not in dialog.fit.status.text()
+    assert json.loads(copied["t"])["ship_type_id"] == FORTIZAR
