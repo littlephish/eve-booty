@@ -1044,9 +1044,11 @@ def test_migration_repairs_networth_snapshots_stuck_mid_migration(tmp_path):
 def test_migration_adds_is_dynamic_type_to_an_old_sde_types_table(tmp_path):
     """A database from before the abyssal-stats work has an sde_types without
     the flag. The rebuild must keep every type row (reading 0 until the next
-    SDE import), recreate the two indexes that went down with the renamed
-    table, and leave the table writable by an importer that now names the
-    column -- and by one that does not."""
+    SDE import), recreate the indexes that went down with the renamed table
+    -- including idx_types_name_nocase, which the old database never had and
+    which every `name = ? COLLATE NOCASE` lookup needs -- and leave the
+    table writable by an importer that now names the column -- and by one
+    that does not."""
     import sqlite3 as sq
 
     path = tmp_path / "old-types.sqlite"
@@ -1076,7 +1078,12 @@ def test_migration_adds_is_dynamic_type_to_an_old_sde_types_table(tmp_path):
             "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='sde_types'"
         )
     }
-    assert {"idx_types_name", "idx_types_group"} <= indexes
+    assert {"idx_types_name", "idx_types_group", "idx_types_name_nocase"} <= indexes
+    plan = [r[3] for r in conn.execute(
+        "EXPLAIN QUERY PLAN SELECT type_id FROM sde_types WHERE name = ? COLLATE NOCASE",
+        ("tritanium",),
+    )]
+    assert plan == ["SEARCH sde_types USING COVERING INDEX idx_types_name_nocase (name=?)"], plan
     # Both the new importer (which names the column) and an insert that does
     # not mention it must work against the rebuilt table.
     conn.execute(
@@ -1430,15 +1437,36 @@ def test_clear_manual_price_leaves_market_rows_alone(conn):
     assert row is not None and row["source"] == "jita"
 
 
-def test_pinned_labels_and_saved_views_tables_exist(conn):
-    """The Assets tab persists rail pins and saved views here; the schema
-    must provide the tables and their uniqueness rules from a fresh init."""
+def test_pinned_labels_and_views_tables_exist(conn):
+    """The Assets tab persists rail pins and the saved-view library here; the
+    schema must provide the tables and every uniqueness rule the library
+    leans on from a fresh init. Two views may never claim one digit, two
+    unslotted views must still coexist (SQLite counts NULLs as distinct in a
+    UNIQUE index -- the whole reason slot can be a plain UNIQUE column), and
+    names collide case-insensitively so `save:jita` replaces "Jita" rather
+    than growing a second view beside it."""
     conn.execute("INSERT INTO pinned_labels VALUES ('location','Jita')")
     with pytest.raises(db.sqlite3.IntegrityError):
         conn.execute("INSERT INTO pinned_labels VALUES ('location','Jita')")
-    conn.execute("INSERT INTO saved_views VALUES (1,'{}')")
+
+    def add(name, slot):
+        conn.execute(
+            "INSERT INTO views (name, slot, filter_text, created_at, updated_at) "
+            "VALUES (?,?,'','2026-09-05T00:00:00+00:00','2026-09-05T00:00:00+00:00')",
+            (name, slot),
+        )
+
+    add("Jita ships", 1)
     with pytest.raises(db.sqlite3.IntegrityError):
-        conn.execute("INSERT INTO saved_views VALUES (1,'{}')")
+        add("JITA SHIPS", None)
+    with pytest.raises(db.sqlite3.IntegrityError):
+        add("Another view", 1)
+    add("Short of paste", None)
+    add("Nothing much", None)
+    assert conn.execute("SELECT COUNT(*) FROM views WHERE slot IS NULL").fetchone()[0] == 2
+    for bad in (0, 10):
+        with pytest.raises(db.sqlite3.IntegrityError):
+            add(f"Out of range {bad}", bad)
 
 
 def test_corp_blueprints_still_skip_gracefully_without_the_scope(conn):

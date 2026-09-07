@@ -26,6 +26,14 @@ flattens every row to its root location, the flag names the immediate
 context, and the walk would need its own query per opened row for a path the
 table's Location column cannot show anyway.
 
+An assembled ship gets a section of its own: how its rack differs from a
+stored fit -- the one an active ``fit:`` chip names, else the closest fit
+for the hull -- as missing modules, extra modules and the consumables it is
+short of. Hidden entirely when the hull has no stored fit, because "nothing
+to compare against" is not a verdict worth a line. Driven by show_fit_diff
+with a fits.FitDiff the host fetched, the same rule as show_rolls: the block
+renders from a hand-built dataclass without a database.
+
 Abyssal (mutated) modules get one extra section: the mutator's rolled
 attributes, one _RollRow each -- the attribute's name against its rolled
 value and signed delta, a segmented meter running from the mutator's worst
@@ -89,6 +97,37 @@ _RARITY_META_IDS = {
     "Abyssal": palette.META_ABYSSAL,
 }
 
+# The SDE category a hull belongs to -- the same name queries.SHIP_ROWS_CLAUSE
+# tests, so the rows that grow a fit-diff block are exactly the rows the
+# `fit:` and `holds:` chips filter on.
+_SHIP_CATEGORY = "Ship"
+
+
+def is_assembled_ship(row) -> bool:
+    """Whether a row is a ship that exists as an object with contents.
+
+    A packaged stack of hulls is not one. Only assembled ships have a rack
+    to compare against a stored fit; a packaged Dominix has no modules and
+    would deviate from everything.
+    """
+    return bool(_row_get(row, "is_singleton")) and (_row_get(row, "category") or "") == (
+        _SHIP_CATEGORY
+    )
+
+
+def _count_list(entries) -> str:
+    """Entries as "2 × Large Armor Repairer II, 1 × Drone Damage Amplifier II"."""
+    return ", ".join(f"{count:,} × {name}" for name, count in entries)
+
+
+def _short_list(entries) -> str:
+    """Entries as "Antimatter Charge M 800 of 2,000".
+
+    What is aboard against what the fit asks for, so the gap is visible
+    without arithmetic.
+    """
+    return ", ".join(f"{name} {have:,} of {want:,}" for name, have, want in entries)
+
 
 class Inspector(QWidget):
     """Detail panel for one row; every action is a signal the host handles."""
@@ -98,6 +137,7 @@ class Inspector(QWidget):
     refresh_price_clicked = Signal()
     pin_price_clicked = Signal()
     fetch_abyssal_clicked = Signal()
+    compare_clicked = Signal()
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -191,6 +231,52 @@ class Inspector(QWidget):
         self.rolls_box.setVisible(False)
         root.addWidget(self.rolls_box)
 
+        # The fit-diff section, shaped exactly like the rolls one above:
+        # hidden for every row that is not an assembled ship, shown in a
+        # loading state by show_row, filled by the host's show_fit_diff.
+        self.fit_box = QWidget()
+        fit = QVBoxLayout(self.fit_box)
+        fit.setContentsMargins(0, 8, 0, 0)
+        fit.setSpacing(6)
+        self.fit_header = _caption_label("Fit")
+        fit_font = self.fit_header.font()
+        fit_font.setWeight(QFont.Weight.DemiBold)
+        self.fit_header.setFont(fit_font)
+        fit.addWidget(self.fit_header)
+        verdict_row = QHBoxLayout()
+        verdict_row.setSpacing(6)
+        self.fit_verdict = QLabel("")
+        self.fit_verdict.setWordWrap(True)
+        verdict_row.addWidget(self.fit_verdict, 1)
+        # The door to the comparison window, beside the verdict it expands
+        # on. Hidden until a diff has landed: there is nothing to lay side
+        # by side while the block still says it is comparing.
+        self.fit_compare_btn = QPushButton("Compare…")
+        self.fit_compare_btn.setToolTip(
+            "Open the ship's racks beside the fit's, with the deviating lines coloured."
+        )
+        self.fit_compare_btn.clicked.connect(self.compare_clicked)
+        self.fit_compare_btn.setVisible(False)
+        verdict_row.addWidget(self.fit_compare_btn, 0, Qt.AlignTop)
+        fit.addLayout(verdict_row)
+        self.fit_missing = QLabel("")
+        self.fit_extra = QLabel("")
+        self.fit_short = QLabel("")
+        for label in (self.fit_missing, self.fit_extra, self.fit_short):
+            label.setWordWrap(True)
+            label.setVisible(False)
+            fit.addWidget(label)
+        self.fit_note = QLabel("")
+        self.fit_note.setStyleSheet(
+            f"color: {palette.SECONDARY_TEXT}; border-top: 1px solid palette(dark);"
+            " padding-top: 4px;"
+        )
+        self.fit_note.setWordWrap(True)
+        fit.addWidget(self.fit_note)
+        self.fit_box.setVisible(False)
+        self._fit_hull = ""
+        root.addWidget(self.fit_box)
+
         buttons = QVBoxLayout()
         buttons.setSpacing(4)
         self.where_else_btn = QPushButton("Where else?")
@@ -251,6 +337,13 @@ class Inspector(QWidget):
             self._show_rolls_loading()
         else:
             self.show_rolls(None)
+        # The hull's name for the fit note, kept from the row because a
+        # FitDiff names the fit and not the ship it was compared against.
+        self._fit_hull = row["item"] or ""
+        if is_assembled_ship(row):
+            self._show_fit_loading()
+        else:
+            self.show_fit_diff(None)
 
     def show_rolls(self, payload: dict | None) -> None:
         """Render one queries.fetch_abyssal_rolls payload, or hide the section.
@@ -298,11 +391,58 @@ class Inspector(QWidget):
         self.fetch_abyssal_btn.setVisible(False)
 
     def _clear_roll_rows(self) -> None:
+        # Hidden in place, never reparented to None: a visible child handed
+        # to setParent(None) becomes a top-level widget for a turn, the
+        # focus round trip that closes every popup (the omnibox chip
+        # incident, documented on _ChipWidget.prefix_label).
         for row in self.roll_rows:
             self.rolls_rows.removeWidget(row)
-            row.setParent(None)
+            row.hide()
             row.deleteLater()
         self.roll_rows = []
+
+    def show_fit_diff(self, diff) -> None:
+        """Render one fits.FitDiff, or hide the section for None.
+
+        None is both "not a ship" and "this hull has no stored fit": neither
+        has anything to say, and a section reading "no fit stored" on every
+        hauler would be noise on the rows the diff is not for.
+
+        A diff that was asked for by name reports the verdict directly; one
+        picked as the closest fit says so instead, because "Deviates from
+        Ratting" claims the user asked about Ratting. A closest fit that
+        happens to match is still reported as a match -- that is the more
+        useful fact, and it is not a claim about which fit was meant.
+        """
+        if diff is None:
+            self.fit_box.setVisible(False)
+            self.fit_compare_btn.setVisible(False)
+            return
+        self.fit_box.setVisible(True)
+        self.fit_compare_btn.setVisible(True)
+        if diff.matches:
+            self.fit_verdict.setText(f"Matches {diff.fit_name}")
+        elif diff.named:
+            self.fit_verdict.setText(f"Deviates from {diff.fit_name}")
+        else:
+            self.fit_verdict.setText(f"Closest stored fit: {diff.fit_name}")
+        for label, prefix, text in (
+            (self.fit_missing, "Missing", _count_list(diff.missing)),
+            (self.fit_extra, "Extra", _count_list(diff.extra)),
+            (self.fit_short, "Short", _short_list(diff.short)),
+        ):
+            label.setText(f"{prefix}: {text}")
+            label.setVisible(bool(text))
+        hull = self._fit_hull
+        self.fit_note.setText(f"{diff.fit_name} · {hull}" if hull else diff.fit_name)
+
+    def _show_fit_loading(self) -> None:
+        self.fit_box.setVisible(True)
+        self.fit_compare_btn.setVisible(False)
+        self.fit_verdict.setText("Comparing with the stored fits…")
+        for label in (self.fit_missing, self.fit_extra, self.fit_short):
+            label.setVisible(False)
+        self.fit_note.setText("")
 
 
 class InspectorWindow(QDialog):

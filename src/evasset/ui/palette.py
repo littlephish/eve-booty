@@ -105,6 +105,14 @@ CHIP_KIND_TINTS = {
     # tests/test_contrast.py).
     "abyssal":  ("#EDD0E3", "#52183C"),
     "roll":     ("#E4F1CD", "#2A3B14"),   # lime -- roll quality, a step off val's yellow
+    # Olive for the holds chip: a consumable count is a cargo question, so it
+    # sits in the same warm-green family as owner's green without being it --
+    # 17 / 28 units off owner and 17 / 16 off roll's lime, its nearest
+    # neighbours (floors held in tests/test_contrast.py).
+    "holds":    ("#E9F0D8", "#2F3A1E"),
+    # Steel for the fit chip: the greyed blue of a hull, one clear step off
+    # item's slate (18 / 21) and off location's blue (19 / 18).
+    "fit":      ("#D9E3EE", "#233344"),
 }
 
 

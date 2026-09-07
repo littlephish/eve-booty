@@ -8,13 +8,13 @@ Webifier" stat:web<=-60 stat:range>=12``), but nobody should have to type
 it: this card builds exactly those chips with a type picker and a two-handle
 track per stat, and hands them back to the omnibox on Done.
 
-It is a popover (Qt.Popup) anchored under the abyssal chip rather than a
-dialog, because it edits the filter the chip already shows -- a modal window
-over the table would hide the very rows the filter is narrowing. Popup
-semantics decide the commit model too: Qt closes a popup on any outside
-click, and that close has to mean something. It means Cancel. Done is the
-only path that applies, so an exploratory drag that gets abandoned by
-clicking back on the table leaves the filter exactly as it was.
+It is a popover anchored under the abyssal chip rather than a dialog, because
+it edits the filter the chip already shows -- a modal window over the table
+would hide the very rows the filter is narrowing. The popup, the footer's
+live count and the commit model (Done applies, every other way out cancels)
+are filter_card.FilterCard's, shared now with the holds and fit cards; this
+file is what is specific to a multi-attribute range query over one module
+type.
 
 A row bounds a stat in its display units -- the tf, % or m the table, the
 inspector and the chip all show -- and in nothing else. A quality-percent
@@ -86,11 +86,10 @@ import math
 import re
 
 from PySide6.QtCore import QEvent, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPalette, QPen
+from PySide6.QtGui import QColor, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
     QComboBox,
     QCompleter,
-    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -104,10 +103,13 @@ from PySide6.QtWidgets import (
 
 from .. import abyssal, omni
 from . import palette
+from .filter_card import FilterCard
 from .meters import paint_segments
 from .strip import caption_font
 
-CARD_WIDTH = 440
+# The popover's width belongs to the shared shell now; re-exported because
+# callers of this module (and its own tests) ask the card for it.
+CARD_WIDTH = FilterCard.WIDTH
 FIELD_WIDTH, FIELD_HEIGHT = 76, 24
 
 # The chip kinds this card owns: what it seeds from, and what the view
@@ -776,24 +778,17 @@ class _TypeCompleter(QCompleter):
         return str(index.data(Qt.DisplayRole) or "")
 
 
-class AbyssalCard(QFrame):
+class AbyssalCard(FilterCard):
     """The popover. See the module docstring for the commit model."""
 
+    KINDS = CARD_KINDS
+    TITLE = "Abyssal search"
+
     selection_changed = Signal(list)   # [the selected type name], or [] for none
-    filter_changed = Signal()          # the chips Done would write have changed
     fetch_requested = Signal(list)     # [the selected type name] ([] = every type)
-    done = Signal(list)                # omni.Chip list to replace the card's kinds
-    cancelled = Signal()
 
     def __init__(self, parent: QWidget | None = None):
-        super().__init__(parent, Qt.Popup)
-        self.setFixedWidth(CARD_WIDTH)
-        self.setFrameShape(QFrame.StyledPanel)
-        self.setObjectName("abyssalcard")
-        self.setStyleSheet(
-            "#abyssalcard { border: 1px solid palette(shadow); border-radius: 6px;"
-            " background: palette(window); }"
-        )
+        super().__init__(parent)
         self._attrs: list[dict] = []
         self._bounds: dict = {}
         self._rows: list[_StatRow] = []
@@ -801,23 +796,9 @@ class AbyssalCard(QFrame):
         # the first set_attributes that names their attribute.
         self._pending_terms: list[omni.StatTerm] = []
         self._seed_selected: list[str] = []
-        self._applied = False
         small = caption_font(self.font())
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(1, 1, 1, 1)
-        root.setSpacing(0)
-
-        head = QWidget()
-        head_box = QVBoxLayout(head)
-        head_box.setContentsMargins(12, 10, 12, 8)
-        head_box.setSpacing(6)
-        title = QLabel("Abyssal search")
-        font = QFont(title.font())
-        font.setWeight(QFont.Weight.DemiBold)
-        font.setPointSizeF(font.pointSizeF() + 0.75)
-        title.setFont(font)
-        head_box.addWidget(title)
+        head_box = self.head_layout
         types_hint = QLabel("Module type")
         types_hint.setFont(small)
         types_hint.setStyleSheet(f"color: {palette.SECONDARY_TEXT};")
@@ -870,12 +851,8 @@ class AbyssalCard(QFrame):
         banner_row.addWidget(self.fetch_btn)
         self.banner.setVisible(False)
         head_box.addWidget(self.banner)
-        root.addWidget(head)
 
-        body = QWidget()
-        body_box = QVBoxLayout(body)
-        body_box.setContentsMargins(12, 6, 12, 10)
-        body_box.setSpacing(12)
+        body_box = self.body_layout
         self.rows_hint = QLabel("Pick a module type to filter on its rolled stats.")
         self.rows_hint.setStyleSheet(f"color: {palette.SECONDARY_TEXT};")
         body_box.addWidget(self.rows_hint)
@@ -892,44 +869,6 @@ class AbyssalCard(QFrame):
         self.add_row_btn.setStyleSheet(f"color: {palette.SECONDARY_TEXT};")
         self.add_row_btn.clicked.connect(lambda: self.add_row())
         body_box.addWidget(self.add_row_btn, 0, Qt.AlignLeft)
-        root.addWidget(body)
-
-        # The footer sits a step above the window with a rule over it, both
-        # derived from the palette (toward_text) so they exist on every
-        # theme; the bottom corners follow the card's radius so the surface
-        # does not poke square corners out of the rounded border.
-        pal = self.palette()
-        self.footer = QFrame()
-        self.footer.setObjectName("abyssalfooter")
-        self.footer.setStyleSheet(
-            "#abyssalfooter {"
-            f" background: {palette.toward_text(pal, 0.05).name()};"
-            f" border-top: 1px solid {palette.track_colour(pal).name()};"
-            " border-bottom-left-radius: 5px; border-bottom-right-radius: 5px; }"
-        )
-        foot = QHBoxLayout(self.footer)
-        foot.setContentsMargins(12, 8, 12, 8)
-        foot.setSpacing(8)
-        self.match_count_label = QLabel("…")
-        self.match_count_label.setFont(small)
-        self.match_rest_label = QLabel("")
-        self.match_rest_label.setFont(small)
-        self.match_rest_label.setStyleSheet(f"color: {palette.SECONDARY_TEXT};")
-        # One sentence in two colours: the pair sits at word spacing, not
-        # the footer's button spacing.
-        sentence = QHBoxLayout()
-        sentence.setSpacing(3)
-        sentence.addWidget(self.match_count_label)
-        sentence.addWidget(self.match_rest_label, 1)
-        foot.addLayout(sentence, 1)
-        self.cancel_btn = QPushButton("Cancel")
-        self.cancel_btn.clicked.connect(self.hide)
-        foot.addWidget(self.cancel_btn)
-        self.done_btn = QPushButton("Done")
-        self.done_btn.setToolTip("Apply (Enter)")
-        self.done_btn.clicked.connect(self.apply)
-        foot.addWidget(self.done_btn)
-        root.addWidget(self.footer)
 
         self._update_rows_enabled()
 
@@ -1090,13 +1029,13 @@ class AbyssalCard(QFrame):
         self.fetch_btn.setEnabled(True)
         self.fetch_btn.setText("Fetch")
 
-    def set_match_count(self, matched: int, total: int) -> None:
-        """The footer's live answer: how many items the chips Done would
-        write match, out of the picked type's items (or every abyssal item
-        with no type picked). The count wears the primary text colour and the rest
-        the muted one, so the figure is what the eye lands on."""
-        self.match_count_label.setText(f"{matched:,}")
-        self.match_rest_label.setText(f"of {total:,} match")
+    def totals(self) -> tuple[str, object]:
+        """The footer's denominator: the picked type's items under the rest of the filter.
+
+        That is the abyssal chip alone, without the stat rows -- or every
+        abyssal item with no type picked.
+        """
+        return "chips", self.chips()[:1]
 
     def add_row(self, attribute_id: int | None = None) -> _StatRow | None:
         """Append a row on attribute_id, or on the first attribute no row
@@ -1143,15 +1082,6 @@ class AbyssalCard(QFrame):
                     out.append(chip)
         return out
 
-    def apply(self) -> None:
-        """Done: hide first so the hide reads as applied, not cancelled, then
-        hand the chips over -- by then the popup is gone and the view's
-        set_spec reload paints under nothing."""
-        chips = self.chips()
-        self._applied = True
-        self.hide()
-        self.done.emit(chips)
-
     # ------------------------------------------------------------- internals
     def _add_row_for_term(self, term: omni.StatTerm) -> None:
         # The offered list already excludes attributes without bounds, so a
@@ -1189,15 +1119,6 @@ class AbyssalCard(QFrame):
         for row in self._rows:
             row.set_used(used - {row.attribute_id()})
         self._update_rows_enabled()
-
-    def _announce(self) -> None:
-        """The chips Done would write have changed: show the count as
-        pending and ask the view for a fresh one."""
-        self._set_counting()
-        self.filter_changed.emit()
-
-    def _set_counting(self) -> None:
-        self.match_count_label.setText("…")
 
     def _on_type_changed(self, _index: int) -> None:
         self._update_rows_enabled()
@@ -1321,35 +1242,13 @@ class AbyssalCard(QFrame):
                 return True
         return super().eventFilter(obj, event)
 
-    def keyPressEvent(self, event) -> None:  # noqa: N802
-        if event.key() == Qt.Key_Escape:
-            self.hide()
-            event.accept()
-            return
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
-            # Enter anywhere in the card but an edit (a bound field's row
-            # commits it, the type edit's filter selects on it) is Done: the
-            # buttons ignore the key, so it arrives here.
-            self.apply()
-            event.accept()
-            return
-        super().keyPressEvent(event)
+    def first_focus(self) -> QWidget:
+        """The type edit, so the card opens ready for a type name."""
+        return self.type_edit
 
     def showEvent(self, event) -> None:  # noqa: N802
-        self._applied = False
         super().showEvent(event)
-        # The card opens ready to type a type: focus on the edit with its
-        # text selected, so the first keystroke starts the search rather
-        # than appending to the current label. Focus inside a Qt.Popup is
-        # ordinary -- the popup owns the keyboard while it is up -- and
-        # openPopup hands the keyboard to the popup's focus widget, which
-        # this makes the edit.
-        self.type_edit.setFocus()
+        # The shell has focused the edit; its text is selected too, so the
+        # first keystroke starts a fresh search rather than appending to the
+        # label the current selection wrote there.
         self.type_edit.selectAll()
-
-    def hideEvent(self, event) -> None:  # noqa: N802
-        """Every way the popup goes away that is not Done -- Cancel, Esc, an
-        outside click closing the popup -- ends here and reads as Cancel."""
-        super().hideEvent(event)
-        if not self._applied:
-            self.cancelled.emit()

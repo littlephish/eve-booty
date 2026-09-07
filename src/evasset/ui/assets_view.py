@@ -13,7 +13,6 @@ combos, checkboxes and GroupPanel each owned a fragment of it).
 from __future__ import annotations
 
 import csv
-import json
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -58,13 +57,24 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import abyssal, db, omni, pricing, queries
+from .. import abyssal, db, fits, omni, pricing, queries, views
 from ..config import Settings
 from ..esi import ESIClient, TokenCache
+from ..omni import (
+    FIT_KIND,
+    HOLDS_KIND,
+    holds_column_header,
+    holds_column_key,
+    named_fit,
+    single_holds_terms,
+)
 from . import chest_reveal, palette
-from .abyssal_card import CARD_KINDS, AbyssalCard
+from .abyssal_card import AbyssalCard
 from .async_query import AsyncQuery
 from .debounce import Debounce
+from .filter_card import FilterCard
+from .fit_card import FitCard
+from .fit_compare_dialog import FitCompareDialog
 from .fit_dialog import FitDialog
 from .grouped_model import (
     GROUP_LABEL_ROLE,
@@ -72,13 +82,17 @@ from .grouped_model import (
     ROLL_MEAN_KEY,
     GroupedAssetsModel,
     _row_get,
+    is_holds_key,
     is_roll_key,
     roll_key,
 )
-from .inspector import Inspector, InspectorWindow
+from .holds_card import HoldsCard
+from .inspector import Inspector, InspectorWindow, is_assembled_ship
+from .load_view_card import LoadViewCard
 from .models import fmt_isk, fmt_short_isk
 from .omnibox import Omnibox
-from .rail import Rail
+from .rail import SORT_KEYS, Rail
+from .save_view_card import SaveViewCard
 from .strip import EstateStrip
 from .workers import AppraiseJob, Job
 
@@ -123,6 +137,24 @@ _GROUP_ROW_KEY = {
 # The two value columns the badge delegate paints.
 _BADGE_KEYS = {"buy_value", "sell_value"}
 
+# One card class per chip kind that carries a ``▾`` glyph. Built lazily and
+# kept, one instance per kind for the tab's lifetime, so a card keeps nothing
+# from the last open but its widgets (see _card_for).
+# The two command cards ride in the same registry under their command name
+# as a pseudo-kind. Everything _open_card does is what they need -- hide the
+# others, build lazily, seed, fetch, place, keep _active_card -- and the
+# omni.Chip(SAVE_COMMAND, "") a caller passes is only an address for this
+# lookup: no command chip is ever inserted in the omnibox, written by
+# to_text() or minted by parse().
+_CARD_CLASSES = {
+    omni.ABYSSAL_KIND: AbyssalCard,
+    HOLDS_KIND: HoldsCard,
+    FIT_KIND: FitCard,
+    omni.SAVE_COMMAND: SaveViewCard,
+    omni.LOAD_COMMAND: LoadViewCard,
+}
+
+
 _KEY_MAP = [
     ("/", "Focus the omnibox"),
     ("Ctrl+F", "Build a filter chip (pick a type, then a value)"),
@@ -134,8 +166,9 @@ _KEY_MAP = [
     ("Enter", "Open the inspector panel"),
     ("g", "Cycle group-by"),
     ("Esc", "Close the inspector panel, else remove the last filter"),
-    ("1-9", "Recall saved view"),
-    ("Ctrl+1-9", "Save current view"),
+    ("Ctrl+S", "Save this view under a name"),
+    ("Ctrl+L", "Load a saved view"),
+    ("Ctrl+1-9", "Load the view in that slot"),
     ("?", "This list"),
 ]
 
@@ -331,16 +364,18 @@ class _InspectorHost:
     state the view keeps per place.
 
     The two hosts show different rows at the same time (the window pins an
-    item while the panel follows the clicks), so the row on show and the
-    rolls lookup are per host. One shared rolls AsyncQuery would let the
-    window's lookup bump the generation and silently drop the panel's, and a
-    single shared "inspected row" guard would let the window's rolls paint
-    into the panel. eq=False keeps identity semantics: hosts are compared by
-    which one they are, never by what they currently show.
+    item while the panel follows the clicks), so the row on show and the two
+    lookups are per host. One shared rolls AsyncQuery would let the window's
+    lookup bump the generation and silently drop the panel's, and a single
+    shared "inspected row" guard would let the window's rolls paint into the
+    panel; the fit diff has its own stream for the same two reasons.
+    eq=False keeps identity semantics: hosts are compared by which one they
+    are, never by what they currently show.
     """
 
     inspector: Inspector
     rolls_query: AsyncQuery
+    fit_query: AsyncQuery
     render: Callable[[sqlite3.Row], None]
     show: Callable[[], None]
     hide: Callable[[], None]
@@ -403,6 +438,20 @@ class AssetsView(QWidget):
         self.clear_all_btn.setCursor(Qt.PointingHandCursor)
         self.clear_all_btn.setVisible(False)
         state_row.addWidget(self.clear_all_btn)
+        # The library's two doors, in the same neutral pill as Clear all and
+        # always visible: an unfiltered table is a view worth loading one
+        # into, and a Save pill that appeared only once a filter existed
+        # would teach that saved views are something else than what the
+        # omnibox holds. Clear all keeps its own rule and hides when there
+        # is nothing to clear.
+        self.save_btn = QPushButton("Save")
+        self.save_btn.setToolTip("Save this view under a name (Ctrl+S)")
+        self.load_btn = QPushButton("Load")
+        self.load_btn.setToolTip("Load a saved view (Ctrl+L)")
+        for pill in (self.save_btn, self.load_btn):
+            pill.setStyleSheet(palette.pill_stylesheet("QPushButton", self.palette()))
+            pill.setCursor(Qt.PointingHandCursor)
+            state_row.addWidget(pill)
         state_row.addStretch(1)
         state_row.addWidget(QLabel("Group by"))
         self.group_combo = QComboBox()
@@ -459,6 +508,11 @@ class AssetsView(QWidget):
         self.side.addWidget(self.rail)
         self.side.addWidget(self.inspector)
         self.inspector_window = InspectorWindow(self)
+        # The open comparison windows by ship item_id. One per ship: a
+        # second Compare deviation on the same ship raises and re-runs the
+        # window already up, the way the inspector window is one window,
+        # rather than stacking a copy the user then has to find and close.
+        self._compare_dialogs: dict[int, FitCompareDialog] = {}
 
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.addWidget(self.tree)
@@ -484,6 +538,8 @@ class AssetsView(QWidget):
         root.addLayout(foot)
 
         self._total_stacks = 0
+        self._hidden_fitted = 0
+        self._pending_notice: str | None = None
         self._sized_once = False
         self._last_group_key: str | None = None
         # The roll columns and cells of the current single-type filter, kept
@@ -492,10 +548,18 @@ class AssetsView(QWidget):
         self._extra_columns: list[tuple[str, str]] = []
         self._cells: dict = {}
         self._cell_attrs: list[dict] = []
-        # The complex-search card, built on first use and reused: one popup
-        # per view, re-seeded on every open. _card_types maps the type names
-        # it shows to type ids for the Fetch button's item lookup.
-        self._card: AbyssalCard | None = None
+        # The filter cards, one per chip kind, built on first use and reused:
+        # one popup per kind per view, re-seeded on every open. At most one is
+        # ever up -- a Qt.Popup closes on any outside click, so opening the
+        # second cancels the first -- and _active_card is the one the count
+        # and the writes belong to. _card_types maps the abyssal type names
+        # the card shows to type ids for its Fetch button's item lookup.
+        self._cards: dict[str, FilterCard] = {}
+        self._active_card: FilterCard | None = None
+        # The chip widget the active card opened under, kept so a refill
+        # the card asks for itself (the holds card's bay click) lands the
+        # re-laid-out card back under the same chip.
+        self._card_anchor: QWidget | None = None
         self._card_types: dict[str, int] = {}
         # Strong references per the QRunnable lifetime rules in
         # async_query.py: a price job must outlive its starting call.
@@ -517,6 +581,9 @@ class AssetsView(QWidget):
         # must not drop the other host's lookup by bumping its generation.
         self._rolls_query = AsyncQuery(self)
         self._window_rolls_query = AsyncQuery(self)
+        # The fit diff's streams, one per host for the same reasons.
+        self._fit_query = AsyncQuery(self)
+        self._window_fit_query = AsyncQuery(self)
         # The card's own stream: type counts, attributes and bounds arrive
         # while a row reload may be in flight, and a re-tick in the card
         # must supersede the previous type's attribute fetch, not the table.
@@ -532,6 +599,7 @@ class AssetsView(QWidget):
         self._panel_host = _InspectorHost(
             self.inspector,
             self._rolls_query,
+            self._fit_query,
             render=self.inspector.show_row,
             show=lambda: self.side.setCurrentWidget(self.inspector),
             hide=lambda: self.side.setCurrentWidget(self.rail),
@@ -540,6 +608,7 @@ class AssetsView(QWidget):
         self._window_host = _InspectorHost(
             self.inspector_window.inspector,
             self._window_rolls_query,
+            self._window_fit_query,
             render=self.inspector_window.show_row,
             show=self._raise_window,
             hide=self.inspector_window.hide,
@@ -548,6 +617,10 @@ class AssetsView(QWidget):
 
         self.omnibox.changed.connect(self.reload)
         self.omnibox.card_requested.connect(self._open_card)
+        self.omnibox.save_requested.connect(self._on_save_requested)
+        self.omnibox.load_requested.connect(self._on_load_requested)
+        self.save_btn.clicked.connect(lambda: self._open_save_card(self.save_btn))
+        self.load_btn.clicked.connect(lambda: self._open_load_card(self.load_btn))
         # The omnibox rung of the escape ladder sheds the panel; the window
         # is closed on its own terms (its Esc, its title bar, its × button).
         self.omnibox.escape_pressed.connect(lambda: self._close_inspector(self._panel_host))
@@ -632,14 +705,48 @@ class AssetsView(QWidget):
         self._vocab_query.run(fetch, self.omnibox.set_vocabulary)
 
     # ----------------------------------------------------------------- reload
+    def _where(self, spec: omni.FilterSpec, **kw) -> tuple[str, tuple]:
+        """The spec's WHERE plus the tab's own default of hiding fitted rows.
+
+        Fitted modules and loaded charges are hidden unless the filter is
+        about ships, fits or that kind of item (omni.hides_fitted). Every
+        query the tab runs -- rows, rail, strip, the cards' counts -- goes
+        through here, so the numbers agree with the rows on screen. Kept out
+        of FilterSpec.where() because the rule is this tab's, not the
+        grammar's: a saved view is the same text with or without it.
+        """
+        where, params = spec.where(**kw)
+        if omni.hides_fitted(spec):
+            clause = queries.HIDE_FITTED_CLAUSE
+            where = f"{where} AND {clause}" if where else clause
+        return where, params
+
     def reload(self) -> None:
         spec = self.omnibox.spec()
-        where, params = spec.where()
+        where, params = self._where(spec)
         single_type = _single_abyssal_type(spec)
+        # One column per positive holds chip, deduplicated by column key, in
+        # the order the chips were typed. They go BEFORE any roll extras
+        # because a holds chip narrows the table to ships and a roll chip to
+        # modules: the two never share a table, and if they ever did, the
+        # count of the thing the user asked about should come first.
+        holds_terms = single_holds_terms(spec)
+        # The "of M stacks" denominator follows the same hide rule as the rows:
+        # with the fitted rows out of the everyday view, an unfiltered table
+        # must read "N of N", not "N of N+racks" with rows nobody can find.
+        hiding = omni.hides_fitted(spec)
+        total_where = queries.HIDE_FITTED_CLAUSE if hiding else ""
+        # What the filter matches before the hide rule, so an empty table can
+        # say "6 fitted rows hidden" rather than nothing; the lean count is a
+        # few milliseconds and runs on the pool with the rows.
+        plain_where, plain_params = spec.where()
 
         def fetch(conn: sqlite3.Connection):
             rows = queries.fetch_assets(conn, where, params)
-            total = conn.execute("SELECT COUNT(*) AS c FROM assets").fetchone()["c"]
+            total = queries.count_assets(conn, total_where, ())
+            hidden = 0
+            if hiding:
+                hidden = queries.count_assets(conn, plain_where, plain_params) - len(rows)
             # The badge tooltips and the roll cells for every abyssal row on
             # the table, from one batched query alongside the rows they
             # describe -- so a fetch that just completed shows up on the
@@ -661,27 +768,37 @@ class AssetsView(QWidget):
             # from) and simply go unread without the columns.
             attrs: list[dict] = []
             extra: list[tuple[str, str]] = []
+            # Each holds chip's count for the ships on the table, fetched
+            # with the rows so a reload never leaves a column of blanks.
+            counts: dict[str, dict[int, int]] = {}
+            for term in holds_terms:
+                extra.append((holds_column_key(term), holds_column_header(term)))
+                counts[holds_column_key(term)] = queries.holds_counts(
+                    conn, [r["item_id"] for r in rows], term.name, term.bay
+                )
             if single_type is not None:
                 attrs, _bounds = queries.abyssal_type_columns(conn, single_type)
                 if attrs:
-                    extra = [
+                    extra.extend(
                         (roll_key(a["attribute_id"]), abyssal.short_label(a["name"], a["label"]))
                         for a in attrs
-                    ]
+                    )
                     extra.append((ROLL_MEAN_KEY, "Roll"))
-            return rows, total, summaries, extra, cells, attrs
+            return rows, total, summaries, extra, cells, attrs, counts, hidden
 
         self._query.run(fetch, self._on_rows, self._on_query_failed)
         self._refresh_rail()
 
     def _on_rows(self, payload) -> None:
-        rows, total, summaries, extra, cells, attrs = payload
+        rows, total, summaries, extra, cells, attrs, holds, hidden = payload
         self._total_stacks = total
+        self._hidden_fitted = max(0, int(hidden))
         self.model.set_abyssal_summaries(summaries)
         self._extra_columns = list(extra)
         self._cells = cells
         self._cell_attrs = attrs
         self.model.set_abyssal_cells(cells, attrs)
+        self.model.set_holds_counts(holds)
         self._apply_rows(rows)
         self._update_state_row(len(rows))
         if not self._sized_once:
@@ -719,12 +836,18 @@ class AssetsView(QWidget):
             if only_keys is not None and key not in only_keys:
                 continue
             width = metrics.horizontalAdvance(title) + 24
-            roll = is_roll_key(key)
+            # The dynamic columns are measured as painted: cell_value is the
+            # raw number for the export, and its repr is several times wider
+            # than the "26 tf" (or the grouped "12,400") the cell shows.
+            painted = (
+                self.model.roll_cell_text
+                if is_roll_key(key)
+                else self.model.holds_cell_text
+                if is_holds_key(key)
+                else None
+            )
             for row in rows[: self._SIZING_SAMPLE]:
-                # Roll cells are measured as painted: cell_value is the raw
-                # float for the export, whose repr is several times wider
-                # than the "26 tf" the cell shows.
-                value = self.model.roll_cell_text(row, key) if roll else self.model.cell_value(row, key)
+                value = painted(row, key) if painted else self.model.cell_value(row, key)
                 if value is not None:
                     width = max(width, metrics.horizontalAdvance(str(value)) + 24)
             header.resizeSection(column, min(width, 420))
@@ -847,6 +970,19 @@ class AssetsView(QWidget):
         except Exception:  # noqa: BLE001 - a hint must never break the view
             has_sde = True
         if has_sde:
+            if self._hidden_fitted:
+                # The filter found rows and the everyday hide rule removed
+                # every one of them: a bare word that names a fitted module
+                # would otherwise read as "0 of 545" with no explanation.
+                n = self._hidden_fitted
+                self.empty_hint.setStyleSheet(f"color: {palette.SECONDARY_TEXT};")
+                self.empty_hint.setText(
+                    f"{n:,} fitted row{'s' if n != 1 else ''} match but are hidden -- "
+                    "add <b>is:fitted</b>, or use an <b>item:</b> or <b>cat:</b> chip, "
+                    "to show what is in module slots."
+                )
+                self.empty_hint.setVisible(True)
+                return
             self.empty_hint.setVisible(False)
             return
         # status_hex rather than a literal: it is already measured against
@@ -875,7 +1011,7 @@ class AssetsView(QWidget):
             # quantities of the matched items under the FULL filter,
             # text included; the user is hunting a thing, not browsing
             # values.
-            where, params = spec.where()
+            where, params = self._where(spec)
 
             def fetch_flip(conn: sqlite3.Connection):
                 return queries.where_is_item(conn, level, where, params)
@@ -885,7 +1021,7 @@ class AssetsView(QWidget):
 
         # Rollup mode facets by every filter except chips of the rail's own
         # level, so picking one location still shows the others to switch to.
-        where, params = spec.where(exclude_level=level)
+        where, params = self._where(spec, exclude_level=level)
         sort = self.rail.current_sort()
 
         def fetch_rollups(conn: sqlite3.Connection):
@@ -963,9 +1099,19 @@ class AssetsView(QWidget):
         # open from the table, the rail, anywhere, and a second binding on the
         # omnibox made the pair ambiguous (see Omnibox.add_btn).
         key("Ctrl+F", self.omnibox.open_draft, self)
+        # Tab-wide too, and the only bindings of either sequence anywhere in
+        # the app: both cards must open from the table, the rail's filter
+        # box or the omnibox alike, and a second binding of the same
+        # sequence would make the pair ambiguous and Qt would fire neither
+        # (the Ctrl+F lesson above).
+        key("Ctrl+S", self._open_save_card, self)
+        key("Ctrl+L", self._open_load_card, self)
+        # Ctrl+digit loads the view on that digit from anywhere on the tab.
+        # It used to save into the slot instead, which meant one keystroke
+        # could overwrite a view; a digit is given out from the key cell in
+        # the Save and Load cards now, so the shortcut is read-only.
         for digit in range(1, 10):
-            key(f"Ctrl+{digit}", lambda d=digit: self._save_view(d), self)
-            key(str(digit), lambda d=digit: self._recall_view(d), self.tree)
+            key(f"Ctrl+{digit}", lambda d=digit: self._recall_view(d), self)
         key("g", self._cycle_group_by, self.tree)
         key("j", lambda: self._move_current(1), self.tree)
         key("k", lambda: self._move_current(-1), self.tree)
@@ -1028,47 +1174,197 @@ class AssetsView(QWidget):
         QMessageBox.information(self, "Keyboard", f"<table>{rows}</table>")
 
     # ------------------------------------------------------------ saved views
-    def _save_view(self, slot: int) -> None:
-        state = json.dumps(
-            {
-                "filter": self.omnibox.spec().to_text(),
-                "group_by": self._current_group_key() or "",
-                "rail_level": self.rail.current_level(),
-            }
-        )
-        with db.transaction(self.conn):
-            self.conn.execute(
-                "INSERT INTO saved_views(slot, state_json) VALUES(?, ?) "
-                "ON CONFLICT(slot) DO UPDATE SET state_json = excluded.state_json",
-                (slot, state),
-            )
-        self.footer.setText(f"Saved view {slot}.")
+    def _current_state(self) -> views.ViewState:
+        """The whole working posture: filter text, group-by key, rail level and sort.
 
-    def _recall_view(self, slot: int) -> None:
-        row = self.conn.execute(
-            "SELECT state_json FROM saved_views WHERE slot = ?", (slot,)
-        ).fetchone()
-        if row is None:
-            self.footer.setText(f"No saved view in slot {slot}.")
-            return
-        try:
-            state = json.loads(row["state_json"])
-        except ValueError:
-            self.footer.setText(f"Saved view {slot} is unreadable.")
-            return
-        # Combo and rail level move silently; the omnibox's set_spec fires
-        # the single changed() that reloads rows, groups and rail together.
-        index = self.group_combo.findData(state.get("group_by") or "")
+        That is what a view is made of.
+        """
+        return views.ViewState(
+            self.omnibox.spec().to_text(),
+            self._current_group_key() or "",
+            self.rail.current_level(),
+            self.rail.current_sort(),
+        )
+
+    def _apply_view(self, view) -> None:
+        """Restore one view. The combo, the rail level and the rail sort
+        move silently; the omnibox's set_spec fires the single changed()
+        that reloads rows, groups and rail together.
+
+        All three are advisory. A view imported from a shared filter line
+        names no group-by, rail level or sort at all, a view saved before
+        v8 names no sort, and a build that has dropped a rollup level would
+        otherwise throw over a view that is still perfectly usable; in every
+        case the control is left where the user had it.
+        """
+        index = self.group_combo.findData(view.state.group_by or "")
         if index >= 0:
             self.group_combo.blockSignals(True)
             self.group_combo.setCurrentIndex(index)
             self.group_combo.blockSignals(False)
         level_keys = [key for _label, key in queries.ROLLUP_LEVELS]
-        if state.get("rail_level") in level_keys:
+        if view.state.rail_level in level_keys:
             self.rail.level.blockSignals(True)
-            self.rail.level.setCurrentIndex(level_keys.index(state["rail_level"]))
+            self.rail.level.setCurrentIndex(level_keys.index(view.state.rail_level))
             self.rail.level.blockSignals(False)
-        self.omnibox.set_spec(omni.parse(state.get("filter", "")))
+        if view.state.rail_sort in SORT_KEYS:
+            self.rail.set_sort(view.state.rail_sort)
+        self.omnibox.set_spec(omni.parse(view.state.filter))
+
+    def _save_named(
+        self, name: str, state: views.ViewState | None = None, slot: int | None = None
+    ) -> None:
+        """Store a view by name, silently replacing a view already called that.
+
+        The save command and the Save card both end here. The replacement is
+        the point -- re-saving a view after refining it is the common act,
+        and a name-collision prompt would stand in the way of it every single
+        time.
+
+        The typed command saves the whole current posture and touches no
+        slot; the card may hand over a state of its own (the filter minus
+        the chips crossed out in its well) and a digit, which is assigned in
+        the same transaction so a crash between the two cannot leave a view
+        saved but off the key it was given. A slot of None leaves whatever
+        slot a replaced view already holds.
+        """
+        try:
+            with db.transaction(self.conn):
+                view, replaced = views.save_view(
+                    self.conn, name, state if state is not None else self._current_state()
+                )
+                if slot is not None:
+                    views.set_slot(self.conn, view.view_id, int(slot))
+        except ValueError:
+            self.footer.setText("A view needs a name.")
+            return
+        message = (
+            f"Saved view '{view.name}' (replaced)" if replaced
+            else f"Saved view '{view.name}'"
+        )
+        if slot is not None:
+            message += f" to slot {int(slot)}"
+        self.footer.setText(message + ".")
+
+    def _on_view_save(
+        self, name: str, filter_line: str, slot, group_by: str, rail_level: str, rail_sort: str
+    ) -> None:
+        """The Save card's save: name, filter line, digit and posture as the card left them.
+
+        The filter line is the well's, the digit is the key cell's, and the
+        posture is the card's own controls' -- which opened on the tab's and
+        may differ from it now, exactly as the well's line may differ from
+        the omnibox's.
+        """
+        state = views.ViewState(filter_line, group_by, rail_level, rail_sort)
+        self._save_named(name, state, None if slot is None else int(slot))
+
+    def _load_named(self, name: str) -> None:
+        """The load command: recall by name, or say there is no such view.
+
+        The token is consumed either way, so a typo cannot leave a command
+        in the field that fires again on the next Enter.
+        """
+        view = views.find_view(self.conn, name)
+        if view is None:
+            self.footer.setText(f"No saved view named '{name}'.")
+            return
+        self._apply_view(view)
+        self._notice(f"Loaded view '{view.name}'.")
+
+    def _on_save_requested(self, name: str) -> None:
+        """The omnibox's save command: a name saves at once, an empty one opens the card.
+
+        The card is anchored on the field the command was typed in.
+        """
+        if name.strip():
+            self._save_named(name)
+        else:
+            self._open_save_card(self.omnibox)
+
+    def _on_load_requested(self, name: str) -> None:
+        if name.strip():
+            self._load_named(name)
+        else:
+            self._open_load_card(self.omnibox)
+
+    def _open_save_card(self, anchor: QWidget | None = None) -> None:
+        self._open_card(omni.Chip(omni.SAVE_COMMAND, ""), anchor or self.save_btn)
+
+    def _open_load_card(self, anchor: QWidget | None = None) -> None:
+        self._open_card(omni.Chip(omni.LOAD_COMMAND, ""), anchor or self.load_btn)
+
+    # The Load card's editing signals. Each is a row or two on the GUI
+    # thread inside one transaction -- the _on_fit_save precedent -- and
+    # each re-lists afterwards, so the card renders what the database now
+    # holds rather than what the row widget assumed it would.
+    def _on_view_load(self, view_id: int) -> None:
+        view = views.get_view(self.conn, view_id)
+        if view is None:
+            self.footer.setText("That view no longer exists.")
+            return
+        self._apply_view(view)
+        self._notice(f"Loaded view '{view.name}'.")
+
+    def _on_view_slot(self, view_id: int, slot) -> None:
+        with db.transaction(self.conn):
+            views.set_slot(self.conn, view_id, None if slot is None else int(slot))
+        view = views.get_view(self.conn, view_id)
+        name = view.name if view is not None else ""
+        self.footer.setText(
+            f"'{name}' has no slot." if slot is None else f"Slot {int(slot)}: '{name}'."
+        )
+        self._fetch_load_data()
+
+    def _on_view_rename(self, view_id: int, name: str) -> None:
+        try:
+            with db.transaction(self.conn):
+                views.rename_view(self.conn, view_id, name)
+        except views.NameTaken:
+            # The re-list below puts the stored name back in the row, so
+            # the revert needs no undo of its own.
+            self.footer.setText(f"A view named '{name}' already exists.")
+        except ValueError:
+            self.footer.setText("A view needs a name.")
+        else:
+            self.footer.setText(f"Renamed to '{name}'.")
+        self._fetch_load_data()
+
+    def _on_view_delete(self, view_id: int) -> None:
+        view = views.get_view(self.conn, view_id)
+        with db.transaction(self.conn):
+            views.delete_view(self.conn, view_id)
+        self.footer.setText(
+            f"Forgot view '{view.name}'." if view is not None else "Forgot that view."
+        )
+        self._fetch_load_data()
+
+    def _on_view_import(self, text: str, name: str) -> None:
+        """The paste box: a shared filter line becomes a view of its own.
+
+        The text travels as a bound parameter and is canonicalised through
+        omni.parse, so a line that is not grammar at all is stored as the
+        bare text search it amounts to rather than as anything executable.
+        """
+        try:
+            with db.transaction(self.conn):
+                view, replaced = views.import_text(self.conn, text, name)
+        except ValueError:
+            self.footer.setText("Nothing to import.")
+            return
+        self.footer.setText(
+            f"Imported view '{view.name}' (replaced)." if replaced
+            else f"Imported view '{view.name}'."
+        )
+        self._fetch_load_data(select=view.view_id)
+
+    def _recall_view(self, slot: int) -> None:
+        view = views.view_in_slot(self.conn, slot)
+        if view is None:
+            self.footer.setText(f"No saved view in slot {slot}.")
+            return
+        self._apply_view(view)
+        self._notice(f"Loaded view '{view.name}' from slot {slot}.")
 
     # ---------------------------------------------------------- cell actions
     def _filter_current_cell(self, *, negated: bool) -> None:
@@ -1116,10 +1412,14 @@ class AssetsView(QWidget):
         if row is None:  # empty space, or a group header
             return None
         key, header = self.model.columns()[index.column()]
-        # A roll cell's value is the rendered text ("-63%", "27 tf"), which
-        # is what "Copy cell" should put on the clipboard; a row column's is
-        # the raw value, as before.
-        value = index.data(Qt.DisplayRole) if is_roll_key(key) else row[key]
+        # A dynamic cell's value is the rendered text ("-63%", "27 tf",
+        # "12,400"), which is what "Copy cell" should put on the clipboard --
+        # and neither a roll nor a holds key is a column of the row at all,
+        # so reading row[key] for one would raise. A row column keeps its raw
+        # value, as before.
+        value = (
+            index.data(Qt.DisplayRole) if is_roll_key(key) or is_holds_key(key) else row[key]
+        )
         kind = _COLUMN_CHIP_KIND.get(key)
 
         menu = QMenu(self)
@@ -1154,6 +1454,18 @@ class AssetsView(QWidget):
         if (row["category"] or "") in _FIT_VIEWABLE_CATEGORIES or _is_corpse(row):
             menu.addSeparator()
             menu.addAction("View fit…", lambda: self._open_fit_dialog(row))
+        if is_assembled_ship(row) and omni.deviation_filter_active(self.omnibox.spec()):
+            # Offered only while the table is filtered to deviating ships
+            # (`-fit:"…"` or `-is:fit`): then every row on screen is a ship
+            # that deviates and the fit it deviates from is known, so the
+            # entry means one thing. Off that filter the inspector's
+            # Compare… button still opens the same window. hull_has_fits is
+            # one index probe and stays as the guard against a hull whose
+            # fit was forgotten between the filter and the click.
+            compare = menu.addAction(
+                "Compare deviation…", lambda: self._open_compare_dialog(row)
+            )
+            compare.setEnabled(fits.hull_has_fits(self.conn, row["type_id"]))
         return menu
 
     def _open_fit_dialog(self, row: sqlite3.Row) -> None:
@@ -1166,35 +1478,148 @@ class AssetsView(QWidget):
         dialog = FitDialog(row["item_id"], name, ship_type_id=row["type_id"], parent=self)
         dialog.exec()
 
-    # ----------------------------------------------------------- abyssal card
-    def _open_card(self, chip: omni.Chip, anchor: QWidget) -> None:
-        """The abyssal chip's glyph, or the omnibox's deferred request after
-        the chip was typed: seed the card from the current chips, start its
-        data fetch, and show it under the chip."""
-        card = self._card
-        if card is None:
-            card = self._card = AbyssalCard(self)
+    def _open_compare_dialog(self, row: sqlite3.Row) -> None:
+        """Open, or raise and re-run, the comparison window for one ship.
+
+        The fit compared is the one a positive `fit:` chip names, else the
+        closest -- fits.choose_fit's rule, the same one the inspector's Fit
+        block follows, so the window never contradicts the block. A window
+        already up for this ship is re-run rather than left as it was,
+        because the chip may have changed since it opened.
+        """
+        item_id = int(row["item_id"])
+        wanted = named_fit(self.omnibox.spec())
+        dialog = self._compare_dialogs.get(item_id)
+        if dialog is None:
+            name = row["custom_name"] or row["item"]
+            dialog = FitCompareDialog(item_id, name, row["type_id"], wanted, parent=self)
+            self._compare_dialogs[item_id] = dialog
+            dialog.finished.connect(lambda _result, i=item_id: self._forget_compare_dialog(i))
+        else:
+            dialog.load(wanted)
+        # show() rather than exec(): the omnibox and the table keep working
+        # behind the window, which a modal loop would block. raise_ and
+        # activateWindow cover the re-open, where it is up but behind.
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _forget_compare_dialog(self, item_id: int) -> None:
+        dialog = self._compare_dialogs.pop(item_id, None)
+        if dialog is not None:
+            dialog.deleteLater()
+
+    def _compare_inspected(self, host: _InspectorHost) -> None:
+        if host.row is not None:
+            self._open_compare_dialog(host.row)
+
+    # ------------------------------------------------------------ filter cards
+    @property
+    def _card(self) -> AbyssalCard | None:
+        """The abyssal card, or None before it has ever been opened.
+
+        Kept as a name of its own because it is the card everything written
+        before the holds and fit ones means by "the card".
+        """
+        return self._cards.get(omni.ABYSSAL_KIND)
+
+    def _card_for(self, kind: str) -> FilterCard | None:
+        """The card for one chip kind, built and wired on first use.
+
+        None for a kind with no card, which a saved view from a newer build
+        can perfectly well carry.
+        """
+        card = self._cards.get(kind)
+        if card is not None:
+            return card
+        factory = _CARD_CLASSES.get(kind)
+        if factory is None:
+            return None
+        card = factory(self)
+        self._cards[kind] = card
+        card.filter_changed.connect(self._card_count.trigger)
+        card.done.connect(lambda chips, c=card: self._on_card_done(c, chips))
+        # A count still on the clock when the card goes away would run for
+        # nobody.
+        card.cancelled.connect(self._card_count.stop)
+        if isinstance(card, AbyssalCard):
             card.selection_changed.connect(self._on_card_selection)
-            card.filter_changed.connect(self._card_count.trigger)
             card.fetch_requested.connect(self._on_card_fetch)
-            card.done.connect(self._on_card_done)
-            # A count still on the clock when the card goes away would run
-            # for nobody.
-            card.cancelled.connect(self._card_count.stop)
+        elif isinstance(card, HoldsCard):
+            # The picker's list is the bay's, so a bay click is a fresh
+            # trip; the anchor is the one the card opened on, so the
+            # refilled card stays under its chip.
+            card.bay_changed.connect(lambda _bay: self._fetch_holds_data(self._card_anchor))
+        elif isinstance(card, FitCard):
+            card.parse_requested.connect(self._on_fit_parse)
+            card.save_requested.connect(self._on_fit_save)
+            card.delete_requested.connect(self._on_fit_delete)
+        elif isinstance(card, SaveViewCard):
+            card.save_requested.connect(self._on_view_save)
+        elif isinstance(card, LoadViewCard):
+            card.load_requested.connect(self._on_view_load)
+            card.slot_requested.connect(self._on_view_slot)
+            card.rename_requested.connect(self._on_view_rename)
+            card.delete_requested.connect(self._on_view_delete)
+            card.import_requested.connect(self._on_view_import)
+        return card
+
+    def _open_card(self, chip: omni.Chip, anchor: QWidget) -> None:
+        """Seed that kind's card from the current chips, fetch its data and show it.
+
+        Reached from a card chip's glyph, the omnibox's deferred request after
+        the chip was typed, or the draft builder's empty chip; the card is
+        shown under the anchor.
+        """
+        card = self._card_for(chip.kind)
+        if card is None:
+            return
+        for other in self._cards.values():
+            if other is not card and other.isVisible():
+                # A Qt.Popup closes on any outside click, so a glyph clicked
+                # while another card is up has already cancelled it on the
+                # desktop; doing it here keeps the two paths identical and
+                # covers the programmatic open.
+                other.hide()
         if card.isVisible():
             card.hide()  # reads as Cancel; the seed below starts afresh
-        card.seed(self.omnibox.spec().chips)
-        self._fetch_card_data(card.seeded_types(), with_types=True, anchor=anchor)
+        self._active_card = card
+        self._card_anchor = anchor
+        # The chip whose glyph was clicked goes first: a card seeds from the
+        # first chip of its kind, and two holds chips AND, so opening the
+        # second one's card must not rewrite the first.
+        chips = list(self.omnibox.spec().chips)
+        if chip in chips:
+            chips = [chip, *(c for c in chips if c != chip)]
+        card.seed(chips)
+        self._fetch_for_card(card, anchor)
         card.adjustSize()
-        self._place_card(anchor)
+        self._place_card(card, anchor)
         card.show()
+        # The footer opens on "…" and only a change would otherwise ask for
+        # a figure, so a card seeded and left alone would keep the ellipsis:
+        # the count is asked for once on opening. The debounce collapses
+        # this with whatever the seed announced.
+        self._card_count.trigger()
         # Once more after the event loop has laid the card out: the size it
         # has before its first show is a guess, and the anchor itself may
         # have moved if the omnibox re-flowed (the draft chip's lesson).
-        QTimer.singleShot(0, lambda: self._place_card(anchor))
+        QTimer.singleShot(0, lambda: self._place_card(card, anchor))
 
-    def _place_card(self, anchor: QWidget) -> None:
-        card = self._card
+    def _fetch_for_card(self, card: FilterCard, anchor: QWidget | None) -> None:
+        """Start the one pool-thread trip that fills the card that is opening."""
+        if isinstance(card, AbyssalCard):
+            self._fetch_card_data(card.seeded_types(), with_types=True, anchor=anchor)
+        elif isinstance(card, HoldsCard):
+            self._fetch_holds_data(anchor)
+        elif isinstance(card, FitCard):
+            self._fetch_fit_data(anchor)
+        elif isinstance(card, SaveViewCard):
+            self._fetch_save_data(anchor)
+        elif isinstance(card, LoadViewCard):
+            self._fetch_load_data(anchor)
+
+    def _place_card(self, card: FilterCard | None, anchor: QWidget) -> None:
         if card is None:
             return
         try:
@@ -1237,7 +1662,11 @@ class AssetsView(QWidget):
         if card is None:
             return
         spec = self.omnibox.spec()
-        where, params = spec.where(exclude_kinds=(*CARD_KINDS, omni.ROLL_KIND))
+        # The plain where, not self._where: this is the abyssal card's own type
+        # list, and a picker faceted only by a negated abyssal chip would
+        # otherwise drop the fitted modules and count one short of what Done
+        # then shows.
+        where, params = spec.where(exclude_kinds=(*AbyssalCard.KINDS, omni.ROLL_KIND))
         single = selected[0] if len(selected) == 1 else None
         names = list(selected)
 
@@ -1262,53 +1691,237 @@ class AssetsView(QWidget):
             card.set_pending(payload["pending"])
             card.adjustSize()
             if anchor is not None and card.isVisible():
-                self._place_card(anchor)
+                self._place_card(card, anchor)
 
         self._card_query.run(fetch, deliver, self._on_query_failed)
 
     def _on_card_selection(self, names: list) -> None:
         self._fetch_card_data(list(names), with_types=False)
 
-    def _spec_with_card(self, chips: list) -> omni.FilterSpec:
-        """The omnibox's filter with the card's chips in place of every
-        positive abyssal/stat chip and everything else -- other kinds, a
-        typed roll: chip, bare text, and negated chips of the card's kinds,
-        which it cannot represent and must not silently discard -- exactly
-        as it was. What Done writes, and what the live count counts, so the
-        two can never disagree."""
+    def _fetch_holds_data(self, anchor: QWidget | None = None) -> None:
+        """The holds picker's vocabulary for the bay the card has selected.
+
+        The whole ship's consumables, the cargo holds', every fuel, drone or
+        fighter with the held ones first, or the fleet hangars' contents
+        (queries.held_type_counts has each rule). Run on opening and again
+        on every bay click.
+
+        Faceted by every chip except the holds ones, for the abyssal
+        picker's reason -- a list faceted by the very chip the card is about
+        to rewrite would only offer the type already picked.
+        """
+        card = self._cards.get(HOLDS_KIND)
+        if card is None:
+            return
+        where, params = self._where(self.omnibox.spec(), exclude_kinds=(HOLDS_KIND,))
+        bay = card.bay()
+
+        def fetch(conn: sqlite3.Connection) -> list:
+            return queries.held_type_counts(conn, where, params, bay)
+
+        def deliver(rows: list) -> None:
+            card.set_types(rows)
+            card.adjustSize()
+            if anchor is not None and card.isVisible():
+                self._place_card(card, anchor)
+
+        self._card_query.run(fetch, deliver, self._on_query_failed)
+
+    def _fetch_fit_data(self, anchor: QWidget | None = None, select: int | None = None) -> None:
+        """The stored fits, for the card's list.
+
+        One is selected by id after a save, so the fit just pasted is the one
+        Done would write.
+        """
+        card = self._cards.get(FIT_KIND)
+        if card is None:
+            return
+
+        def deliver(rows: list) -> None:
+            card.set_fits(rows, select)
+            card.adjustSize()
+            if anchor is not None and card.isVisible():
+                self._place_card(card, anchor)
+
+        self._card_query.run(fits.list_fits, deliver, self._on_query_failed)
+
+    def _fetch_save_data(self, anchor: QWidget | None = None) -> None:
+        """One trip for the Save card: the library as it stands.
+
+        The card needs it to say what a save would replace, which view already
+        holds the same line and whose digit a chosen key takes. The state and
+        the group-by choices are read here on the GUI thread -- a pure read
+        of widgets the card must not touch itself -- so the card's posture
+        controls open on the tab's and offer exactly its groupings.
+        """
+        card = self._cards.get(omni.SAVE_COMMAND)
+        if card is None:
+            return
+        state = self._current_state()
+        group_options = [
+            (self.group_combo.itemText(i), self.group_combo.itemData(i))
+            for i in range(self.group_combo.count())
+        ]
+
+        def deliver(rows: list) -> None:
+            card.set_view(state, rows, group_options)
+            card.adjustSize()
+            if anchor is not None and card.isVisible():
+                self._place_card(card, anchor)
+
+        self._card_query.run(views.list_views, deliver, self._on_query_failed)
+
+    def _fetch_load_data(
+        self, anchor: QWidget | None = None, select: int | None = None
+    ) -> None:
+        """The library, for the Load card's list.
+
+        One view is selected by id after an import, so the view just added is
+        the one Load view loads. Every editing handler ends here, which is
+        what keeps the rows and the database in step after a rename, a slot
+        move or a deletion.
+        """
+        card = self._cards.get(omni.LOAD_COMMAND)
+        if card is None:
+            return
+        state = self._current_state()
+
+        def deliver(rows: list) -> None:
+            card.set_current(state)
+            card.set_views(rows, select)
+            card.adjustSize()
+            if anchor is not None and card.isVisible():
+                self._place_card(card, anchor)
+
+        self._card_query.run(views.list_views, deliver, self._on_query_failed)
+
+    def _spec_with_card(self, card: FilterCard, chips: list) -> omni.FilterSpec:
+        """The omnibox's filter with the card's chips in place of the ones it owns.
+
+        Everything else -- other kinds, bare text, and the chips of its own
+        kinds it cannot represent (a typed roll:, a negated holds:) -- stays
+        exactly as it was. This is what Done writes and what the live count
+        counts, so the two can never disagree.
+        """
         spec = self.omnibox.spec()
-        kept = [c for c in spec.chips if c.kind not in CARD_KINDS or c.negated]
+        kept = [c for c in spec.chips if not card.owns(c)]
         return omni.FilterSpec(text=spec.text, chips=kept + list(chips))
 
     def _fetch_card_count(self) -> None:
-        """The card's footer: how many items its chips would leave, out of
-        the picked type's items under the same filter -- the abyssal chip
-        alone, so the denominator is the dropdown's own count for the type
-        (plus whatever a kept roll: or negated chip takes off both). Both
-        counts in one trip; a stale answer is dropped by the generation
-        guard, and the card shows "…" until the fresh one lands."""
-        card = self._card
+        """The open card's footer: how many rows its chips would leave.
+
+        The denominator is what its own totals() names -- the picked type's
+        items for the abyssal card, the assembled ships (of one hull, for a
+        fit) for the other two. Both counts in one trip; a stale answer is
+        dropped by the generation guard, and the card shows "…" until the
+        fresh one lands.
+        """
+        card = self._active_card
         if card is None or not card.isVisible():
             return
+        shape, argument = card.totals()
+        if shape == "none":
+            # A command card asks the footer nothing, so nothing is counted:
+            # the shape is read before any WHERE is built, or opening the
+            # Save card would run two counts over the whole estate to fill
+            # a sentence that is not on screen.
+            return
         chips = card.chips()
-        matched_where, matched_params = self._spec_with_card(chips).where()
-        total_where, total_params = self._spec_with_card(chips[:1]).where()
+        matched_where, matched_params = self._where(self._spec_with_card(card, chips))
+        if shape == "ships":
+            hull = None if argument is None else int(argument)
+            total_where, total_params = self._where(self._spec_with_card(card, []))
 
-        def fetch(conn: sqlite3.Connection) -> tuple[int, int]:
-            return (
-                queries.count_assets(conn, matched_where, matched_params),
-                queries.count_assets(conn, total_where, total_params),
-            )
+            def fetch(conn: sqlite3.Connection) -> tuple[int, int]:
+                return (
+                    queries.count_ships(conn, matched_where, matched_params, hull),
+                    queries.count_ships(conn, total_where, total_params, hull),
+                )
+        else:
+            total_where, total_params = self._where(self._spec_with_card(card, list(argument)))
+
+            def fetch(conn: sqlite3.Connection) -> tuple[int, int]:
+                return (
+                    queries.count_assets(conn, matched_where, matched_params),
+                    queries.count_assets(conn, total_where, total_params),
+                )
 
         def deliver(counts: tuple[int, int]) -> None:
             card.set_match_count(*counts)
 
         self._card_count_query.run(fetch, deliver, self._on_query_failed)
 
-    def _on_card_done(self, chips: list) -> None:
-        """Done: one set_spec, one reload (see _spec_with_card)."""
+    def _on_card_done(self, card: FilterCard, chips: list) -> None:
+        """Done: one set_spec, one reload (see _spec_with_card).
+
+        The card is passed in rather than read off _active_card so a Done
+        arriving from a card that is no longer the active one still replaces
+        its own kinds and nobody else's.
+        """
         self._card_count.stop()
-        self.omnibox.set_spec(self._spec_with_card(chips))
+        self.omnibox.set_spec(self._spec_with_card(card, chips))
+
+    # ------------------------------------------------------------- fit store
+    def _on_fit_parse(self, text: str) -> None:
+        """The paste box settled: parse it on the pool thread and hand the card the result.
+
+        The parse is one SDE lookup per line.
+        """
+        card = self._cards.get(FIT_KIND)
+        if card is None:
+            return
+        self._card_query.run(
+            lambda conn: fits.parse_eft(conn, text), card.set_parsed, self._on_query_failed
+        )
+
+    def _on_fit_save(self, name: str, text: str) -> None:
+        """Store the pasted fit and re-list.
+
+        The text is parsed again here rather than trusting the card's last
+        rendered parse: what gets stored must come from what is being saved.
+        Both that and the write run on the GUI thread inside one
+        transaction, the _save_named precedent -- a fit is a handful of rows
+        and one indexed SDE lookup per line -- and saving one under an
+        existing name of the same hull is an edit rather than a collision
+        (fits.save_fit deletes first), so nothing here can surface an
+        IntegrityError.
+        """
+        card = self._cards.get(FIT_KIND)
+        if card is None:
+            return
+        parsed = fits.parse_eft(self.conn, text)
+        try:
+            with db.transaction(self.conn):
+                fit_id = fits.save_fit(self.conn, parsed, name, text)
+        except (ValueError, sqlite3.Error) as exc:
+            self.footer.setText(f"Could not store the fit: {exc}")
+            return
+        self._fetch_fit_data(select=fit_id)
+        # The rows answer to the store as much as to the filter: under
+        # fit:"Ratting" a replacement Ratting rack changes which ships
+        # match, and the inspector's fit block is diffed against the fit
+        # that was. reload() re-fetches the rows and re-renders every open
+        # inspector against them (_on_rows), so the table never shows the
+        # answer the store no longer gives. The message goes on last: the
+        # rows landing rewrite the footer with the set's sum.
+        self.reload()
+        self._notice(f"Stored the fit {name or parsed.name}.")
+
+    def _on_fit_delete(self, fit_id: int) -> None:
+        """Forget one stored fit and re-list.
+
+        A `fit:` chip naming it is left standing: it now matches nothing,
+        which is the honest answer, and removing the user's chip behind their
+        back would be worse -- and the rows have to say so at once, which is
+        the reload (see _on_fit_save).
+        """
+        if self._cards.get(FIT_KIND) is None:
+            return
+        with db.transaction(self.conn):
+            fits.delete_fit(self.conn, fit_id)
+        self._fetch_fit_data()
+        self._card_count.trigger()
+        self.reload()
 
     def _on_card_fetch(self, names: list) -> None:
         """The banner's Fetch: resolve the picked type (none = every type)
@@ -1335,6 +1948,7 @@ class AssetsView(QWidget):
         inspector.refresh_price_clicked.connect(lambda: self._refresh_inspected_price(host))
         inspector.pin_price_clicked.connect(lambda: self._pin_inspected_price(host))
         inspector.fetch_abyssal_clicked.connect(lambda: self._fetch_inspected_rolls(host))
+        inspector.compare_clicked.connect(lambda: self._compare_inspected(host))
 
     def _open_inspector_current(self) -> None:
         self._open_panel_at(self.tree.currentIndex())
@@ -1358,8 +1972,11 @@ class AssetsView(QWidget):
         self.inspector_window.activateWindow()
 
     def _show_inspected(self, host: _InspectorHost, row: sqlite3.Row) -> None:
-        """Render a row in one host and, for a mutated module, start the
-        rolls lookup that fills its stats section."""
+        """Render a row in one host and start the lookups its sections need.
+
+        Those are the rolls of a mutated module and the fit diff of an
+        assembled ship.
+        """
         host.row = row
         host.render(row)
         if _row_get(row, "is_dynamic_type"):
@@ -1369,6 +1986,14 @@ class AssetsView(QWidget):
             # paint its rolls under this one; the item guard in _load_rolls
             # would drop it anyway, but there is no point letting it land.
             host.rolls_query.cancel()
+        if is_assembled_ship(row):
+            self._load_fit_diff(host, row)
+        else:
+            # A packaged hull has no rack to compare, and a filter change
+            # that turns the inspected row into something else must take the
+            # block away rather than leave the last ship's verdict standing.
+            host.inspector.show_fit_diff(None)
+            host.fit_query.cancel()
 
     def _load_rolls(self, host: _InspectorHost, item_id: int) -> None:
         def fetch(conn: sqlite3.Connection) -> dict:
@@ -1386,12 +2011,37 @@ class AssetsView(QWidget):
 
         host.rolls_query.run(fetch, deliver, self._on_query_failed)
 
+    def _load_fit_diff(self, host: _InspectorHost, row: sqlite3.Row) -> None:
+        """The ship's rack against a stored fit of its hull.
+
+        The fit is the one an active positive `fit:` chip names, else the
+        closest stored fit -- and nothing at all when the hull has no stored
+        fit.
+        """
+        item_id, hull = row["item_id"], row["type_id"]
+        wanted = named_fit(self.omnibox.spec())
+
+        def fetch(conn: sqlite3.Connection):
+            return fits.diff_for_ship(conn, item_id, hull, wanted)
+
+        def deliver(diff) -> None:
+            # The same guard as _load_rolls: the generation guard drops a
+            # superseded lookup, and this drops one whose host has since
+            # closed or moved on -- read off this host's own row, so the
+            # window's diff can never paint in the panel.
+            current = host.row
+            if current is not None and current["item_id"] == item_id:
+                host.inspector.show_fit_diff(diff)
+
+        host.fit_query.run(fetch, deliver, self._on_query_failed)
+
     def _close_inspector(self, host: _InspectorHost) -> None:
-        # The row goes before anything is hidden, so a rolls result landing
-        # mid-close finds no row to paint under. The window's hide is
+        # The row goes before anything is hidden, so a rolls or diff result
+        # landing mid-close finds no row to paint under. The window's hide is
         # hide(), not reject(): reject emits finished, which leads back here.
         host.row = None
         host.rolls_query.cancel()
+        host.fit_query.cancel()
         host.hide()
 
     def _where_else_inspected(self, host: _InspectorHost) -> None:
@@ -1497,7 +2147,21 @@ class AssetsView(QWidget):
                     rows.append(row)
         return rows
 
+    def _notice(self, text: str) -> None:
+        """Show a one-line confirmation in the footer and keep it through the
+        next reload. The handlers that save a fit or load a view reload the
+        rows, and the rows' arrival rewrites the footer with the selection
+        sum a few hundred milliseconds later -- so a notice written before
+        the reload was gone before anyone read it."""
+        self._pending_notice = text
+        self.footer.setText(text)
+
     def _update_footer(self) -> None:
+        pending = getattr(self, "_pending_notice", None)
+        if pending:
+            self._pending_notice = None
+            self.footer.setText(pending)
+            return
         selected = self._selected_rows()
         rows = selected or self.model.rows()
         units = sum(int(r["quantity"] or 0) for r in rows)

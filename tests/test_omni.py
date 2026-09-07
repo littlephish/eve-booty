@@ -5,9 +5,10 @@ from __future__ import annotations
 import random
 import time
 
+import fit_corpus as fc
 import pytest
 
-from evasset import db, omni, queries
+from evasset import db, fits, fitting, omni, queries
 from evasset.config import ASSET_SAFETY_LOCATION_ID
 from evasset.omni import Chip, FilterSpec, parse
 
@@ -157,6 +158,10 @@ def test_every_prefix_parses_to_its_chip_kind():
         ("abyssal", omni.ABYSSAL_KIND),
         ('abyssal:"Abyssal Stasis Webifier"', omni.ABYSSAL_KIND),
         ("is:abyssal", omni.ABYSSAL_KIND),
+        ('holds:"Antimatter Charge M<500"', omni.HOLDS_KIND),
+        ('holds:"cargo/Antimatter Charge M<500"', omni.HOLDS_KIND),
+        ("fit:Ratting", omni.FIT_KIND),
+        ("is:fit", "is"),
     ]
     seen = 0
     for token, kind in cases:
@@ -165,7 +170,7 @@ def test_every_prefix_parses_to_its_chip_kind():
         assert [c.kind for c in spec.chips] == [kind]
         assert not spec.chips[0].negated
         seen += 1
-    assert seen == len(cases) == 19
+    assert seen == len(cases) == 23
 
 
 def test_quoted_values_keep_their_spaces():
@@ -271,10 +276,11 @@ def _random_stat_value(rng, alphabet):
 
 
 def test_round_trip_holds_for_generated_specs():
-    """Property test over the whole constructible space: any level-chip or
-    abyssal-chip value at all (quotes, backslashes, tabs, newlines, colons,
-    commas, unicode, empty), valid is:/val:/stat:/roll: values including
-    `..` ranges, random negation, random bare words. Seeded so a failure
+    """Property test over the whole constructible space: any level-chip,
+    abyssal-chip or fit-chip value at all (quotes, backslashes, tabs,
+    newlines, colons, commas, unicode, empty), valid
+    is:/val:/stat:/roll:/holds: values including `..` ranges and every bay
+    prefix, random negation, random bare words. Seeded so a failure
     reproduces exactly; the seed is arbitrary, not a date dependency."""
     rng = random.Random(682_431)
     level_alphabet = 'ab "\\\t\n-:é,'
@@ -284,9 +290,11 @@ def test_round_trip_holds_for_generated_specs():
     stat_alphabet = 'ab "\\\t-:é'
     is_values = list(omni.IS_FLAGS)
     kinds = list(omni.LEVEL_KINDS) + ["is", "val", omni.STAT_KIND, omni.ROLL_KIND,
-                                      omni.ABYSSAL_KIND]
-    checked = 0
+                                      omni.ABYSSAL_KIND, omni.HOLDS_KIND, omni.FIT_KIND]
+    bays = [""] + [f"{bay}/" for bay in fitting.HOLD_BAYS]
+    checked = command_free = 0
     stat_chips = ranges = abyssal_chips = 0
+    holds_chips = bayed = fit_chips = 0
     for _ in range(400):
         chips = []
         for _ in range(rng.randint(0, 5)):
@@ -303,20 +311,146 @@ def test_round_trip_holds_for_generated_specs():
                 assert term is not None, value
                 stat_chips += 1
                 ranges += term.op == ".."
+            elif kind == omni.HOLDS_KIND:
+                # A holds value is a stat comparison with an optional bay
+                # prefix; the stat alphabet carries no "/", so a generated
+                # name can never accidentally look like one.
+                prefix = rng.choice(bays)
+                value = prefix + _random_stat_value(rng, stat_alphabet)
+                term = omni.parse_holds(value)
+                assert term is not None, value
+                holds_chips += 1
+                bayed += term.bay is not None
             else:
                 value = "".join(rng.choice(level_alphabet)
                                 for _ in range(rng.randint(0, 8)))
                 abyssal_chips += kind == omni.ABYSSAL_KIND
+                fit_chips += kind == omni.FIT_KIND
             chips.append(Chip(kind=kind, value=value, negated=rng.random() < 0.5))
-        words = ["".join(rng.choice("abcdefg-") for _ in range(rng.randint(1, 6)))
+        words = ["".join(rng.choice("abcdefg-:") for _ in range(rng.randint(1, 6)))
                  for _ in range(rng.randint(0, 3))]
         spec = FilterSpec(text=" ".join(words), chips=chips)
-        assert parse(spec.to_text()) == spec, f"round-trip broke on {spec!r}"
+        line = spec.to_text()
+        assert parse(line) == spec, f"round-trip broke on {spec!r}"
+        # A saved view is a to_text() line that the omnibox commits again on
+        # recall, so if to_text could ever emit something extract_commands
+        # reads as a command, loading a view would silently save or load
+        # another one. Nothing generated here may look like a command, and
+        # stripping commands from the line must leave the spec unchanged.
+        remainder, commands = omni.extract_commands(line)
+        assert commands == [], f"to_text emitted a command for {spec!r}"
+        assert parse(remainder) == spec, f"stripping commands changed {spec!r}"
+        command_free += 1
         checked += 1
     assert checked == 400
+    assert command_free == 400, "the no-command proof must have run on every spec"
     assert stat_chips > 50, "the stat:/roll: branch must actually have been generated"
     assert ranges > 15, "and some of them must have been ranges"
     assert abyssal_chips > 30, "and the abyssal chip with arbitrary values"
+    assert holds_chips > 30, "and the holds chip"
+    assert bayed > 20, "with a bay prefix on some of them"
+    assert fit_chips > 30, "and the fit chip with arbitrary names"
+
+
+def test_save_and_load_are_still_plain_words_to_the_parser():
+    """The commands are lifted out of the line before parse() ever sees it,
+    so parse itself must stay exactly as unaware of them as it was of any
+    other unknown prefix -- a chip kind would be persistable, and a command
+    that could be saved into a view would run again on every recall."""
+    spec = parse('save:Foo load:Bar save:"Jita ships"')
+    assert spec.chips == []
+    assert spec.text == 'save:Foo load:Bar save:"Jita ships"'
+    assert all(c.kind not in omni.COMMAND_KINDS for c in parse("cat:Ship save:X").chips)
+
+
+def test_extract_commands_lifts_the_command_and_leaves_the_filter_alone():
+    """The one line a pilot types can carry both: `owner:Main save:"Jita
+    ships"` means "chip these, then keep them under that name", so the
+    remainder has to be exactly the filter half, quotes resolved on the
+    command's value and untouched on everything else."""
+    remainder, commands = omni.extract_commands('owner:Main save:"Jita ships" tritanium')
+    assert remainder == "owner:Main tritanium"
+    assert commands == [("save", "Jita ships")]
+    assert parse(remainder) == parse("owner:Main tritanium")
+
+
+def test_a_quoted_or_negated_command_is_a_search_and_not_a_command():
+    """`"save:x"` is the escape hatch for searching that literal text, and
+    `-save:x` negates a chip kind that does not exist. Neither may write to
+    the library, and both must survive into the remainder verbatim so the
+    parser can go on treating them as bare text."""
+    for line in ('"save:x"', "-save:x", "-load:x", "save", "loading:x"):
+        assert omni.extract_commands(line) == (line, []), line
+    assert parse(omni.extract_commands('"save:x"')[0]).text == "save:x"
+
+
+def test_a_command_inside_an_unbalanced_quote_is_not_executed():
+    """The omnibox refuses to commit on unbalanced quotes, but the tokeniser
+    is what actually decides: a `save:` swallowed into a half-typed quoted
+    value is one token with a `holds` prefix, and no amount of the user
+    keeping typing may turn it into a write."""
+    line = 'holds:"cargo save:x'
+    assert omni.extract_commands(line) == (line, [])
+
+
+def test_an_empty_command_value_is_still_a_command():
+    """`save:` alone is the request to open the Save card, so the empty value
+    has to reach the caller as a command rather than falling back to text --
+    the whole draft-builder empty-request path hangs off it."""
+    assert omni.extract_commands("save:") == ("", [("save", "")])
+    assert omni.extract_commands("load:") == ("", [("load", "")])
+    assert omni.extract_commands('save:""') == ("", [("save", "")])
+
+
+def test_commands_come_back_in_the_order_they_were_typed_and_case_folded():
+    """Only the first is executed, but which one is first is the caller's
+    decision to make, so the order is part of the contract; the prefix folds
+    case like every other prefix in the grammar."""
+    assert omni.extract_commands("LOAD:A cat:Ship Save:B") == (
+        "cat:Ship", [("load", "A"), ("save", "B")]
+    )
+    assert omni.extract_commands("") == ("", [])
+    assert omni.extract_commands("   ") == ("", [])
+
+
+def test_the_remainder_is_re_joined_with_single_spaces():
+    """Documented consequence of re-tokenising: runs of spaces between tokens
+    collapse, exactly as parse() already collapses them, while spaces inside
+    a quoted value are glued into the token and survive."""
+    remainder, commands = omni.extract_commands('a    b  save:x  loc:"Jita  IV"')
+    assert remainder == 'a b loc:"Jita  IV"'
+    assert commands == [("save", "x")]
+    assert parse(remainder).chips == [Chip(kind="location", value="Jita  IV")]
+
+
+def test_a_searched_word_shaped_like_a_command_stays_a_word_through_to_text():
+    """`"save:x"` quoted is someone searching for that literal text. to_text
+    must write it back quoted: parse reads the same bare word either way, but
+    a saved line is also what a user may paste or commit again by hand, and an
+    unquoted save:x on that line would run the command and overwrite a view
+    named x. Pinned so the wrap rule keeps covering commands."""
+    spec = parse('"save:x"')
+    assert spec.chips == [] and spec.text == "save:x"
+    line = spec.to_text()
+    assert line == '"save:x"'
+    assert parse(line) == spec, "the round trip is intact"
+    assert omni.extract_commands(line) == (line, []), (
+        "a fresh commit of that line searches; it never saves"
+    )
+
+
+def test_prefix_for_kind_is_the_spelling_to_text_writes():
+    """views.suggest_name labels a chip with this, and a label that said
+    `location` where the grammar says `loc` would be a second vocabulary to
+    keep in step with the first."""
+    checked = 0
+    for kind in omni.LEVEL_KINDS + (omni.ABYSSAL_KIND, omni.FIT_KIND, omni.HOLDS_KIND):
+        line = FilterSpec(chips=[Chip(kind=kind, value="x")]).to_text()
+        assert line == f"{omni.prefix_for_kind(kind)}:x", kind
+        checked += 1
+    assert checked == len(omni.LEVEL_KINDS) + 3
+    assert omni.prefix_for_kind("location") == "loc"
+    assert omni.prefix_for_kind("nonesuch") == "nonesuch", "an unknown kind is its own prefix"
 
 
 def test_describe_counts_chips_plus_bare_text_as_one():
@@ -349,7 +483,13 @@ def test_every_is_flag_and_its_negation_pick_the_seeded_rows(aconn):
     not; the abyssals have no price row, so they are also unpriced.
     `is:abyssal` is an alias parse() turns into the abyssal chip rather
     than an is: flag, so it is walked here but is not in IS_FLAGS, whose
-    length the last line pins."""
+    length the last line pins.
+
+    Each flag is walked with BOTH sets written out because is:fit is the one
+    whose negation is not the complement: it is hull-scoped and ship-scoped,
+    so -is:fit lists the deviating Dominix and says nothing at all about the
+    Charon (no fit for its hull) or about the module fitted to a ship. Every
+    other flag's negation is still pinned as the complement."""
     # Seeded here rather than in the fixture: the tests below assert exact id
     # sets and a new fixture row would move all of them. Item 14 is free, and
     # Tritanium at a station is priced and unfitted, so it lands only in the
@@ -362,19 +502,24 @@ def test_every_is_flag_and_its_negation_pick_the_seeded_rows(aconn):
         "60003760,30000142,10000002)"
     )
     all_items = ABYSSAL_ALL | {14}
+    text = "[Dominix, Gatling]\n125mm Gatling AutoCannon II"
+    fits.save_fit(aconn, fits.parse_eft(aconn, text), "Gatling", text)
 
     expectations = {
-        "fitted": {3},
-        "safety": {9},
-        "delivery": {14},
-        "unpriced": {7, 8, 11, 12, 13},
-        "bpc": {7},
-        "abyssal": {11, 12},
+        "fitted": ({3}, all_items - {3}),
+        "safety": ({9}, all_items - {9}),
+        "delivery": ({14}, all_items - {14}),
+        "unpriced": ({7, 8, 11, 12, 13}, all_items - {7, 8, 11, 12, 13}),
+        "bpc": ({7}, all_items - {7}),
+        "abyssal": ({11, 12}, all_items - {11, 12}),
+        # Ship 2 is the Dominix carrying that autocannon; ship 10 is the
+        # empty one; ship 1 is a Charon, so no fit of its hull exists.
+        "fit": ({2}, {10}),
     }
     seen = 0
-    for flag, expected in expectations.items():
+    for flag, (expected, negated) in expectations.items():
         assert _ids(aconn, parse(f"is:{flag}")) == expected, f"is:{flag}"
-        assert _ids(aconn, parse(f"-is:{flag}")) == all_items - expected, f"-is:{flag}"
+        assert _ids(aconn, parse(f"-is:{flag}")) == negated, f"-is:{flag}"
         seen += 1
     # Derived rather than a literal, so adding a flag without an expectation
     # here fails the suite -- which is how is:delivery was caught. The +1 is
@@ -384,6 +529,7 @@ def test_every_is_flag_and_its_negation_pick_the_seeded_rows(aconn):
     # The alias is a chip kind of its own, not an is: flag, which is what the
     # +1 above accounts for.
     assert "abyssal" not in omni.IS_FLAGS
+    assert "fit" in omni.IS_FLAGS
 
 
 def test_level_chips_filter_by_exact_label(conn):
@@ -1250,3 +1396,770 @@ def test_one_roll_clause_costs_no_more_than_the_fetch_it_narrows(big_conn):
     assert best < max(0.100, 1.5 * reference), (
         f"roll: clause {best * 1000:.1f} ms vs unfiltered fetch {reference * 1000:.1f} ms"
     )
+
+
+# ---------------------------------------------------------------- holds: chips
+def test_holds_parses_a_bay_prefix_a_name_an_operator_and_a_number():
+    T = omni.HoldsTerm
+    cases = [
+        ('holds:"Antimatter Charge M<500"', T(None, "Antimatter Charge M", "<", 500.0)),
+        ('holds:"cargo/Antimatter Charge M<500"', T("cargo", "Antimatter Charge M", "<", 500.0)),
+        ('holds:"fuel/Antimatter Charge M>=200"', T("fuel", "Antimatter Charge M", ">=", 200.0)),
+        ('holds:"drones/Hobgoblin II>0"', T("drones", "Hobgoblin II", ">", 0.0)),
+        ('holds:"CARGO/Tritanium<=5"', T("cargo", "Tritanium", "<=", 5.0)),
+        ('holds:"Tritanium=100..200"', T(None, "Tritanium", "..", 100.0, 200.0)),
+        ('holds:"fuel/Nitrogen Isotopes=0..0"', T("fuel", "Nitrogen Isotopes", "..", 0.0, 0.0)),
+        # An unrecognised prefix stays part of the name, forgivingly: a
+        # half-typed bay must behave like any name the estate does not hold
+        # rather than silently counting the whole ship instead.
+        ('holds:"ammo/Tritanium<5"', T(None, "ammo/Tritanium", "<", 5.0)),
+        ('holds:"cargo/fuel/Tritanium<5"', T("cargo", "fuel/Tritanium", "<", 5.0)),
+        ('holds:"fighters/Templar II>=1"', T("fighters", "Templar II", ">=", 1.0)),
+        ('holds:"FLEET/Nanite Repair Paste>=1"', T("fleet", "Nanite Repair Paste", ">=", 1.0)),
+        # The slash belongs to the prefix: a name that merely starts with a
+        # bay's word keeps every letter, and a bay-like word without the
+        # slash is a name too.
+        ('holds:"Fleeting Compact Stasis Webifier<1"',
+         T(None, "Fleeting Compact Stasis Webifier", "<", 1.0)),
+        ('holds:"fleets/Tritanium<5"', T(None, "fleets/Tritanium", "<", 5.0)),
+    ]
+    seen = 0
+    for token, expected in cases:
+        spec = parse(token)
+        assert spec.text == "" and len(spec.chips) == 1, token
+        assert spec.chips[0].kind == omni.HOLDS_KIND
+        assert omni.parse_holds(spec.chips[0].value) == expected, token
+        seen += 1
+    assert seen == len(cases) == 13
+    assert list(fitting.HOLD_BAYS) == ["cargo", "fuel", "drones", "fighters", "fleet"], (
+        "the prefixes come from here"
+    )
+    # The spelling the README teaches quotes the NAME and leaves the
+    # comparison outside; quotes glue rather than delimit, so it is the same
+    # chip, and to_text re-serialises it with the whole value quoted.
+    typed = parse('holds:"Antimatter Charge M"<500')
+    assert typed == parse('holds:"Antimatter Charge M<500"')
+    assert typed.to_text() == 'holds:"Antimatter Charge M<500"'
+    assert parse(typed.to_text()) == typed
+    assert parse('holds:"cargo/Antimatter Charge M"<500') == parse(
+        'holds:"cargo/Antimatter Charge M<500"'
+    )
+
+
+def test_a_malformed_holds_value_degrades_to_bare_text():
+    """The stat: rule: a comparison that does not parse is a half-typed
+    token, not a chip filtering on nothing. Every shape parse_stat refuses
+    is refused here too, prefix or no prefix."""
+    cases = ["holds:Tritanium", "holds:Tritanium<", 'holds:"<500"', "holds:cargo/",
+             'holds:"cargo/<500"', "holds:Tritanium=500", "holds:Tritanium<500k",
+             'holds:"Tritanium=200..100"', "holds:", 'holds:"cargo/Tritanium"']
+    seen = 0
+    for token in cases:
+        spec = parse(token)
+        assert spec.chips == [], token
+        assert spec.text == token, token
+        seen += 1
+    assert seen == len(cases) == 10
+    assert omni.parse_holds("cargo/") is None
+
+
+def test_an_unquoted_multi_word_holds_or_fit_value_stays_text_like_stat_does():
+    """Which way the unquoted-value rule falls for the two ship chips, pinned
+    because it could plausibly fall either way.
+
+    `owner:Test Pilot` works without quotes by matching the run of words
+    against the owners that exist, and neither of these kinds has such a
+    vocabulary to match against: a holds value carries an operator and a
+    number the SDE has never heard of, and a fit name is whatever the user
+    typed into the card. So both stay out of _PREFIX_TO_KIND and both degrade
+    to bare text exactly as `stat:` does, rather than half-parsing a chip that
+    would silently drop the words after the first space."""
+    for raw in (f"holds:cargo/{fc.AMMO_NAME}<500", f"holds:{fc.AMMO_NAME}<500"):
+        spec = parse(raw)
+        assert spec.chips == [], raw
+        assert spec.text == raw, raw
+    stat_twin = parse("stat:Missile Damage Bonus>10")
+    assert stat_twin.chips == [] and stat_twin.text == "stat:Missile Damage Bonus>10"
+
+    # Quoted, the chip mints -- and the vocabulary is never consulted, so a
+    # value that names nothing is still a chip that matches nothing.
+    assert parse(f'holds:"cargo/{fc.AMMO_NAME}<500"').chips == [
+        Chip(kind=omni.HOLDS_KIND, value=f"cargo/{fc.AMMO_NAME}<500")
+    ]
+    assert parse('fit:"Ratting Dominix"').chips == [
+        Chip(kind=omni.FIT_KIND, value="Ratting Dominix")
+    ]
+
+
+def test_the_two_ship_chips_fold_case_the_way_every_other_chip_now_does(fconn):
+    """Chip comparisons ignore case throughout the grammar, so these two must
+    not be the exception a user trips over. Neither needs COLLATE bolted on:
+    the holds lookup already spells its type comparison NOCASE and the fits
+    table declares its name column NOCASE, and this pins both against a
+    regression that silently makes the same query typed two ways differ."""
+    proper = f'holds:"cargo/{fc.AMMO_NAME}">=100'
+    assert _ids(fconn, parse(proper)) != set(), "the fixture answers the proper spelling"
+    for typed in (proper.lower(), proper.upper()):
+        assert _ids(fconn, parse(typed)) == _ids(fconn, parse(proper)), typed
+    assert _ids(fconn, parse(f'fit:"{fc.RATTING.upper()}"')) == (
+        _ids(fconn, parse(f'fit:"{fc.RATTING}"'))
+    )
+    assert _ids(fconn, parse("IS:FIT")) == _ids(fconn, parse("is:fit"))
+
+
+def test_holds_value_is_the_inverse_of_parse_holds_and_the_column_key_folds_case():
+    """The card writes chips through holds_value, so a chip it wrote and a
+    chip the user typed are the same string -- that is what makes a saved
+    view of either recall identically. The column key drops the threshold on
+    purpose: two chips comparing one consumable in one bay are two filters
+    over ONE column."""
+    for raw in ("Antimatter Charge M<500", "cargo/Antimatter Charge M>=100",
+                "drones/Hobgoblin II>0", "fuel/Nitrogen Isotopes=0..0",
+                "fighters/Templar II>=1", "fleet/Nanite Repair Paste=1..9",
+                "Tritanium=100..200.5"):
+        term = omni.parse_holds(raw)
+        assert term is not None, raw
+        assert omni.holds_value(term) == raw, raw
+        assert omni.parse_holds(omni.holds_value(term)) == term
+    term = omni.parse_holds("cargo/Antimatter Charge M<500")
+    assert omni.holds_column_key(term) == "holds:cargo/antimatter charge m"
+    assert omni.holds_column_header(term) == "Antimatter Charge M · cargo"
+    tubes = omni.parse_holds("fighters/Templar II>=1")
+    assert omni.holds_column_key(tubes) == "holds:fighters/templar ii"
+    assert omni.holds_column_header(tubes) == "Templar II · fighters"
+    assert omni.holds_column_header(omni.parse_holds("fleet/Templar II>=1")) == (
+        "Templar II · fleet"
+    )
+    plain = omni.parse_holds("Antimatter Charge M<500")
+    assert omni.holds_column_key(plain) == "holds:all/antimatter charge m"
+    assert omni.holds_column_header(plain) == "Antimatter Charge M"
+    # Case and threshold do not change the column; the bay does.
+    assert omni.holds_column_key(omni.parse_holds("ANTIMATTER charge m>=9")) == \
+        omni.holds_column_key(plain)
+    assert omni.holds_column_key(omni.parse_holds("fuel/Antimatter Charge M<500")) != \
+        omni.holds_column_key(term)
+
+
+def test_single_holds_terms_lists_the_positive_chips_once_per_column():
+    """The view's gate for the count columns. Negated chips grow none: a
+    column of numbers all below the threshold answers nothing the rows do
+    not already."""
+    spec = parse('holds:"Antimatter Charge M<500" holds:"Antimatter Charge M>100" '
+                 'holds:"cargo/Antimatter Charge M<500" -holds:"Tritanium>1"')
+    terms = omni.single_holds_terms(spec)
+    assert [omni.holds_column_key(t) for t in terms] == [
+        "holds:all/antimatter charge m", "holds:cargo/antimatter charge m",
+    ]
+    assert omni.single_holds_terms(parse("cat:Ship")) == []
+    assert omni.single_holds_terms(
+        FilterSpec(chips=[Chip(omni.HOLDS_KIND, "nonsense")])
+    ) == [], "an untranslatable chip grows no column either"
+
+
+def test_named_fit_is_the_first_positive_fit_chip_else_the_first_negated_one():
+    """A positive chip is the user naming a fit outright; failing that, the
+    fit a `-fit:` chip filters deviations from is the one they are asking
+    about, so the inspector and the comparison measure against it rather
+    than the closest fit, which for a deviating ship may be a different one
+    that it happens to match."""
+    assert omni.named_fit(parse("fit:Ratting fit:Solo")) == "Ratting"
+    assert omni.named_fit(parse("-fit:Ratting fit:Solo")) == "Solo"
+    assert omni.named_fit(parse("-fit:Ratting")) == "Ratting"
+    assert omni.named_fit(parse("-fit:Ratting -fit:Solo")) == "Ratting"
+    assert omni.named_fit(parse("cat:Ship")) is None
+
+
+def test_deviation_filter_active_reads_only_the_negated_fit_forms():
+    """The row menu's Compare deviation entry follows this: present under
+    `-fit:` and `-is:fit`, absent under a positive fit chip, `is:fit` or no
+    fit filter at all."""
+    assert omni.deviation_filter_active(parse('-fit:"Ratting"'))
+    assert omni.deviation_filter_active(parse("cat:Ship -is:fit"))
+    assert not omni.deviation_filter_active(parse('fit:"Ratting"'))
+    assert not omni.deviation_filter_active(parse("is:fit"))
+    assert not omni.deviation_filter_active(parse("cat:Ship"))
+    assert not omni.deviation_filter_active(parse(""))
+
+
+@pytest.fixture()
+def fconn(tmp_path):
+    """The synthetic fit estate: ten assembled ships, a packaged stack, a
+    loose hangar pile and three stored fits (tests/fit_corpus.py)."""
+    c = db.init(tmp_path / "fits.sqlite")
+    fc.install(c)
+    return c
+
+
+def test_holds_counts_what_sits_inside_a_ship_in_every_bay_form(fconn):
+    """The four forms over one corpus consumable. The whole-ship form counts
+    the rounds loaded in a launcher; no bay form does, because they sit on a
+    slot flag. The ammo hold rides with the fuel bay, a fighter tube with
+    the drone bay, and a container's contents belong to the container."""
+    ammo = fc.AMMO_NAME
+    assert _ids(fconn, parse(f'holds:"{ammo}>=500"')) == {fc.SHIP_PERMUTED}
+    assert _ids(fconn, parse(f'holds:"{ammo}>=100"')) == {fc.SHIP_EXACT, fc.SHIP_PERMUTED}
+    assert _ids(fconn, parse(f'holds:"{ammo}>=651"')) == set(), "the crate's 1,000 do not count"
+    assert _ids(fconn, parse(f'holds:"cargo/{ammo}>=300"')) == {fc.SHIP_PERMUTED}
+    assert _ids(fconn, parse(f'holds:"cargo/{ammo}>=100"')) == {fc.SHIP_EXACT, fc.SHIP_PERMUTED}
+    assert _ids(fconn, parse(f'holds:"fuel/{ammo}>=300"')) == {fc.SHIP_PERMUTED}
+    assert _ids(fconn, parse(f'holds:"fuel/{ammo}>=301"')) == set()
+    assert _ids(fconn, parse(f'holds:"drones/{ammo}>=1"')) == set()
+    assert _ids(fconn, parse(f'holds:"{fc.DRONE_NAME}>=1"')) == {fc.SHIP_EXACT, fc.SHIP_NO_FIT}
+    assert _ids(fconn, parse(f'holds:"drones/{fc.DRONE_NAME}>=1"')) == {fc.SHIP_EXACT}, (
+        "a drone in the cargo hold is not in the drone bay"
+    )
+    assert _ids(fconn, parse(f'holds:"drones/{fc.DRONE_NAME}>=5"')) == {fc.SHIP_EXACT}
+    assert _ids(fconn, parse(f'holds:"drones/{fc.DRONE_NAME}>=6"')) == set(), (
+        "the three in the fleet hangar are not in the drone bay"
+    )
+    assert _ids(fconn, parse(f'holds:"fleet/{fc.DRONE_NAME}>=3"')) == {fc.SHIP_EXACT}
+    assert _ids(fconn, parse(f'holds:"fleet/{fc.DRONE_NAME}>=4"')) == set()
+    assert _ids(fconn, parse(f'holds:"drones/{fc.FIGHTER_NAME}>=1"')) == set(), (
+        "a fighter in a tube is not in the drone bay"
+    )
+    assert _ids(fconn, parse(f'holds:"fighters/{fc.FIGHTER_NAME}>=2"')) == {fc.SHIP_EXACT}, (
+        "FighterTube2 rides with the fighter bay"
+    )
+    assert _ids(fconn, parse(f'holds:"fighters/{fc.DRONE_NAME}>=1"')) == set()
+    # Case-insensitive, like every other exact-name axis in the grammar.
+    assert _ids(fconn, parse(f'holds:"{ammo.lower()}>=100"')) == {fc.SHIP_EXACT, fc.SHIP_PERMUTED}
+    # A range, closed at both ends.
+    assert _ids(fconn, parse(f'holds:"{ammo}=100..650"')) == {fc.SHIP_EXACT, fc.SHIP_PERMUTED}
+    assert _ids(fconn, parse(f'holds:"{ammo}=101..649"')) == set()
+    assert _ids(fconn, parse(f'holds:"{ammo}=0..0"')) == fc.ASSEMBLED_SHIPS - {
+        fc.SHIP_EXACT, fc.SHIP_PERMUTED, fc.SHIP_NO_FIT
+    }
+
+
+def test_a_ship_with_none_of_the_type_counts_zero_and_a_non_ship_never_matches(fconn):
+    """Zero is a real count, so `<N` lists the empty hull -- which is the
+    whole point of "which of my ships are short". The packaged stack is not
+    a ship anyone can load, and the 5,000 rounds loose in the hangar are not
+    inside anything."""
+    ammo = fc.AMMO_NAME
+    assert fc.SHIP_EMPTY in _ids(fconn, parse(f'holds:"{ammo}<1"'))
+    assert _ids(fconn, parse(f'holds:"{ammo}<500"')) == fc.ASSEMBLED_SHIPS - {fc.SHIP_PERMUTED}
+    assert fc.SHIP_PACKAGED not in _ids(fconn, parse(f'holds:"{ammo}<500"'))
+    assert fc.LOOSE_STACK not in _ids(fconn, parse(f'holds:"{ammo}<500"'))
+    assert _ids(fconn, parse('holds:"Widget Of Doom<1"')) == fc.ASSEMBLED_SHIPS, (
+        "a type nobody owns leaves every ship at zero"
+    )
+
+
+def test_negated_holds_is_the_complement_within_the_assembled_ships(fconn):
+    """`-holds:"X">=100` answers "which of my ships are short of X" and
+    nothing else. A NOT EXISTS negation, the shape stat: and roll: use,
+    would list every non-ship asset in the estate alongside them -- the
+    opposite of useful -- and there is no "no data" case to protect, because
+    an empty ship honestly holds zero."""
+    ammo = fc.AMMO_NAME
+    short = _ids(fconn, parse(f'-holds:"{ammo}>=100"'))
+    assert short == fc.ASSEMBLED_SHIPS - {fc.SHIP_EXACT, fc.SHIP_PERMUTED}
+    assert fc.SHIP_EMPTY in short, "an empty hull is short of everything"
+    assert not short & {fc.SHIP_PACKAGED, fc.LOOSE_STACK, fc.CRATE_ITEM}
+    assert _ids(fconn, parse(f'-holds:"{ammo}>=1"')) | _ids(fconn, parse(f'holds:"{ammo}>=1"')) \
+        == fc.ASSEMBLED_SHIPS, "the two polarities partition the ships exactly"
+    assert _ids(fconn, parse(f'-holds:"cargo/{ammo}>=300"')) == fc.ASSEMBLED_SHIPS - {
+        fc.SHIP_PERMUTED
+    }
+
+
+def test_several_holds_chips_and_together_and_compose_with_other_kinds(fconn):
+    """Two thresholds on one consumable are two requirements, so they AND
+    into a band -- the same composition the other comparisons have."""
+    ammo = fc.AMMO_NAME
+    both = parse(f'holds:"{ammo}>=100" holds:"{ammo}<=200"')
+    assert _ids(fconn, both) == {fc.SHIP_EXACT}
+    assert _ids(fconn, parse(f'holds:"{ammo}>=100" holds:"cargo/{ammo}>=300"')) == {
+        fc.SHIP_PERMUTED
+    }
+    assert _ids(fconn, parse(f'holds:"{ammo}>=1" owner:"{fc.PILOT_NAME}"')) == {
+        fc.SHIP_EXACT, fc.SHIP_PERMUTED, fc.SHIP_NO_FIT
+    }
+    assert _ids(fconn, parse(f'holds:"{ammo}>=1" owner:Nobody')) == set()
+    assert _ids(fconn, parse(f'holds:"{ammo}>=1" item:Dominix')) == {
+        fc.SHIP_EXACT, fc.SHIP_PERMUTED
+    }
+
+
+def test_holds_binds_the_type_name_and_the_numbers(fconn):
+    """The type name is user input; only the whitelisted operator and the
+    bay's own flag list reach the SQL text."""
+    # The classic `' OR 1=1` cannot even be typed here -- the name group
+    # rejects `=`, pinned at the end of this test -- so the hostile name has
+    # to carry no operator character to reach the SQL at all.
+    hostile = "x' OR 'a' IS NOT NULL --"
+    spec = parse(f'holds:"{hostile}<5"')
+    assert spec.chips and spec.chips[0].kind == omni.HOLDS_KIND
+    where, params = spec.where()
+    assert hostile not in where
+    assert params == (hostile, 5.0)
+    assert _ids(fconn, spec) == fc.ASSEMBLED_SHIPS, "a name nobody owns is zero everywhere"
+    where, params = parse('holds:"Tritanium=1..2"').where()
+    assert params == ("Tritanium", 1.0, 2.0) and "BETWEEN ? AND ?" in where
+    for op in (">", "<", ">=", "<="):
+        where, _ = parse(f'holds:"Tritanium{op}5"').where()
+        assert f") {op} ?" in where and f") {op}= ?" not in where
+    # An `=` inside the name is not a chip at all: the name group rejects it.
+    assert parse('holds:"a=b<5"').chips == []
+    hand_built = FilterSpec(chips=[Chip(omni.HOLDS_KIND, "Tritanium; DROP TABLE assets")])
+    assert hand_built.where() == ("", ()), "an untranslatable holds chip is skipped"
+
+
+# ------------------------------------------------------------------ fit chips
+def test_fit_mints_a_chip_for_any_name_including_a_quoted_empty_one():
+    """A fit name is a label, so the level rule applies rather than the
+    comparison rule: any string is a legitimate name, and the empty one is
+    what the card writes before anything is picked."""
+    assert parse("fit:Ratting").chips == [Chip(omni.FIT_KIND, "Ratting")]
+    assert parse('-fit:"Deep Safe"').chips == [Chip(omni.FIT_KIND, "Deep Safe", negated=True)]
+    assert parse('fit:""').chips == [Chip(omni.FIT_KIND, "")]
+    assert parse("FIT:Ratting").chips == [Chip(omni.FIT_KIND, "Ratting")]
+    # A bare `fit:` is the half-typed state, like every other prefix.
+    assert parse("fit:").chips == [] and parse("fit:").text == "fit:"
+    # And the bare word is not a chip: only `abyssal` has that privilege.
+    assert parse("fit").chips == [] and parse("fit").text == "fit"
+    for raw in ("fit:Ratting", "-fit:Ratting", 'fit:""', 'fit:"a\\"b"', 'fit:"a b"',
+                'holds:"cargo/Antimatter Charge M<500"', 'holds:"X=0..0"', "is:fit", "-is:fit"):
+        spec = parse(raw)
+        assert spec.chips, raw
+        assert parse(spec.to_text()) == spec, raw
+
+
+def test_a_fit_chip_matches_the_ships_of_its_hull_whose_rack_equals_the_fit(fconn):
+    """Slot order is ignored and a loaded charge is not a module, so the
+    permuted ship matches; an extra module, a missing one and a duplicate
+    count one short all deviate, and so does a module whose SDE category row
+    is missing -- silently dropping that one would turn a wrong fit right."""
+    assert _ids(fconn, parse(f'fit:"{fc.RATTING}"')) == {fc.SHIP_EXACT, fc.SHIP_PERMUTED}
+    assert _ids(fconn, parse(f'fit:"{fc.SOLO}"')) == {fc.SHIP_SOLO}
+    assert _ids(fconn, parse(f'fit:"{fc.HAULING}"')) == {fc.SHIP_CHARON}
+    assert _ids(fconn, parse('fit:"No Such Fit"')) == set()
+    assert _ids(fconn, parse('fit:""')) == set()
+    # Case-insensitive: the fits.name column collates NOCASE.
+    assert _ids(fconn, parse(f'fit:"{fc.RATTING.lower()}"')) == {fc.SHIP_EXACT, fc.SHIP_PERMUTED}
+
+
+def test_a_negated_fit_chip_lists_the_deviating_ships_of_that_hull_only(fconn):
+    """Hull-scoped by design: `-fit:"Ratting"` says nothing about the Charon
+    or about anything that is not a ship. The two polarities partition the
+    hull's assembled ships and nothing else."""
+    deviating = _ids(fconn, parse(f'-fit:"{fc.RATTING}"'))
+    assert deviating == fc.DOMINIXES - {fc.SHIP_EXACT, fc.SHIP_PERMUTED}
+    assert fc.SHIP_EMPTY in deviating, "an empty hull deviates from every fit"
+    assert fc.SHIP_CHARON not in deviating and fc.SHIP_NO_FIT not in deviating
+    assert not deviating & {fc.SHIP_PACKAGED, fc.LOOSE_STACK}
+    assert deviating | _ids(fconn, parse(f'fit:"{fc.RATTING}"')) == fc.DOMINIXES
+    assert _ids(fconn, parse('-fit:"No Such Fit"')) == set(), (
+        "a name no stored fit carries has no hull to scope to"
+    )
+
+
+def test_a_duplicate_count_deviates_in_either_direction(fconn):
+    """The multiset comparison is two NOT EXISTS with different shapes -- one
+    walks the ship's types, one the fit's -- so too MANY of a type has to be
+    checked as well as too few. The corpus covers three amplifiers wanted
+    against two fitted; this covers four fitted against three wanted, where
+    the fit's own side of the comparison is a non-zero sum rather than the
+    COALESCE fallback."""
+    fconn.executemany(
+        "INSERT INTO assets (owner_type,owner_id,item_id,type_id,quantity,location_id,"
+        "location_flag,location_type,is_singleton,is_blueprint_copy,custom_name,"
+        "root_location_id,system_id,region_id) "
+        "VALUES ('character',100,?,?,1,?,?,'item',1,0,NULL,?,?,?)",
+        [
+            (5_000_020, fc.DOMINIX, fc.JITA_4_4, "Hangar", fc.JITA_4_4, fc.JITA_SYS, fc.THE_FORGE),
+            *[
+                (5_000_020 + n + 1, type_id, 5_000_020, flag,
+                 fc.JITA_4_4, fc.JITA_SYS, fc.THE_FORGE)
+                for n, (type_id, flag) in enumerate([
+                    (fc.ARMOR_REPAIRER, "LoSlot0"), (fc.FIELD_AMPLIFIER, "LoSlot1"),
+                    (fc.FIELD_AMPLIFIER, "LoSlot2"), (fc.FIELD_AMPLIFIER, "LoSlot3"),
+                    (fc.FIELD_AMPLIFIER, "LoSlot4"), (fc.LAUNCHER, "HiSlot0"),
+                    (fc.PULSE_LASER, "HiSlot1"), (fc.NANO_PUMP, "RigSlot0"),
+                ])
+            ],
+        ],
+    )
+    assert _ids(fconn, parse(f'fit:"{fc.RATTING}"')) == {fc.SHIP_EXACT, fc.SHIP_PERMUTED}
+    assert 5_000_020 in _ids(fconn, parse(f'-fit:"{fc.RATTING}"'))
+    assert 5_000_020 in _ids(fconn, parse("-is:fit"))
+
+
+def test_a_fit_whose_hull_is_not_a_ship_is_refused_and_would_match_nothing(fconn):
+    """Two defences, both pinned. The parser refuses a header naming a charge
+    (see test_fits.py), so the card never stores one; and were a row to reach
+    the table anyway -- one saved before the rule, or written by hand -- the
+    ship clause makes it harmless in both polarities, which is why the SQL
+    does not lean on the parser."""
+    text = f"[{fc.AMMO_NAME}, Nonsense]\nFocused Pulse Laser"
+    parsed = fits.parse_eft(fconn, text)
+    assert not parsed.ok and parsed.hull_type_id is None
+    with pytest.raises(ValueError):
+        fits.save_fit(fconn, parsed, "Nonsense", text)
+
+    fconn.execute(
+        "INSERT INTO fits (name, hull_type_id, eft_text, created_at) VALUES (?,?,?,?)",
+        ("Nonsense", fc.AMMO, text, "2026-09-05T00:00:00+00:00"),
+    )
+    assert _ids(fconn, parse('fit:"Nonsense"')) == set()
+    assert _ids(fconn, parse('-fit:"Nonsense"')) == set()
+    assert fc.LOOSE_STACK not in _ids(fconn, parse("-is:fit"))
+
+
+def test_positive_fit_chips_or_together_while_a_negated_one_ands(fconn):
+    """Two fits of a hull are two acceptable answers to "is this ship
+    ready", so they OR the way two location chips do; a negation is a
+    requirement and ANDs like every other."""
+    either = parse(f'fit:"{fc.RATTING}" fit:"{fc.SOLO}"')
+    assert _ids(fconn, either) == {fc.SHIP_EXACT, fc.SHIP_PERMUTED, fc.SHIP_SOLO}
+    across_hulls = parse(f'fit:"{fc.RATTING}" fit:"{fc.HAULING}"')
+    assert _ids(fconn, across_hulls) == {fc.SHIP_EXACT, fc.SHIP_PERMUTED, fc.SHIP_CHARON}
+    assert _ids(fconn, parse(f'-fit:"{fc.RATTING}" -fit:"{fc.SOLO}"')) == (
+        fc.DOMINIXES - {fc.SHIP_EXACT, fc.SHIP_PERMUTED, fc.SHIP_SOLO}
+    )
+    assert _ids(fconn, parse(f'fit:"{fc.RATTING}" -fit:"{fc.SOLO}"')) == {
+        fc.SHIP_EXACT, fc.SHIP_PERMUTED
+    }
+    assert _ids(fconn, parse(f'fit:"{fc.RATTING}" owner:"{fc.PILOT_NAME}"')) == {
+        fc.SHIP_EXACT, fc.SHIP_PERMUTED
+    }
+    assert _ids(fconn, parse(f'fit:"{fc.RATTING}" holds:"{fc.AMMO_NAME}>=500"')) == {
+        fc.SHIP_PERMUTED
+    }
+
+
+def test_is_fit_is_any_stored_fit_for_the_hull_and_excludes_hulls_without_one(fconn):
+    """A hull nobody has written a fit for is absent from BOTH polarities:
+    there is no verdict to give about it, and answering "deviates" would be
+    a claim the data does not support. The Solstice and the Charon prove
+    each half."""
+    assert _ids(fconn, parse("is:fit")) == {
+        fc.SHIP_EXACT, fc.SHIP_PERMUTED, fc.SHIP_SOLO, fc.SHIP_CHARON
+    }
+    assert fc.SHIP_SOLO in _ids(fconn, parse("is:fit")), "matching the SECOND fit of its hull"
+    deviating = _ids(fconn, parse("-is:fit"))
+    assert deviating == {
+        fc.SHIP_EXTRA, fc.SHIP_MISSING, fc.SHIP_DUPES, fc.SHIP_EMPTY, fc.SHIP_NULL_CATEGORY
+    }
+    assert fc.SHIP_NO_FIT not in deviating and fc.SHIP_NO_FIT not in _ids(fconn, parse("is:fit"))
+    assert not (deviating | _ids(fconn, parse("is:fit"))) & {fc.SHIP_PACKAGED, fc.LOOSE_STACK}
+    assert _ids(fconn, parse("is:fit -is:fit")) == set(), "no ship is both"
+
+
+def test_fit_names_are_bound_parameters(fconn):
+    hostile = "x' OR 1=1"
+    spec = parse(f'fit:"{hostile}"')
+    where, params = spec.where()
+    assert hostile not in where
+    assert params == (hostile,)
+    assert _ids(fconn, spec) == set()
+    where, params = parse(f'fit:"{fc.RATTING}" -fit:"{fc.SOLO}"').where()
+    assert params == (fc.RATTING, fc.SOLO), "positives bind before negations"
+
+
+def test_exclude_kinds_drops_the_two_ship_chips_in_both_polarities(fconn):
+    """The holds and fit cards each rewrite their own kind on Done, so their
+    pickers facet by everything else -- and the count that footer shows must
+    not be narrowed by the chip the user is editing."""
+    spec = parse(f'holds:"{fc.AMMO_NAME}>=5000" -fit:"{fc.RATTING}" cat:Ship')
+    assert _ids(fconn, spec) == set()
+    where, params = spec.where(exclude_kinds=(omni.HOLDS_KIND, omni.FIT_KIND))
+    assert where == "(cat.name = ? COLLATE NOCASE)" and params == ("Ship",)
+    assert _ids(fconn, spec, exclude_level=omni.HOLDS_KIND) == (
+        fc.DOMINIXES - {fc.SHIP_EXACT, fc.SHIP_PERMUTED}
+    )
+    where, _ = spec.where(exclude_kinds=(omni.FIT_KIND,))
+    assert "fits f" not in where and "assets h" in where
+
+
+def test_the_ship_chips_probe_every_table_by_key_and_scan_none(fconn):
+    """Both clauses are correlated per asset row, so a table scan inside one
+    would be a scan per row over the whole estate. The SCANs allowed are the
+    outer table, the container_walk CTE and its window-function subquery --
+    which ASSET_ROWS builds once, whatever the filter (see the roll clause's
+    twin above). The holds: type lookup (HOLDS_TYPE_IDS) used to be a fourth:
+    its `name = ? COLLATE NOCASE` cannot use the BINARY idx_types_name, so
+    it walked the whole of sde_types per statement until
+    idx_types_name_nocase was added; it must now be a probe of that index."""
+    walk = ("SCAN a", "SCAN w", "SCAN container_walk", "SCAN (subquery-")
+    seen = 0
+    for raw in (f'holds:"{fc.AMMO_NAME}<500"', f'holds:"cargo/{fc.AMMO_NAME}<500"'):
+        where, params = parse(raw).where()
+        plan = [r[3] for r in fconn.execute(
+            "EXPLAIN QUERY PLAN " + queries.ASSET_ROWS + f" WHERE {where}", params
+        )]
+        scans = [line for line in plan if line.startswith("SCAN")]
+        assert all(line.startswith(walk) for line in scans), (raw, scans)
+        assert any("SEARCH h USING INDEX idx_assets_direct_loc" in line for line in plan), plan
+        assert any(
+            "SEARCH sde_types USING COVERING INDEX idx_types_name_nocase" in line
+            for line in plan
+        ), plan
+        seen += 1
+    for raw in (f'fit:"{fc.RATTING}"', f'-fit:"{fc.RATTING}"', "is:fit", "-is:fit"):
+        where, params = parse(raw).where()
+        plan = [r[3] for r in fconn.execute(
+            "EXPLAIN QUERY PLAN " + queries.ASSET_ROWS + f" WHERE {where}", params
+        )]
+        scans = [line for line in plan if line.startswith("SCAN")]
+        assert all(line.startswith(walk) for line in scans), (raw, scans)
+        assert sum("SEARCH fm USING INDEX idx_assets_direct_loc" in line for line in plan) >= 2, (
+            "both directions of the multiset comparison key on the ship"
+        )
+        assert any("SEARCH fi USING INDEX sqlite_autoindex_fit_items_1" in line
+                   for line in plan), plan
+        assert any(line.startswith("SEARCH f ") and "sqlite_autoindex_fits_1" in line
+                   for line in plan), plan
+        seen += 1
+    assert seen == 6
+
+
+@pytest.fixture()
+def big_fit_conn(tmp_path):
+    """25,000 asset rows: 2,500 assembled Dominixes with eight or nine
+    modules each and a cargo stack, on top of the corpus's own estate and
+    its three stored fits. Built in one transaction, about a second."""
+    c = db.init(tmp_path / "bigfit.sqlite")
+    fc.install(c)
+    rng = random.Random(11)
+    rows = []
+    item = 7_000_000
+    for i in range(2500):
+        hull = item
+        item += 1
+        rows.append((hull, fc.DOMINIX, 1, fc.JITA_4_4, "Hangar", 1))
+        mods = [fc.ARMOR_REPAIRER, fc.FIELD_AMPLIFIER, fc.FIELD_AMPLIFIER, fc.FIELD_AMPLIFIER,
+                fc.LAUNCHER, fc.PULSE_LASER, fc.NANO_PUMP, fc.FLUX_COIL]
+        if i % 3 == 0:
+            # A third of them are one module short of the Ratting fit and
+            # the rest carry the flux coil too, so the filter has both
+            # answers to find rather than one trivial one.
+            mods = mods[:-1]
+        for n, module in enumerate(mods):
+            rows.append((item, module, 1, hull, f"LoSlot{n}", 1))
+            item += 1
+        rows.append((item, fc.AMMO, rng.randint(0, 2000), hull, "Cargo", 0))
+        item += 1
+    with db.transaction(c):
+        c.executemany(
+            "INSERT INTO assets (owner_type,owner_id,item_id,type_id,quantity,location_id,"
+            "location_flag,location_type,is_singleton,is_blueprint_copy,custom_name,"
+            "root_location_id,system_id,region_id) "
+            "VALUES ('character',100,?,?,?,?,?,'item',?,0,NULL,?,?,?)",
+            [(i, t, q, loc, flag, s, fc.JITA_4_4, fc.JITA_SYS, fc.THE_FORGE)
+             for i, t, q, loc, flag, s in rows],
+        )
+    return c
+
+
+def test_the_ship_clauses_cost_a_bounded_multiple_of_the_lean_count_they_narrow(big_fit_conn):
+    """Judged against the lean COUNT base (assets joined to types, groups
+    and categories) timed in the same process rather than a wall-clock
+    figure, so a loaded runner moves both numbers together, and with a
+    budget per clause: on 2026-09-05 the base took 1.7 ms over 24k rows,
+    `is:fit` 38 ms (22x) and the holds clause 9 ms (5x), so 45x and 12x
+    leave each about twice its headroom while a 4x regression of either
+    fails. The first version judged them against the full table fetch (186
+    ms here, 330 ms at 46k rows), which a 4x regression sailed under. This
+    is the test that caught the real cost: without the `+` that stops SQLite
+    indexing fm.type_id, the fit clause probed every asset of a module's
+    type once per (ship, fit item) pair and measured 1,583 ms against a 64
+    ms fetch -- 30 ms with it."""
+    def best_of(fn, n=5):
+        best = float("inf")
+        for _ in range(n):
+            start = time.perf_counter()
+            fn()
+            best = min(best, time.perf_counter() - start)
+        return best
+
+    total = big_fit_conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
+    assert total > 24_000, "the estate must actually be large"
+    base = ("SELECT COUNT(*) FROM assets a JOIN sde_types t ON t.type_id = a.type_id "
+            "LEFT JOIN sde_groups g ON g.group_id = t.group_id "
+            "LEFT JOIN sde_categories cat ON cat.category_id = g.category_id")
+    reference = best_of(lambda: big_fit_conn.execute(base).fetchone()[0])
+    budgets = {"is:fit": 45, f'holds:"{fc.AMMO_NAME}<500"': 12}
+    checked = 0
+    for raw, budget in budgets.items():
+        where, params = parse(raw).where()
+        sql = base + " WHERE " + where
+        best = best_of(lambda s=sql, p=params: big_fit_conn.execute(s, p).fetchone()[0])
+        matched = big_fit_conn.execute(sql, params).fetchone()[0]
+        assert 0 < matched < 2500, f"{raw} must have had something to do"
+        assert best < max(0.015, budget * reference), (
+            f"{raw} {best * 1000:.1f} ms vs lean count base {reference * 1000:.2f} ms "
+            f"(budget {budget}x)"
+        )
+        checked += 1
+    assert checked == 2
+
+
+def test_fitted_rows_hide_for_everyday_filters_and_show_for_ships_fits_and_named_kinds():
+    """The Assets tab's default: racks and the rounds inside them are noise
+    between hangar rows unless the question is about ships, fits or that kind
+    of item, in which case every fitted row is part of the answer. Negated
+    kind chips do not count as naming a thing -- "-cat:Charge" is asking for
+    everything else. The abyssal kinds reveal too, and that pins a bug that
+    shipped: a mutated module spends most of its life in a slot, and hiding
+    fitted rows under `abyssal` emptied the table, the "N of M" count and the
+    card's type picker for exactly the modules being searched for."""
+    hides = omni.hides_fitted
+    hidden = ("", "loc:Jita", "owner:Main", "antimatter", "-cat:Charge", "-is:fitted", "val:>1m",
+              "-abyssal", "-is:abyssal", '-abyssal:"Abyssal Stasis Webifier"', "-stat:cpu<30",
+              "-roll:web>=70")
+    shown = (
+        "cat:Ship", "cat:Charge", "group:Hybrid", "item:Tritanium", "is:fitted", "is:fit",
+        'fit:"Ratting"', '-fit:"Ratting"', "loc:Jita cat:Charge",
+        "abyssal", "is:abyssal", 'abyssal:"Abyssal Stasis Webifier"', "stat:cpu<30",
+        "roll:web>=70", "loc:Jita abyssal", "abyssal -stat:cpu<30",
+    )
+    checked = 0
+    for text in hidden:
+        spec = parse(text)
+        assert spec.chips or spec.text == text, text
+        assert hides(spec), text
+        checked += 1
+    for text in shown:
+        assert parse(text).chips, text
+        assert not hides(parse(text)), text
+        checked += 1
+    assert checked == len(hidden) + len(shown) == 28
+
+
+def test_a_decimal_threshold_survives_the_holds_round_trip():
+    """The holds card seeds its spinners from the chip and rounds to whole
+    units, which is right for a hold; the grammar underneath must not, or a
+    typed `<1.5` would come back as `<1` from a saved view as well as from
+    the card, and the two would disagree about which ships are short."""
+    spec = parse('holds:"Nanite Repair Paste"<1.5')
+    assert len(spec.chips) == 1 and spec.chips[0].kind == omni.HOLDS_KIND
+    term = omni.parse_holds(spec.chips[0].value)
+    assert (term.name, term.op, term.low, term.high) == ("Nanite Repair Paste", "<", 1.5, None)
+    assert omni.holds_value(term) == "Nanite Repair Paste<1.5"
+    assert spec.to_text() == 'holds:"Nanite Repair Paste<1.5"'
+    assert parse(spec.to_text()) == spec
+    ranged = omni.parse_holds("cargo/Tritanium=0.5..2.25")
+    assert (ranged.low, ranged.high) == (0.5, 2.25)
+    assert omni.holds_value(ranged) == "cargo/Tritanium=0.5..2.25"
+
+
+def test_a_fitted_abyssal_module_stays_in_the_count_and_the_type_picker_under_the_abyssal_chips(
+    aconn,
+):
+    """Pins the shipped bug end to end: hides_fitted answered True for the
+    abyssal kinds, so the view ANDed HIDE_FITTED_CLAUSE onto the filter and
+    a mutated module sitting in a slot -- where most of them live -- fell
+    out of the table, the "N of M" count and the card's type picker, which
+    listed nothing for a type owned only in a rack."""
+    aconn.executescript("""
+      INSERT INTO sde_types (type_id,name,group_id,meta_group_id,volume,portion_size,published,
+                             is_dynamic_type) VALUES
+        (47740,'Abyssal Warp Scrambler',46,15,5,1,1,1);
+      INSERT INTO assets (owner_type,owner_id,item_id,type_id,quantity,location_id,
+                          location_flag,location_type,is_singleton,is_blueprint_copy,
+                          custom_name,root_location_id,system_id,region_id) VALUES
+        ('character',100,14,47740,1,2,'MedSlot0','item',1,0,NULL,60003760,30000142,10000002);
+    """)
+    checked = 0
+    for text in ("abyssal", 'abyssal:"Abyssal Warp Scrambler"', "is:abyssal",
+                 'abyssal owner:"Test Pilot"'):
+        spec = parse(text)
+        where, params = spec.where()
+        if omni.hides_fitted(spec):
+            where = f"({where}) AND {queries.HIDE_FITTED_CLAUSE}"
+        ids = {r["item_id"] for r in queries.fetch_assets(aconn, where, params)}
+        assert 14 in ids, text
+        assert queries.count_assets(aconn, where, params) == len(ids), text
+        picker = {r["name"]: r["items"] for r in queries.abyssal_type_counts(aconn, where, params)}
+        assert picker.get("Abyssal Warp Scrambler") == 1, (text, picker)
+        checked += 1
+    assert checked == 4
+    # The everyday filter still hides it: the rule widened, it did not vanish.
+    everyday = parse('owner:"Test Pilot"')
+    assert omni.hides_fitted(everyday)
+    where, params = everyday.where()
+    where = f"({where}) AND {queries.HIDE_FITTED_CLAUSE}"
+    ids = {r["item_id"] for r in queries.fetch_assets(aconn, where, params)}
+    assert 14 not in ids and 3 not in ids, "both fitted rows stay hidden"
+    assert {2, 11, 12} <= ids, "the pilot's hangar rows are still the answer"
+
+
+def test_the_lean_row_source_counts_what_the_full_one_does_without_the_container_walk(request):
+    """count_assets, count_ships, the holds picker's ship-id subquery,
+    abyssal_type_counts and the rail's label family run on ASSET_ROWS_LEAN.
+    Its whole justification is that the recursive container CTE -- which
+    SQLite materialises over every asset row before the WHERE runs -- is
+    not in the plan, and its whole risk is a count disagreeing with the
+    table it describes. So: for every kind of WHERE the grammar writes, the
+    lean COUNT equals the full one, and the count's plan never touches the
+    walk."""
+    cases = {
+        "conn": ["", "jita", "cat:Ship", "loc:Jita", "owner:Test Pilot", "-region:Domain",
+                 "is:bpc", "is:safety", "val:>10m", "group:Freighter", "item:Dominix",
+                 "-is:fitted", "is:fitted", "owner:Main tritanium"],
+        "aconn": ["abyssal", "-abyssal", "is:abyssal", "stat:cpu<30", "-stat:cpu<30",
+                  "roll:web>=70", "abyssal roll:cpu=60..90",
+                  'abyssal:"Abyssal Stasis Webifier"'],
+        "fconn": ["is:fit", "-is:fit", f'fit:"{fc.RATTING}"', f'-fit:"{fc.RATTING}"',
+                  f'holds:"{fc.AMMO_NAME}<500"', f'holds:"cargo/{fc.AMMO_NAME}>=100"',
+                  "cat:Ship", f'-holds:"{fc.PASTE_NAME}">=100'],
+    }
+    checked = 0
+    for fixture, texts in cases.items():
+        c = request.getfixturevalue(fixture)
+        for text in texts:
+            where, params = parse(text).where()
+            full_sql = (f"SELECT COUNT(*) FROM ({queries.ASSET_ROWS}"
+                        f"{' WHERE ' + where if where else ''})")
+            full = c.execute(full_sql, params).fetchone()[0]
+            assert queries.count_assets(c, where, params) == full, text
+            ships_sql = (f"SELECT COUNT(*) FROM ({queries.ASSET_ROWS} WHERE "
+                         f"{queries.SHIP_ROWS_CLAUSE}{' AND (' + where + ')' if where else ''})")
+            assert queries.count_ships(c, where, params) == (
+                c.execute(ships_sql, params).fetchone()[0]
+            ), text
+            plan = [r[3] for r in c.execute(
+                "EXPLAIN QUERY PLAN " + queries.count_assets_sql(where), params
+            )]
+            # The is:safety clause materialises a CTE of its own, so the pin
+            # is on the container walk by name, not on MATERIALIZE at large.
+            assert not any("container" in line for line in plan), (text, plan)
+            checked += 1
+    assert checked == sum(len(v) for v in cases.values()) == 30
+    assert "container_path" not in queries.ASSET_ROWS_LEAN
+    assert "cp." not in queries.ASSET_ROWS_LEAN
+    assert "container_path" in queries.ASSET_ROWS and "AS container" in queries.ASSET_ROWS
+
+
+def test_the_count_column_query_probes_ships_by_location_whatever_the_statistics_say(fconn):
+    """holds_counts refreshes the count column on every filter change. With
+    no sqlite_stat1 rows -- every database between SDE imports, since that
+    is the only time the app runs ANALYZE -- the planner preferred
+    idx_assets_type and walked every stack of the consumable in the estate
+    to filter it by the visible ships afterwards; the `+` on h.type_id
+    forces the ship-list probe (1.30 ms to 0.39 ms for 300 visible ships
+    over 16k stacks of the type, measured 2026-09-05). The type lookup must
+    be a probe of idx_types_name_nocase for the same reason the chip's own
+    plan test demands it."""
+    ids = (fc.SHIP_EXACT, fc.SHIP_PERMUTED, fc.SHIP_MISSING)
+    checked = 0
+    for bay in (None, "cargo", "fuel"):
+        sql = queries.holds_counts_sql(len(ids), bay)
+        plan = [r[3] for r in fconn.execute("EXPLAIN QUERY PLAN " + sql, (*ids, fc.AMMO_NAME))]
+        assert any(
+            line.startswith("SEARCH h USING INDEX idx_assets_direct_loc") for line in plan
+        ), (bay, plan)
+        assert not any("idx_assets_type" in line for line in plan), (bay, plan)
+        assert any(
+            "SEARCH sde_types USING COVERING INDEX idx_types_name_nocase" in line
+            for line in plan
+        ), (bay, plan)
+        assert not any(line.startswith("SCAN") for line in plan), (bay, plan)
+        checked += 1
+    assert checked == 3
+    # The steer changes the plan, not the answer.
+    counted = queries.holds_counts(fconn, ids, fc.AMMO_NAME)
+    assert counted and all(units > 0 for units in counted.values())
+    assert counted == queries.holds_counts(fconn, list(ids) * 2, fc.AMMO_NAME)

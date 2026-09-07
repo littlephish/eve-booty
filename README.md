@@ -11,6 +11,14 @@ character is worth over time.
 
 ![Filtering to abyssal modules, inspecting one, then narrowing Heat Sinks by three rolled stats](docs/abyssal-search.gif)
 
+**Powerful filtering tools made for real use cases**
+
+![Storing a Dominix fit from EFT text, filtering to the ships that deviate from it and to one station, comparing the one ship against the fit rack by rack, and pasting the multibuy shopping list into Notepad](docs/fit-compare.gif)
+
+**Build complex searches, save them, and load them**
+
+![Building a five-chip filter from the rail, the field, the completion popup, a cell menu and the + builder, saving it with the save: command, clearing, then loading it back from the Load pill](docs/save-load-views.gif)
+
 Python 3.10+, PySide6, SQLite. Runs from source with `uv`, and ships for Windows
 as a portable program folder built with Nuitka.
 
@@ -123,19 +131,42 @@ run from source instead.
 
 ## The Assets tab
 
+Whatever sits in a module slot -- the fitted modules, rigs and subsystems
+and the charges loaded into them -- is hidden from the everyday view: with
+nothing typed, or a place, owner or bare word in the omnibox, the table lists
+the cargo-hold stacks and not the racks or the rounds inside the guns. They
+come back whenever the filter is about ships or fits (`cat:Ship`, `is:fitted`,
+`is:fit`, `is:unpriced`, any `fit:` chip) or names the kind of thing outright (a positive
+`cat:`, `group:` or `item:` chip, or any of the abyssal kinds -- `abyssal`,
+`abyssal:"Type"`, `is:abyssal`, `stat:` and `roll:` -- since a mutated module
+mostly lives in a slot), and the rail, the strip and every count follow the
+same rule.
+
+
 Everything that narrows the table is a token in one search field. Bare words
 match item and custom names; everything else is a `prefix:value` chip:
 
 ```
 loc:"Jita IV - Moon 4"     sys:Jita      region:"The Forge"
 owner:Main                 cat:Ship      group:Battleship      meta:"Tech II"
-is:fitted  is:safety  is:delivery  is:unpriced  is:bpc
+is:fitted  is:safety  is:delivery  is:unpriced  is:bpc  is:fit
 val:>10m   val:<1b
 abyssal    abyssal:"Abyssal Stasis Webifier"    abyssal:"Abyssal Stasis Webifier, Abyssal Warp Disruptor"
 stat:cpu<26   stat:"Missile Damage Bonus">10   stat:web<-55   stat:duration<9   stat:cpu=18..22
 roll:web>=70   roll:cpu=60..90   roll:"Missile Damage Bonus"<50
+holds:"Antimatter Charge M"<500              holds:"Nanite Repair Paste"=100..500
+holds:"cargo/Antimatter Charge M"<500        holds:"fuel/Oxygen Isotopes">=8000
+holds:"drones/Ogre II">=5                    holds:"fighters/Templar II"<9
+holds:"fleet/Nanite Repair Paste">=1         -holds:"Nanite Repair Paste">=100
+fit:"Ratting"   -fit:"Ratting"   is:fit   -is:fit
 -owner:Alt                 (a leading - negates any token)
 ```
+
+Two tokens in that field are not filters. `save:` and `load:` are *commands*:
+they are performed once when you press Enter and then gone, so they never
+become chips, never reach the table and can never end up inside a saved view.
+Quoting one (`"save:x"`) or negating it (`-save:x`) makes it an ordinary
+search for that text instead. See [Saved views](#saved-views) below.
 
 `stat:` compares one attribute of an abyssal module -- any attribute ESI
 reports for the item, rolled by its mutaplasmid or not, so `stat:cpu<26` finds
@@ -230,6 +261,125 @@ and `region: The Forge cat:Ship` both work, because a value is matched against
 the names that actually exist. That is also why `owner:Main tritanium` still
 means owner Main and a search for tritanium -- "Main tritanium" is not an
 owner, so the rest stays a search. Quote a value to force it: `owner:"Main"`.
+The chips that carry a comparison rather than a label -- `stat:`, `roll:` and
+`holds:` -- and `fit:` still want their quotes when the name has a space in
+it: there is no list of existing values to match a run of words against, so
+`holds:cargo/Antimatter Charge M<500` is read as text and
+`holds:"cargo/Antimatter Charge M"<500` as the chip.
+
+### Ship holds
+
+`holds:` asks the question you ask before undocking: which of my ships are
+carrying enough of something. It only ever considers assembled ships -- a
+packaged hull has no holds -- so no `cat:Ship` chip is needed alongside it.
+`holds:"Antimatter Charge M"<500` counts everything sitting directly in the
+ship: the cargo hold, the rounds loaded in its launchers, the fuel bay, the
+ammo hold, the drone and fighter bays, the fleet hangar and every specialised
+hold. Five bay forms narrow that to one place -- `cargo/` is the cargo hold,
+`fuel/` the fuel bay and the ammo hold together, `drones/` the drone bay
+alone, `fighters/` the fighter bay and the fighter tubes, `fleet/` the fleet
+hangar -- written inside the quotes: `holds:"cargo/Antimatter Charge M"<500`.
+Rounds loaded in a module count towards the whole-ship total and towards no
+bay; drones parked in a fleet hangar answer to `fleet/`, not to `drones/`.
+Contents of a container sitting in the cargo hold do not count at all: ammo
+inside a can is not loadable in space either, and one level is the honest
+depth.
+
+The name is one exact item name, matched case-insensitively; the operators are
+`stat:`'s (`<`, `<=`, `>`, `>=`, and `name=lo..hi` for an inclusive range). A
+ship carrying none of the item counts 0, so `holds:"X"<1` lists the ships with
+none. Negation is the complement *within the assembled ships*:
+`-holds:"Nanite Repair Paste">=100` lists the ships short of paste and nothing
+else -- not, as `-stat:` would, every other asset in the estate. Several
+positive `holds:` chips AND.
+
+A positive `holds:` chip grows a temporary column after Qty with each ship's
+count, sortable, exported with the rest and gone when the chip is. Typing the
+chip and pressing Enter opens its card under the new chip, and the chip's `▾`
+button reopens it: a dropdown of item names that follows the bay selector --
+All is everything your ships actually hold, Cargo what sits in their cargo
+holds, Fuel every fuel block and ice product there is, Drones every drone and
+Fighters every fighter, whether you own it or not (the question is usually
+about the ship that has none), with the ones your ships actually carry in
+that bay listed first and the rest of the game's catalogue after them by
+name; Fleet whatever sits in the fleet hangars -- with the count held on each
+entry's tooltip, and any other exact item name typeable in its place.
+Then the comparison, and a live count of how many of the ships in scope the
+chip would leave. Done writes the chip; Cancel, Esc or a click elsewhere
+changes nothing.
+
+### Stored fits
+
+`fit:"Ratting"` asks whether a ship is fitted the way you meant it to be.
+Fits are pasted as EFT text -- from Pyfa or the game client -- and stored under
+the name in the `[Hull, Name]` header, which you can change before saving. A
+ship matches when its fitted modules, rigs and subsystems are exactly the
+fit's, by item and by count, with slot order ignored; charges loaded in a
+module are not modules and never affect the verdict. The fit's drone and cargo
+sections are *not* part of the verdict -- they feed the "short" line in the
+inspector instead -- and neither are its charge choices, ammunition in the
+hold, rig or module *meta* variants beyond the exact item, or anything about
+the ship's name, location or owner.
+
+A fit only ever speaks about its own hull, in both polarities:
+`-fit:"Ratting"` lists the Dominixes fitted some other way and says nothing
+about any other hull. `is:fit` is "matches any stored fit for its hull" and
+`-is:fit` its complement, so a hull nobody has written a fit for is in neither
+answer. Several positive `fit:` chips OR.
+
+Typing `fit:"…"` and pressing Enter opens the card under the new chip, the
+chip's `▾` button reopens it, and picking `fit` in the `Ctrl+F` builder opens
+it with no chip placed -- nothing goes into the omnibox until Done. The card
+is the whole store: the fits you have kept (name, hull and module count, each
+with a `×` that forgets it), a paste box that says
+what it made of what you pasted -- `Dominix · 14 modules · 2 rigs · 3 drone
+types`, `Unknown: Foo, Bar`, `No [Hull, Name] header` -- and a Save that stays
+disabled until the parse is clean, because a fit with a line the SDE could not
+resolve would call every ship carrying that module deviating. A Matches /
+Deviates from pair sets the chip's polarity. Saving under a name the hull
+already has replaces that fit.
+
+Open the inspector on an assembled ship and a Fit section compares it: against
+the fit a positive `fit:` chip names, or else the closest stored fit for the
+hull (fewest missing plus extra), hidden entirely when the hull has no stored
+fit. It lists the modules missing, the modules fitted that the fit does not
+ask for, and the consumables the ship is short of --
+`Short: Antimatter Charge M 340 of 2,000` -- counted anywhere directly aboard.
+EFT carries no quantity for a loaded charge, so a fit's ammunition line is
+whatever its cargo section said; rounds that only ever sit in launchers are
+under-reported.
+
+To see *where* a ship deviates, filter to the deviating ships (`-fit:"…"`
+or `-is:fit`), right-click one and choose Compare deviation… -- the entry
+appears only under those filters, and measures against the fit the `-fit:`
+chip names. Compare… beside the inspector's verdict opens the same window
+from any filter. A non-modal window lays
+the ship's racks beside the fit's -- "This ship" on the left grouped by slot,
+the fit on the right read out of its stored EFT text section by section, the
+same rack at the same height on both sides -- with a headline of
+`3 missing · 1 extra` or `Matches`. A module fitted that the fit does not
+ask for is drawn in red on the ship's side, one the fit asks for that is not
+aboard in green on the fit's side, and matches in the ordinary text colour;
+a count that is off splits into a matched line and an unmatched one, so two
+right amplifiers and one missing read as exactly that. Loaded charges ride
+greyed on their module's line and an `[Empty Med slot]` in the fit stays as
+a muted placeholder. Under the racks, Drones and Cargo sections compare the
+fit's stacks the same way: the fit's `5 × Acolyte II` on the right, what the
+ship carries on the left -- drones counted across the drone bay, fighter bay
+and tubes and fleet hangar, cargo across every hold plus the charges already
+loaded -- with a stack the ship is short of drawn in red as
+`40 × Nanite Repair Paste (of 100)` opposite the fit's line in green, and a
+type aboard that the fit never lists left uncoloured after them, since
+surplus cargo is not a deviation. The headline adds `· 2 short` for the
+number of stack types short. The fit compared is the one a positive `fit:`
+chip names (a positive one first, else the negated one you are filtering
+on), else the closest, exactly as in the inspector; a second Compare
+deviation on the same ship re-runs the window already open rather than
+stacking another.
+Copy shopping list puts everything the ship lacks on the clipboard as EVE
+multibuy text, one `Name<tab>quantity` line per type: the missing modules,
+then each consumable's shortfall (the gap, not the whole want); the button
+is greyed when nothing is missing.
 
 Typed tokens become deletable chips as you commit them, each washed in its
 kind's own colour (negations always in red); rail rows, value-map segments
@@ -248,9 +398,57 @@ have the list to paste in yourself.
 
 Keyboard: `/` omnibox · `Ctrl+F` build a filter chip · `j`/`k` rows ·
 `space` select · `f` filter to the focused cell · `x` exclude it · `w` where
-else is this item · `Enter` inspector · `g` cycle group-by · `1`-`9` recall
-a saved view, `Ctrl+1`-`9` save one (filter, grouping and rail level
-together) · `?` the full key map.
+else is this item · `Enter` inspector · `g` cycle group-by · `Ctrl+S` save
+this view, `Ctrl+L` the saved-view library · `Ctrl+1`-`9` load the view in
+that slot · `?` the full key map.
+
+### Saved views
+
+A view is the whole working posture of the tab: the filter as the grammar
+above writes it, the group-by, the rail level and the rail's sort (ISK, A-Z
+or m³). Views are kept by name in a library, so "ships short of paste" is a
+question you ask once and recall every week.
+
+`save:Jita` stores the current view under that name; `load:Jita` brings it
+back, replacing whatever is in the field. The name is one token, so quote it
+when it has a space in it -- `save:"Jita ships"` -- exactly as `fit:` wants
+its quotes. Saving under a name that already exists replaces that view
+silently, keeping its slot and its place in the list: re-saving a view you
+have just refined is the common act, not a mistake. A `save:` in the same
+line as chips saves those chips, since the chips are minted first:
+`owner:Main save:Jita` is one keystroke's worth of both.
+
+`save:` and `load:` with no name open a card instead, as do the Save and Load
+pills beside Clear all (both always there -- an unfiltered table is a view
+worth loading one into) and `Ctrl+S` and `Ctrl+L` from anywhere on the tab.
+The Save card shows the filter about to be stored as chips in a well -- each
+with a `×` that leaves that chip out of the saved view without touching the
+field -- the group-by combo and the rail's own header row (level and sort)
+under the well, opening on what the tab is doing and, like the crosses,
+changing only what the save stores, a key cell to put the view on a digit
+in the same save (the card says whose digit it takes), and a name field
+prefilled with a label derived from the chips, selected, so Enter alone is
+a whole save. It says
+`Replaces "X"` before it overwrites anything and `Same filter as "X"` when
+another view already holds the line; an unfiltered table saves as
+`Unfiltered`. The Load card is the library, its editor and a preview at
+once: a list of names with their key cells (assigning a digit takes it off
+whatever view had it), and a pane showing the selected view's chips, a diff
+against the current filter (what a load drops, keeps and adds), Rename and
+Delete, and a paste box under the list that adds a shared filter line as a
+new view. `↑`/`↓` move the selection, Load view or a digit (with or
+without Ctrl) loads the view on that key, Enter does nothing, and Esc,
+Cancel or a click elsewhere changes nothing.
+
+`Ctrl+1`-`9` loads the view on that digit from anywhere on the tab. A view
+gets its digit from the key cell in either card; the shortcut never writes.
+
+A view travels as one line of grammar. Copy as text on the Save card puts the
+filter line on the clipboard, and the paste box at the bottom of the Load card
+takes one back, suggesting a name from the line itself. Only the filter
+travels this way, so an imported view leaves the group-by, the rail level
+and the rail's sort where you had them; the Load card's preview says which
+of the three a view will move.
 
 Pins and saved views persist in the database next to the assets they
 describe, so a copied database carries them along.
@@ -553,12 +751,19 @@ once first.
 | `src/evasset/abyssal.py` | Abyssal rolls: polarity, roll position and quality, value rendering, `stat:` aliases, and the per-item ESI fetch |
 | `src/evasset/networth.py` | Snapshot maths and history |
 | `src/evasset/fitting.py` | Groups a ship's contents into slots/holds, and exports ESI-fitting JSON / EFT |
+| `src/evasset/fits.py` | Stored fits: the EFT parser, the module/rig/drone/cargo classifier, the store, and the ship-against-fit diff |
 | `src/evasset/treemap.py` | Squarified treemap layout for the Treemap tab |
 | `src/evasset/stockpile.py` | Target quantities, what counts as held, shortfall maths |
+| `src/evasset/views.py` | The saved-view library: whole views by name, their digit slots, importing one from a shared filter line, and the names it suggests |
 | `src/evasset/updater.py` | Release check, download and hand-off to the swap helper |
 | `src/evasset/_version.py` | The version, rewritten from the tag at release time |
 | `src/evasset/ui/` | PySide6 widgets |
+| `src/evasset/ui/filter_card.py` | The popover shell every chip card shares: title, body, the live count footer, and the rule that only Done applies |
 | `src/evasset/ui/abyssal_card.py` | The abyssal chip's complex-search card: type picker, stat rows, Done applies and every other exit cancels |
+| `src/evasset/ui/holds_card.py` | The `holds:` chip's card: the consumables your ships hold, the bay selector and the comparison |
+| `src/evasset/ui/fit_card.py` | The `fit:` chip's card, and the stored-fit store's only editor: the list, the EFT paste box and its parse status |
+| `src/evasset/ui/save_view_card.py` | The `save:` command's card: the view about to be stored, the name to store it under and Copy as text |
+| `src/evasset/ui/load_view_card.py` | The `load:` command's card, and the view library's only editor: the list with its slot menus, inline rename, `×` and the paste box that imports a shared line |
 | `scripts/seed_demo.py` | Fills a throwaway database with plausible data, no EVE account needed |
 | `tests/data/abyssal_corpus.json` | 520 anonymised abyssal rolls across 36 module types, with the SDE rows they reference; drives the whole-estate tests and the demo seed's abyssal hangars |
 | `scripts/make_icon.py` | Draws the app icon and packs the multi-size `.ico` |
@@ -594,12 +799,19 @@ uv run pytest
 No network needed, and Qt runs offscreen where a widget is involved. They cover
 the value maths, the omnibox grammar and its SQL (quoting, negation, `val:`,
 `stat:` and `roll:` comparisons with `..` ranges, the `abyssal` chip,
-saved-view round-trips), the rail rollup and facet queries, the grouped tree
+saved-view round-trips), the saved-view library (its schema constraints, the
+upsert-by-name and slot rules, the `save:`/`load:` commands never surviving as
+chips, both cards and the whole pipeline from a typed command to a recalled
+posture), the rail rollup and facet queries, the grouped tree
 model and its roll columns, the abyssal card and its slider, the Assets tab
 wired end to end (including the abyssal inspector, badge, fetch, chip, card,
 roll-column and export paths against the research notes' live sample,
 hand-computed), the abyssal unit table and polarity rules, the SQL roll
-quality against its Python twin, the treemap layout (that
+quality against its Python twin, the ship-scoped filters against a synthetic
+estate of eleven ships and three stored fits (`tests/fit_corpus.py`) -- every
+`holds:` bay form and both polarities, `fit:`, `is:fit`, the EFT parser's edge
+cases, the fit multiset in SQL against its Python twin, the count column, the
+two cards and the inspector's fit diff -- the treemap layout (that
 it tiles exactly, without overlaps, in proportion to value), the container-tree
 resolver (including a cyclic-parent case that would otherwise hang), the
 contract outlier filter and its packaged-volume floor, the `from_id` walk-back
@@ -616,7 +828,14 @@ EVEBOOTY_DATA_DIR=/tmp/demo uv run evebooty
 
 The demo estate includes the abyssal corpus, so the inspector, the roll
 columns and the search card have a few hundred rolled modules to work with
-in Jita and Amarr.
+in Jita and Amarr. It also carries a fleet of around a hundred and eighty
+assembled ships over four stations with eight stored fits between them --
+exact matches, one-module deviations, permuted racks, empty hulls, packaged
+stacks, a Rorqual and a Thanatos loaded for the five bay forms, and three
+ships wearing an abyssal module out of the
+corpus -- so `holds:`, `fit:`, `is:fit`, the count column and the fit diff
+all have something with a right answer to work on. The seed prints a cheat
+sheet of filters to try with the row count each one leaves.
 
 ## Relationship to jEveAssets
 

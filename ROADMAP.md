@@ -87,6 +87,35 @@ recorded next to the item so nobody rediscovers it.
 
 ## Later
 
+- [ ] **`holds:` by group** - `holds:"group/Frequency Crystals"<200` instead of one exact
+  item name, for the pilot who cares that a ship has crystals rather than which. The seam
+  is left: `queries.HOLDS_TYPE_IDS` is the single subquery that turns the chip's value into
+  type ids, so this swaps it for an `sde_groups` lookup, teaches `omni.parse_holds` a
+  `group/` prefix, and gives the card's picker a group tab. Nothing else moves.
+- [ ] **ESI fittings import** - `/characters/{id}/fittings` straight into the fit store, so
+  the fits already saved in the game client do not have to be pasted. Needs
+  `esi-fittings.read_fittings.v1`, and per the scope rule that goes into `SCOPES` only after
+  a completed live login proves EVE SSO accepts it. The write side is already there:
+  `fits.save_fit` takes a parsed fit, and an ESI fitting is the same multiset in JSON.
+- [ ] **Loaded-charge quantities in the consumables line** - EFT carries no quantity for a
+  charge on a module line, so a fit's ammunition figure is whatever its cargo section said
+  and the inspector's "short" line under-reports rounds that only ever sit in launchers.
+  The ship's own `fetch_fit` rows know how many are loaded; the fit does not.
+- [ ] **A whole view as one shareable line** - `owner:Main | group:location | rail:owner`, so
+  the group-by and the rail level travel with the filter. Today the Save card's Copy as text
+  and the Load card's paste box carry the filter half alone, which is why an imported view
+  leaves both controls where they were. The seam is a `views.to_line` / `from_line` pair
+  beside `import_text`; nothing else moves.
+- [ ] **`load:` completion from the library** - the omnibox already completes chip values off
+  a query, so `_completion_fetch` over `views.list_views` would offer saved names as you type
+  the command. Worth doing once a library is big enough that its names stop being memorable.
+- [ ] **"Rest of the line is the name" for `save:`/`load:`** - `save:Jita ships` currently
+  stores a view called `Jita` and searches for `ships`, because the name is one token. When
+  the command is the last token and unquoted, taking the rest of the line would remove the
+  one thing people have to be taught about the grammar. It is not free: the rule has to stay
+  predictable in the same line as chips.
+- [ ] **Views in the tab's context menu, and recent views under the Load pill** - the library
+  is one click away from being reachable without the card at all.
 - [ ] **Tree view** - assets as an expandable location → container → item tree instead
   of a flat table. The data model already carries the parent links.
 - [ ] **Item database** - browse and search every published type in the SDE, not just
@@ -125,7 +154,10 @@ recorded next to the item so nobody rediscovers it.
 | Row inspector | Both price bases, source and quote age, where-else, single-type price refresh, manual price pinning |
 | Abyssal module stats | Rolled attributes per mutated item from ESI's public dynamic-item route, shown as position in the mutaplasmid's range with a better/worse verdict; `stat:` filters in display units; fetched on demand (Update -> Abyssal stats, the inspector button, or an opt-in sync-time switch); items stay unpriced |
 | Abyssal complex search | An `abyssal` chip (all mutated modules, or named types OR'd) with a `▾` card (opened by typing the chip, reopened from the glyph): a type dropdown with counts, per-stat rows with a two-handled slider in the stat's display units bounded by the estate, Done writes the chips, a banner fetches the unfetched; `roll:` quality filters and `..` ranges for `roll:` and `stat:`; with one type selected the table grows a column per rolled attribute plus a mean Roll column, washed by quality and sortable |
-| Saved views & pins | `Ctrl+1-9` saves filter + grouping + rail level to the database; rail pins persist per level |
+| Ship holds search | A `holds:` chip counting one consumable inside your assembled ships -- the whole ship (loaded charges and every specialised hold included) or the `cargo/`, `fuel/`, `drones/`, `fighters/` and `fleet/` bays -- with the `stat:` operators and `..` ranges; negation is the complement within the ships, so `-holds:"Nanite Repair Paste">=100` is "which of mine are short". A `▾` card picks the consumable -- what the ships actually hold, and for fuel, drones and fighters the whole SDE after it -- the bay and the comparison; a positive chip grows a sortable, exportable count column after Qty |
+| Stored fits | EFT fits pasted into the `fit:` chip's card and kept by name, with the card as the whole store's editor (list, delete, parse status, Save gated on a clean parse). `fit:"Ratting"` matches a ship's modules, rigs and subsystems against the fit's multiset with slot order ignored and loaded charges excluded; `-fit:` is the deviating ships of that hull alone, `is:fit` / `-is:fit` the same over every stored fit for a hull. The inspector gains a Fit block: missing, extra, and the consumables the ship is short of |
+| Compare deviation | Right-click an assembled ship (or Compare… beside the inspector's verdict) for a non-modal window with the ship's racks beside the stored fit's -- the fit's racks read out of its EFT text so the same rack sits at the same height on both sides -- extra modules in red on the ship's side, missing ones in green on the fit's, matches plain, off-by-N counts split into a matched and an unmatched line, loaded charges greyed on their module, `[Empty X slot]` placeholders muted, the consumables short underneath. Compares the fit a `fit:` chip names, else the closest, the inspector's own rule; greyed on a hull with no stored fit; one window per ship |
+| Saved views & pins | A named library of whole views -- filter, grouping and rail level -- in the database. `save:Name` and `load:Name` are omnibox commands, performed on Enter and never kept as chips; with no name they open the Save card (derived name, replace notice, Copy as text) and the Load card, which is the library's editor: slot menu, inline rename, `×`, and a paste box that imports a shared filter line. Save and Load pills beside Clear all, `Ctrl+S`/`Ctrl+L`, and `Ctrl+1-9` / `1-9` over the digit slots. Rail pins persist per level |
 | Manual prices | Pin a price per type; the repricer never overwrites a pin |
 | Net worth tracker | Per character and corp, snapshot per sync, six-way split, charted at both Jita buy and Jita sell |
 | Pricing | Jita 4-4 buy and sell; capitals from public contract average where the book is thin |

@@ -22,9 +22,12 @@ half-typed word.
 
 Completion looks up real values for the token being typed -- ``cat:min``
 offers the categories matching "min", each with its stack count -- through
-one grouped COUNT query per keystroke, run via AsyncQuery so a slow lookup
-can neither freeze typing nor land out of order (the generation guard and
-QRunnable lifetime rules are documented in async_query.py). ``is:`` and
+one grouped COUNT query per pause in the typing, run via AsyncQuery so a slow
+lookup can neither freeze typing nor land out of order (the generation guard
+and QRunnable lifetime rules are documented in async_query.py). The pause is
+a short Debounce (COMPLETION_DEBOUNCE_MS): fired per keystroke instead, one
+typed line launched 58 pool queries of which the guard threw 46 away, at 25k
+rows a real cost on the pool for answers nobody saw. ``is:`` and
 ``val:`` tokens get no lookup on purpose: the flag vocabulary is a handful of
 fixed words and ``val:`` is a comparison the user writes, so the database has
 nothing to offer for either. ``stat:`` sits between the two: the attribute
@@ -35,16 +38,29 @@ leaves the field open rather than minting a chip the grammar would reject.
 ``roll:`` shares that completion: it names the same attributes, only ranked
 by roll quality instead of compared by value.
 
-The ``abyssal`` chip is the one chip with a second button. Its value is a
-list of module types, which no single-line completer builds well, and the
-stat rows that go with it (one slider per rolled attribute) do not fit in a
-chip at all -- so the chip carries a glyph that asks the owning view, via
-card_requested, to open the complex-search card anchored under it. The same
-request goes out on its own when the chip is minted by typing (Enter, or the
-draft builder), one event turn later; see _request_card_later. The chip
-itself renders as "Abyssal", "Abyssal · Stasis Webifier" or "Abyssal · 3
-types" with its prefix hidden: the word is the kind, and repeating it as a
-muted ``abyssal:`` in front would say the same thing twice.
+Three chips carry a second button (CARD_CHIP_KINDS): ``abyssal``, ``holds``
+and ``fit``. Each has a value no single-line completer builds well -- a list
+of module types with a slider per rolled attribute, a consumable with a bay
+and a comparison, a stored fit pasted as EFT -- so the chip carries a glyph
+that asks the owning view, via card_requested, to open that kind's card
+anchored under it. The same request goes out on its own when one of those
+chips is minted by typing (Enter, or the draft builder), one event turn
+later, and exactly once per commit however many were minted; see
+_request_card_later. ``holds`` and ``fit`` have no value stage in the draft
+builder either: picking the kind asks for the card with an empty chip and
+inserts nothing, because the card is where the value gets built.
+
+The abyssal chip alone hides its prefix and renders as "Abyssal", "Abyssal ·
+Stasis Webifier" or "Abyssal · 3 types": the word is the kind, and repeating
+it as a muted ``abyssal:`` in front would say the same thing twice.
+
+``save:`` and ``load:`` are the field's two COMMANDS rather than kinds. They
+are stripped out of the line on Enter, performed once (save_requested,
+load_requested) and then gone: no chip is minted, nothing is left in the
+field, and omni.to_text() can never write one, so a saved view cannot
+contain a command that would fire again the moment it is recalled. They are
+tokens all the same, because the grammar is where the user already is, and
+the draft builder lists them last for the same reason.
 """
 
 from __future__ import annotations
@@ -65,10 +81,17 @@ from PySide6.QtWidgets import (
 )
 
 from .. import abyssal, omni, queries
+from ..omni import FIT_KIND, HOLDS_KIND
 from . import palette
 from .async_query import AsyncQuery
 from .debounce import Debounce
 from .flow_layout import FlowLayout
+
+# How long the typing rests before a completion lookup runs. Shorter than
+# the 220 ms the table reload waits (debounce.py) because a popup that lags
+# the typing by a quarter second reads as broken where a table does not,
+# and the same 120 ms the filter cards' live count settles on.
+COMPLETION_DEBOUNCE_MS = 120
 
 # The prefixes users type, mapped to the canonical Chip kinds omni.parse
 # produces -- and back again for rendering, so a chip displays the short form
@@ -91,8 +114,21 @@ _KIND_FOR_PREFIX = {
     "stat": omni.STAT_KIND,
     "roll": omni.ROLL_KIND,
     "abyssal": omni.ABYSSAL_KIND,
+    "holds": HOLDS_KIND,
+    "fit": FIT_KIND,
 }
 _PREFIX_FOR_KIND = {kind: prefix for prefix, kind in _KIND_FOR_PREFIX.items()}
+
+# The kinds whose chip carries a ``▾`` glyph and opens a card when typed.
+# Distinct from each card's own KINDS, which is what its Done replaces: the
+# abyssal card also owns stat: chips, and no stat: chip has a glyph.
+CARD_CHIP_KINDS = (omni.ABYSSAL_KIND, HOLDS_KIND, FIT_KIND)
+
+_CARD_TOOLTIPS = {
+    omni.ABYSSAL_KIND: "Refine: module type and stat ranges",
+    HOLDS_KIND: "Refine: consumable, bay and count",
+    FIT_KIND: "Pick or paste a stored fit",
+}
 
 # The two kinds whose value opens with an attribute name and closes with a
 # comparison the user types; they share one completion and one commit path.
@@ -116,7 +152,14 @@ _TOKEN_RE = re.compile(r"^(-?)([A-Za-z]+):(.*)$")
 # Every kind the draft-chip builder offers, in the order its list shows them.
 _ALL_KINDS = (
     *omni.LEVEL_KINDS, "item", "is", "val", omni.STAT_KIND, omni.ROLL_KIND, omni.ABYSSAL_KIND,
+    HOLDS_KIND, FIT_KIND,
 )
+
+# What the builder's kind list offers: every chip kind, then the two
+# commands. Commands come last because they are not filters -- they act on
+# the saved-view library once and leave nothing behind -- and a user
+# scanning the list for an axis to filter on should reach every axis first.
+_DRAFT_KINDS = (*_ALL_KINDS, *omni.COMMAND_KINDS)
 
 # Placeholder per chosen kind: the draft's value stage should say what kind
 # of thing it wants, because "value…" teaches nothing for the kinds whose
@@ -127,6 +170,10 @@ _VALUE_PLACEHOLDER = {
     omni.STAT_KIND: '"CPU usage"<30   web>55   duration<9',
     omni.ROLL_KIND: "web>=70   cpu=60..90",
     omni.ABYSSAL_KIND: "module type, or Enter for every abyssal item",
+    HOLDS_KIND: '"Antimatter Charge M"<500   cargo/"Nanite Repair Paste">=100',
+    FIT_KIND: "stored fit name",
+    omni.SAVE_COMMAND: "name, or Enter to open the Save card",
+    omni.LOAD_COMMAND: "saved view name, or Enter for the list",
 }
 
 # Abyssal type names the user owns, for the abyssal chip's value stage: the
@@ -323,10 +370,10 @@ class _ChipWidget(QFrame):
     said which axis this chip filters (each kind wears its own wash) and, in
     red, whether it excludes rather than includes.
 
-    The abyssal chip alone hides its prefix (its label already is the kind)
-    and grows card_btn, the glyph that opens the complex-search card; on
-    every other chip card_btn is None so callers can tell the two apart
-    without knowing the kind."""
+    A chip of a CARD_CHIP_KINDS kind grows card_btn, the glyph that opens
+    that kind's card; on every other chip card_btn is None so callers can
+    tell the two apart without knowing the kind. The abyssal chip also hides
+    its prefix, its label already being the kind."""
 
     def __init__(self, chip: omni.Chip, parent: QWidget | None = None):
         super().__init__(parent)
@@ -344,21 +391,29 @@ class _ChipWidget(QFrame):
             # A negated abyssal chip keeps only the minus: the wash already
             # went red, and "-abyssal: Abyssal" would say the kind twice.
             prefix = "-" if chip.negated else ""
-        self.prefix_label = QLabel(prefix)
+        # Parented before it is shown. setVisible(True) on a parentless
+        # widget creates a top-level window for a few milliseconds until the
+        # layout reparents it, and on Windows that stray window takes and
+        # returns focus; Qt reads the round trip as the application going
+        # inactive and closes every popup (QApplication::notify handles
+        # ApplicationDeactivate with closeAllPopups). That is what closed a
+        # card opened in the same commit as a prefixed chip, reproduced
+        # with a foreground window on 2026-09-05 and traced to this line.
+        self.prefix_label = QLabel(prefix, self)
         self.prefix_label.setStyleSheet(f"color: {palette.SECONDARY_TEXT};")
-        self.prefix_label.setVisible(bool(prefix))
         row.addWidget(self.prefix_label)
+        self.prefix_label.setVisible(bool(prefix))
 
         self.value_label = QLabel(abyssal_chip_label(chip) if is_abyssal else chip.value)
         row.addWidget(self.value_label)
 
         self.card_btn: QToolButton | None = None
-        if is_abyssal:
+        if chip.kind in CARD_CHIP_KINDS:
             self.card_btn = QToolButton()
             self.card_btn.setText("▾")
             self.card_btn.setAutoRaise(True)
             self.card_btn.setCursor(Qt.PointingHandCursor)
-            self.card_btn.setToolTip("Refine: module type and stat ranges")
+            self.card_btn.setToolTip(_CARD_TOOLTIPS[chip.kind])
             self.card_btn.setStyleSheet("QToolButton { border: none; padding: 0 2px; }")
             row.addWidget(self.card_btn)
 
@@ -459,6 +514,12 @@ class _DraftChip(QFrame):
     committed = Signal(object)  # omni.Chip
     cancelled = Signal()
     value_fragment_edited = Signal(str, str)  # kind, typed fragment
+    # A kind whose value is built in a card, not typed here: the empty chip
+    # the card should open on. Nothing is inserted until that card's Done.
+    card_requested = Signal(object)  # omni.Chip
+    # A command rather than a kind: (save | load, the name typed after it,
+    # empty for "open the card"). No chip is ever minted from it.
+    command_requested = Signal(str, str)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -471,10 +532,11 @@ class _DraftChip(QFrame):
         row = QHBoxLayout(self)
         row.setContentsMargins(8, 2, 8, 2)
         row.setSpacing(2)
-        self.prefix_label = QLabel("")
+        # Parented before any setVisible, for the reason _ChipWidget gives.
+        self.prefix_label = QLabel("", self)
         self.prefix_label.setStyleSheet(f"color: {palette.SECONDARY_TEXT};")
-        self.prefix_label.setVisible(False)
         row.addWidget(self.prefix_label)
+        self.prefix_label.setVisible(False)
         self.edit = QLineEdit()
         self.edit.setFrame(False)
         self.edit.setStyleSheet("background: transparent;")
@@ -484,12 +546,12 @@ class _DraftChip(QFrame):
 
         # Stage 1: the kinds themselves, prefix-filtered by QCompleter, so
         # "gro" narrows to group and "l" already means location.
-        self._kind_completer = QCompleter(list(_ALL_KINDS), self)
+        self._kind_completer = QCompleter(list(_DRAFT_KINDS), self)
         self._kind_completer.setCaseSensitivity(Qt.CaseInsensitive)
         self._kind_completer.setWidget(self.edit)
         # The whole point of the list is showing every axis at once; the
         # default of 7 visible items silently scrolled item/is/val away.
-        self._kind_completer.setMaxVisibleItems(len(_ALL_KINDS))
+        self._kind_completer.setMaxVisibleItems(len(_DRAFT_KINDS))
         self._kind_completer.activated[str].connect(self._kind_picked)
 
         # Stage 2: real values with stack counts, fed by the owning Omnibox
@@ -523,7 +585,10 @@ class _DraftChip(QFrame):
         self._kind_completer.complete()
 
     def _restyle(self) -> None:
-        if self.kind is None:
+        # A command keeps the dashed "draft" look for its whole life: it
+        # never becomes a chip, and chip_tint would hand an unknown kind the
+        # accent and dress `save:` as a filter that is about to be applied.
+        if self.kind is None or self.kind in omni.COMMAND_KINDS:
             self.setStyleSheet(
                 "#draftchip { border: 1px dashed palette(shadow);"
                 " border-radius: 9px; background: transparent; }"
@@ -544,6 +609,13 @@ class _DraftChip(QFrame):
         kind = _KIND_FOR_PREFIX.get(text)
         if kind is None:
             matches = [k for k in _ALL_KINDS if k.startswith(text)]
+            if not matches:
+                # The commands get a look only once no filter kind claims
+                # the prefix, so the letters that already mean something
+                # keep meaning it: "l" and "lo" are location and only "loa"
+                # is load, while "s" stays ambiguous between system and
+                # stat and "sa" is save.
+                matches = [k for k in omni.COMMAND_KINDS if k.startswith(text)]
             kind = matches[0] if len(matches) == 1 else None
         return (kind, negated) if kind else None
 
@@ -555,13 +627,33 @@ class _DraftChip(QFrame):
 
     def _enter_value_stage(self, kind: str, negated: bool) -> None:
         self.kind = kind
-        self.negated = negated
+        # A command has no polarity: "not saving this view" is not a thing
+        # to ask for, and the grammar treats `-save:x` as bare text.
+        self.negated = negated and kind not in omni.COMMAND_KINDS
+        if kind in omni.COMMAND_KINDS:
+            # The value stage of a command is the view's name, typed here
+            # or left empty for the card. No completion runs: the names
+            # live in the library, not in the assets table.
+            self.prefix_label.setText(kind + ":")
+            self.prefix_label.setVisible(True)
+            self._restyle()
+            self.edit.clear()
+            self.edit.setPlaceholderText(_VALUE_PLACEHOLDER[kind])
+            return
         if kind == omni.ABYSSAL_KIND:
             # The abyssal chip has no value stage of its own: picking the
             # kind mints the bare chip at once, and the card that opens on
             # it is where the module type gets chosen -- a second type list
             # here, in a one-line draft field, was the same choice twice.
             self._commit("")
+            return
+        if kind in (HOLDS_KIND, FIT_KIND):
+            # Neither has a bare form to mint: an empty holds chip has
+            # nothing to compare and an empty fit chip names no fit, so a
+            # chip inserted here would filter to nothing until the card
+            # came back. The empty chip is the request, not a filter.
+            self._close_popups()
+            self.card_requested.emit(omni.Chip(kind, "", negated))
             return
         prefix = _PREFIX_FOR_KIND.get(kind, kind)
         self.prefix_label.setText(("-" if negated else "") + prefix + ":")
@@ -631,6 +723,13 @@ class _DraftChip(QFrame):
             if resolved is not None:
                 self._enter_value_stage(*resolved)
             return
+        if self.kind in omni.COMMAND_KINDS:
+            # An empty name is the request for the card -- the holds and fit
+            # empty-request precedent -- so this commits either way and
+            # nothing is inserted in the field.
+            self._close_popups()
+            self.command_requested.emit(self.kind, self.edit.text().strip().strip('"'))
+            return
         if self.kind in _ATTRIBUTE_KINDS:
             self._commit_stat(self.edit.text())
             return
@@ -659,11 +758,14 @@ class _DraftChip(QFrame):
         if chips:
             self._commit(chips[0].value)
 
-    def _commit(self, value: str) -> None:
+    def _close_popups(self) -> None:
         for completer in (self._kind_completer, self._value_completer):
             popup = completer.popup()
             if popup is not None and popup.isVisible():
                 popup.hide()
+
+    def _commit(self, value: str) -> None:
+        self._close_popups()
         self.committed.emit(omni.Chip(self.kind, value, self.negated))
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
@@ -693,11 +795,18 @@ class Omnibox(QWidget):
     changed = Signal()
     chip_added = Signal(object)
     escape_pressed = Signal()
-    # The abyssal chip's glyph was clicked, or the chip was just typed:
-    # (chip, the chip widget to anchor the card under). The omnibox stays
-    # database-free about the card's contents; the view that owns the
-    # queries builds and places it.
+    # A card-kind chip's glyph was clicked, the chip was just typed, or the
+    # draft builder picked a kind that has no value stage: (chip, the widget
+    # to anchor the card under -- the chip, or the omnibox itself for a chip
+    # that does not exist yet). The omnibox stays database-free about the
+    # card's contents; the view that owns the queries builds and places it.
     card_requested = Signal(object, QWidget)
+    # A `save:`/`load:` command was committed, by token or by the draft
+    # builder: the name it carried, or "" meaning "open the card". A command
+    # is performed once and never persisted, so it leaves neither a chip nor
+    # any text behind -- see _commit_text.
+    save_requested = Signal(str)
+    load_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -744,7 +853,8 @@ class Omnibox(QWidget):
         self.edit.setFrame(False)
         self.edit.setStyleSheet("background: transparent;")
         self.edit.setPlaceholderText(
-            "Search, or filter with loc: owner: cat: is: val: abyssal roll: …"
+            "Search, or filter with loc: owner: cat: is: val: holds: fit: abyssal …"
+            " · save: load: a view"
         )
         self._row.addWidget(self.edit)
 
@@ -775,6 +885,13 @@ class Omnibox(QWidget):
         self._completer.setMaxVisibleItems(10)
         self._completer.activated[QModelIndex].connect(self._apply_completion)
         self._complete_query = AsyncQuery(self)
+        # The lookup the last keystroke asked for, run once the typing rests
+        # (see the module docstring). One clock serves the main field and
+        # the draft builder: only one of the two is ever taking keystrokes.
+        self._pending_completion = None
+        self._complete_debounce = Debounce(
+            self, self._run_pending_completion, interval=COMPLETION_DEBOUNCE_MS
+        )
 
         self.edit.textEdited.connect(self._on_text_edited)
         self.edit.textChanged.connect(lambda _text: self._sync_hint())
@@ -798,6 +915,11 @@ class Omnibox(QWidget):
             if existing == chip:
                 del self._chips[position]
                 self._row.removeWidget(widget)
+                # Hidden before the deferred delete: a widget out of its layout
+                # but still shown stays painted where it was until the event
+                # loop gets round to deleting it, and a caller that drives the
+                # loop by hand (a recording harness, a test) never gets there.
+                widget.hide()
                 widget.deleteLater()
                 self._emit_changed_now()
                 return
@@ -817,7 +939,9 @@ class Omnibox(QWidget):
         self._chips = []
         for chip in spec.chips:
             self._insert_chip(chip)
-        self.edit.setText(spec.text)
+        # Through to_text so a quoted command- or chip-shaped word stays
+        # quoted: written back bare, the next Enter would run or mint it.
+        self.edit.setText(omni.FilterSpec(text=spec.text).to_text())
         self._hide_completions()
         self._emit_changed_now()
 
@@ -844,6 +968,8 @@ class Omnibox(QWidget):
         draft.committed.connect(self._on_draft_committed)
         draft.cancelled.connect(self._close_draft)
         draft.value_fragment_edited.connect(self._complete_for_draft)
+        draft.card_requested.connect(self._on_draft_card_requested)
+        draft.command_requested.connect(self._on_draft_command)
         # Force the pending layout pass NOW: begin() opens the kind popup,
         # and QCompleter anchors it to the edit's geometry at that moment --
         # anchored to the not-yet-laid-out card, the list appeared floating
@@ -858,12 +984,39 @@ class Omnibox(QWidget):
             self._emit_changed_now()
             self._request_card_later([chip])
 
+    def _on_draft_card_requested(self, chip: omni.Chip) -> None:
+        """The draft picked a kind whose value is built in a card.
+
+        Close the draft and ask for the card, anchored on the omnibox itself
+        since there is no chip widget to hang it under yet.
+        """
+        self._close_draft()
+        self.card_requested.emit(chip, self)
+
+    def _on_draft_command(self, kind: str, name: str) -> None:
+        """The draft built a command: close the draft and perform it.
+
+        Nothing is inserted -- a command is an act, not a filter.
+        """
+        self._close_draft()
+        self._run_command(kind, name)
+
+    def _run_command(self, kind: str, name: str) -> None:
+        if kind == omni.SAVE_COMMAND:
+            self.save_requested.emit(name)
+        else:
+            self.load_requested.emit(name)
+
     def _close_draft(self) -> None:
         if self._draft is None:
             return
         draft = self._draft
         self._draft = None
+        # A lookup still on the clock would run for a popup that is gone.
+        self._pending_completion = None
+        self._complete_debounce.stop()
         self._row.removeWidget(draft)
+        draft.hide()  # see remove_chip
         draft.deleteLater()
         self.edit.setFocus(Qt.ShortcutFocusReason)
 
@@ -875,11 +1028,21 @@ class Omnibox(QWidget):
         fetch = _completion_fetch(kind, fragment.strip().strip('"'))
         if fetch is None:
             return
-        self._complete_query.run(
+        self._schedule_completion(lambda: self._complete_query.run(
             fetch,
             lambda rows: self._draft is not None and self._draft.set_value_options(rows),
             lambda _message: None,
-        )
+        ))
+
+    def _schedule_completion(self, start) -> None:
+        """Queue one lookup to start when the typing rests; a newer one replaces it."""
+        self._pending_completion = start
+        self._complete_debounce.trigger()
+
+    def _run_pending_completion(self) -> None:
+        start, self._pending_completion = self._pending_completion, None
+        if start is not None:
+            start()
 
     # ----------------------------------------------------------------- chips
     def _insert_chip(self, chip: omni.Chip) -> bool:
@@ -901,6 +1064,7 @@ class Omnibox(QWidget):
     def _remove_all_chip_widgets(self) -> None:
         for _chip, widget in self._chips:
             self._row.removeWidget(widget)
+            widget.hide()  # see remove_chip
             widget.deleteLater()
 
     def _emit_changed_now(self) -> None:
@@ -921,17 +1085,43 @@ class Omnibox(QWidget):
         self._maybe_complete(text)
 
     def _commit_text(self) -> None:
-        # Enter means "apply now": migrate token text into chips and emit
-        # immediately instead of waiting out the debounce. The open-quote
-        # guard matches the space-commit path above -- committing
-        # 'loc:"Jita IV ' mid-quote would mint a chip whose value carries an
-        # invisible trailing space and exact-matches nothing.
+        """Enter: perform any command in the line, migrate the rest into
+        chips, and emit immediately instead of waiting out the debounce.
+
+        The commands come out of the field BEFORE the tokens migrate, so
+        ``owner:Main save:Jita`` mints the owner chip first and the save
+        stores the view the user was looking at rather than the one they
+        had a moment ago. Only the first command runs and the rest are
+        consumed: a line is one intent, and a second ``save:`` on it is a
+        typo far more often than a batch API.
+
+        A command also cancels the deferred card request, which is why the
+        two share this one path: a card opening an event turn later would
+        arrive on top of the command's own card and close it as an outside
+        click, so the thing the user asked for explicitly wins.
+
+        The open-quote guard matches the space-commit path above --
+        committing 'loc:"Jita IV ' mid-quote would mint a chip whose value
+        carries an invisible trailing space and exact-matches nothing, and
+        a `save:` inside that open quote is a name in progress, not a
+        command.
+        """
         before = [chip for chip, _widget in self._chips]
         parsed: list[omni.Chip] = []
+        commands: list[tuple[str, str]] = []
         if self.edit.text().count('"') % 2 == 0:
+            remainder, commands = omni.extract_commands(self.edit.text())
+            # Only when a command was found: extract_commands re-joins the
+            # remainder on single spaces, and rewriting the field otherwise
+            # would collapse runs of spaces in text nobody asked it to touch.
+            if commands:
+                self.edit.setText(remainder)
             parsed = self._migrate_tokens()
         self._hide_completions()
         self._emit_changed_now()
+        if commands:
+            self._run_command(*commands[0])
+            return
         self._request_card_later([chip for chip in parsed if chip not in before])
 
     def set_vocabulary(self, vocabulary: dict) -> None:
@@ -952,15 +1142,23 @@ class Omnibox(QWidget):
         for chip in spec.chips:
             if self._insert_chip(chip):
                 self.chip_added.emit(chip)
-        self.edit.setText(spec.text)
+        # Through to_text so a quoted command- or chip-shaped word stays
+        # quoted: written back bare, the next Enter would run or mint it.
+        self.edit.setText(omni.FilterSpec(text=spec.text).to_text())
         return spec.chips
 
     def _request_card_later(self, minted: list[omni.Chip]) -> None:
-        """Open the card under an abyssal chip the user has just typed or
-        built, without a glyph click: typing the word and pressing Enter is
-        the natural way in, and the card is the point of the chip.
+        """Open the card under a card-kind chip the user has just typed or built.
 
-        Only the freshly minted, positive chip qualifies. A chip that arrives
+        No glyph click is needed: typing the word and pressing Enter is the
+        natural way in, and the card is the point of the chip.
+
+        One request per commit, whichever kinds were minted: three cards
+        fighting over one Enter would each close the last as an outside
+        click, and only the survivor would be seen. The first chip in the
+        text wins, which is the one the user typed first.
+
+        Only a freshly minted, positive chip qualifies. A chip that arrives
         by set_spec (a saved view, the card's own Done) or add_chip (the
         rail, a context menu) is being restored or placed, not asked for,
         and Done re-opening the card it just closed would loop; a negated
@@ -968,13 +1166,15 @@ class Omnibox(QWidget):
         not qualify either: a Qt.Popup steals the keyboard, and the user who
         typed ``abyssal `` is on the way to ``roll:web>=70``.
 
-        Deferred a turn because a Qt.Popup shown in the same event turn as
-        the chip widget is inserted into the layout is closed by Qt before
-        it is seen (pinned in tests/test_omnibox.py); the chip is looked
-        up again when the timer fires, since a cross or a set_spec may have
-        removed it in between.
+        Deferred a turn so the card anchors to a chip widget the layout has
+        placed rather than one still at its default geometry (pinned in
+        tests/test_omnibox.py); the chip is looked up again when the timer
+        fires, since a cross or a set_spec may have removed it in between.
+        The closing of same-turn popups that this deferral was once thought
+        to dodge was the prefix label's stray top-level window, fixed at its
+        source in _ChipWidget.
         """
-        chip = next((c for c in minted if c.kind == omni.ABYSSAL_KIND and not c.negated), None)
+        chip = next((c for c in minted if c.kind in CARD_CHIP_KINDS and not c.negated), None)
         if chip is None:
             return
         QTimer.singleShot(0, self, lambda: self._request_card(chip))
@@ -1021,14 +1221,15 @@ class Omnibox(QWidget):
             self._hide_completions()
             return
 
-        # One query per keystroke; AsyncQuery's generation guard drops any
-        # result a newer keystroke has already superseded. A failed lookup
-        # only costs the popup -- typing and filtering must keep working.
-        self._complete_query.run(
+        # One query once the typing rests, and AsyncQuery's generation guard
+        # drops any result a newer lookup has since superseded. A failed
+        # lookup only costs the popup -- typing and filtering must keep
+        # working.
+        self._schedule_completion(lambda: self._complete_query.run(
             fetch,
             lambda rows: self._show_completions(token, kind, negated, rows),
             lambda _message: self._hide_completions(),
-        )
+        ))
 
     def _show_completions(self, token: str, kind: str, negated: bool, rows: list) -> None:
         _head, current = _split_trailing_token(self.edit.text())
@@ -1077,6 +1278,11 @@ class Omnibox(QWidget):
         self._emit_changed_now()
 
     def _hide_completions(self) -> None:
+        # Whatever asked for the popup to go -- a commit, a token typed past
+        # its end, a lookup that failed -- also makes a lookup still on the
+        # clock pointless.
+        self._pending_completion = None
+        self._complete_debounce.stop()
         popup = self._completer.popup()
         if popup is not None and popup.isVisible():
             popup.hide()

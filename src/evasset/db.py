@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .config import DB_PATH
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 8
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -63,6 +63,15 @@ CREATE TABLE IF NOT EXISTS sde_types (
 );
 CREATE INDEX IF NOT EXISTS idx_types_name  ON sde_types(name);
 CREATE INDEX IF NOT EXISTS idx_types_group ON sde_types(group_id);
+-- Every chip comparison and the holds: type lookup are `name = ? COLLATE
+-- NOCASE`, and a BINARY index cannot serve a NOCASE equality: with only
+-- idx_types_name each one was a full scan of sde_types (SCAN ... USING
+-- COVERING INDEX idx_types_name). Measured on 2026-09-05 over a 50k-type
+-- table: 1.28 ms per lookup against 0.003 ms, and an `item:` chip's count
+-- over 24k asset rows 3.8 ms against 0.9 ms. CREATE INDEX IF NOT EXISTS
+-- runs on every init(), so an existing database gains it without a version
+-- bump; the sde_types rebuild in migrate() recreates it with its siblings.
+CREATE INDEX IF NOT EXISTS idx_types_name_nocase ON sde_types(name COLLATE NOCASE);
 
 -- ------------------------------------------------------------- dogma (SDE)
 -- Only what rendering an abyssal item's rolls needs. Attribute names and
@@ -494,19 +503,64 @@ CREATE INDEX IF NOT EXISTS idx_snap_owner ON networth_snapshots(owner_type, owne
 -- Rail pins and saved omnibox views live in the database, not settings.json:
 -- they reference data (labels, filter grammar) rather than preferences, and
 -- keeping them beside the assets means a copied database carries them along.
--- Brand new tables, so CREATE TABLE IF NOT EXISTS is the whole migration.
+-- pinned_labels is a brand new table, so CREATE TABLE IF NOT EXISTS is the
+-- whole migration for it; views replaced an older table and needs migrate().
 CREATE TABLE IF NOT EXISTS pinned_labels (
     level TEXT NOT NULL,
     label TEXT NOT NULL,
     PRIMARY KEY (level, label)
 );
 
--- state_json is the omnibox spec plus whatever view state the Assets tab
--- chooses to remember (group-by, rail level); the schema stays agnostic so
--- the UI can grow the payload without a migration.
-CREATE TABLE IF NOT EXISTS saved_views (
-    slot       INTEGER PRIMARY KEY,
-    state_json TEXT NOT NULL
+-- The saved-view library. A view is the whole working posture of the Assets
+-- tab -- the filter as omni.to_text() grammar, the group-by key, the rail
+-- level and the rail's sort -- kept by name so it can be listed, renamed,
+-- shared as one line and recalled from a slot. filter_text rather than
+-- filter: FILTER is an SQLite keyword, and a column that may need quoting is
+-- a trap. name carries NOCASE so save-by-name and the UNIQUE autoindex agree
+-- with the omnibox's own case-folding; slot is UNIQUE so two views can never
+-- claim one digit, and NULL slots do not collide (SQLite treats NULLs as
+-- distinct in UNIQUE). Replaced the anonymous saved_views(slot, state_json)
+-- table at v7; its rows were dropped, not migrated (see migrate()). rail_sort
+-- arrived at v8: the rail's sort key ("value" | "name" | "volume", as
+-- ui/rail.py spells them), or '' for a view that never recorded one.
+CREATE TABLE IF NOT EXISTS views (
+    view_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT    NOT NULL COLLATE NOCASE UNIQUE,
+    slot        INTEGER UNIQUE CHECK (slot IS NULL OR slot BETWEEN 1 AND 9),
+    filter_text TEXT    NOT NULL,
+    group_by    TEXT    NOT NULL DEFAULT '',
+    rail_level  TEXT    NOT NULL DEFAULT '',
+    rail_sort   TEXT    NOT NULL DEFAULT '',
+    created_at  TEXT    NOT NULL,
+    updated_at  TEXT    NOT NULL
+);
+
+-- ------------------------------------------------------------- stored fits
+-- EFT fits pasted into the fit chip's card. A `fit:` verdict is decided from
+-- fit_items alone; eft_text is kept so the card can show and re-copy what was
+-- pasted. Brand new tables, so CREATE TABLE IF NOT EXISTS is the whole
+-- migration (the pinned_labels precedent above). name carries NOCASE so the
+-- chip's `f.name = ?` and the UNIQUE pair are both case-insensitive; the
+-- UNIQUE autoindex (hull_type_id, name) also serves every hull lookup.
+CREATE TABLE IF NOT EXISTS fits (
+    fit_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT    NOT NULL COLLATE NOCASE,
+    hull_type_id INTEGER NOT NULL,
+    eft_text     TEXT    NOT NULL,
+    created_at   TEXT    NOT NULL,
+    UNIQUE (hull_type_id, name)
+);
+
+-- One row per (type, slot kind) carrying the multiset count: three Heat Sink
+-- IIs are one row of quantity 3. slot_kind is 'module' | 'rig' | 'subsystem'
+-- | 'drone' | 'cargo'; the first three are the verdict, the last two the
+-- consumables line. A type resolves to exactly one kind (fits.classify).
+CREATE TABLE IF NOT EXISTS fit_items (
+    fit_id    INTEGER NOT NULL REFERENCES fits(fit_id) ON DELETE CASCADE,
+    type_id   INTEGER NOT NULL,
+    slot_kind TEXT    NOT NULL,
+    quantity  INTEGER NOT NULL,
+    PRIMARY KEY (fit_id, type_id, slot_kind)
 );
 
 -- ----------------------------------------------------------- http etag cache
@@ -767,7 +821,61 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
         # or every name lookup is a full scan until the next init().
         conn.execute("CREATE INDEX IF NOT EXISTS idx_types_name  ON sde_types(name)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_types_group ON sde_types(group_id)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_types_name_nocase"
+            " ON sde_types(name COLLATE NOCASE)"
+        )
         done.append("sde_types: added is_dynamic_type (table rebuilt)")
+
+    # v5 -> v6: fits and fit_items, the store behind the `fit:` chip. Both
+    # tables are brand new, so the CREATE TABLE IF NOT EXISTS statements in
+    # SCHEMA are the whole migration and nothing is rebuilt or copied -- the
+    # pinned_labels/saved_views precedent. Recorded here rather than left
+    # silent because this function is where a reader looks to find out what
+    # each version bump did, and "nothing to do" is an answer worth having.
+
+    # v6 -> v7: the anonymous saved_views slots became the named views
+    # library. Nothing is copied: a slot row is a filter with no name, and
+    # inventing "Slot 3" names for stale filters nobody asked to keep is
+    # worse than an empty library (settled with the user, 2026-09-05).
+    # Keyed on the legacy table existing, per the rule above.
+    if _table_exists(conn, "saved_views"):
+        conn.execute("DROP TABLE saved_views")
+        done.append("saved_views: dropped (replaced by the views library)")
+
+    # v7 -> v8: views gained rail_sort, so a view remembers the rail's order
+    # along with its level. Keyed on the new column being absent, the same
+    # deliberate exception the sde_types.is_dynamic_type block makes and for
+    # the same reason: nothing is removed, so there is no legacy column to
+    # key on and no half-migrated shape to tell apart -- and SCHEMA has just
+    # created the v8 table on a fresh database, so this cannot fire there. A
+    # rebuild rather than ADD COLUMN keeps the table byte-for-byte in
+    # SCHEMA's shape; the rows are copied whole, so every name, slot and
+    # timestamp survives and the new column honestly reads '' ("not
+    # recorded", which _apply_view treats as "leave the rail's sort alone").
+    if _table_exists(conn, "views") and "rail_sort" not in columns(conn, "views"):
+        _rebuild_table(
+            conn,
+            "views",
+            """CREATE TABLE views (
+                   view_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                   name        TEXT    NOT NULL COLLATE NOCASE UNIQUE,
+                   slot        INTEGER UNIQUE CHECK (slot IS NULL OR slot BETWEEN 1 AND 9),
+                   filter_text TEXT    NOT NULL,
+                   group_by    TEXT    NOT NULL DEFAULT '',
+                   rail_level  TEXT    NOT NULL DEFAULT '',
+                   rail_sort   TEXT    NOT NULL DEFAULT '',
+                   created_at  TEXT    NOT NULL,
+                   updated_at  TEXT    NOT NULL
+               )""",
+            """INSERT INTO views
+                   (view_id, name, slot, filter_text, group_by, rail_level,
+                    created_at, updated_at)
+               SELECT view_id, name, slot, filter_text, group_by, rail_level,
+                      created_at, updated_at
+               FROM {old}""",
+        )
+        done.append("views: added rail_sort (table rebuilt)")
 
     if done:
         set_meta(conn, "migrated_at", str(SCHEMA_VERSION))
